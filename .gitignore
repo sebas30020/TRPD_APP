@@ -1,0 +1,11 @@
+# Datos de osciloscopio (grandes, no versionar)
+*.h5
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs / temporales
+*.log
