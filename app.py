@@ -20,7 +20,11 @@ from scipy.signal import find_peaks, butter, sosfiltfilt, welch
 from dash import Dash, dcc, html, Input, Output, State, no_update, ctx
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
-MEDICIONES = os.path.join(AQUI, "Mediciones")
+# Carpeta de datos: vive fuera del repo, en la carpeta hermana "mediciones/Mediciones"
+# (../mediciones/Mediciones respecto a este archivo). Antes se accedía via un
+# symlink "Mediciones" dentro del repo, pero git en Windows no lo versiona
+# correctamente (core.symlinks=false), así que se referencia por ruta directa.
+MEDICIONES = os.path.abspath(os.path.join(AQUI, os.pardir, "mediciones", "Mediciones"))
 CANALES = ["ch1", "ch2", "ch3", "ch4"]
 TRIGGERS = ["ch2", "ch3", "ch4"]  # canales seleccionables como trigger
 
@@ -39,14 +43,22 @@ def canales_presentes(carpeta):
 
 
 def listar_mediciones():
-    """Subcarpetas de ./Mediciones que tengan al menos un ch1..ch4.h5."""
+    """Carpetas con al menos un ch1..ch4.h5, directas en MEDICIONES o un nivel
+    más abajo (carpetas de cadencia, p. ej. "cada_30s/7"; ver cadencia.py)."""
     if not os.path.isdir(MEDICIONES):
         return []
     carpetas = []
     for nombre in sorted(os.listdir(MEDICIONES)):
         ruta = os.path.join(MEDICIONES, nombre)
-        if os.path.isdir(ruta) and canales_presentes(nombre):
+        if not os.path.isdir(ruta):
+            continue
+        if canales_presentes(nombre):
             carpetas.append(nombre)
+            continue
+        for sub in sorted(os.listdir(ruta)):
+            rel = f"{nombre}/{sub}"
+            if os.path.isdir(os.path.join(ruta, sub)) and canales_presentes(rel):
+                carpetas.append(rel)
     return carpetas
 
 

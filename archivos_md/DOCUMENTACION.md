@@ -9,7 +9,20 @@ añada o cambie una funcionalidad.
 
 ## 1. Datos
 
-- Carpeta `./Mediciones/<experimento>/` con archivos `ch1.h5 … ch4.h5`.
+- Carpeta de datos: `../mediciones/Mediciones/` (hermana del repo, fuera de
+  `TRPD_APP`). Las mediciones están clasificadas por cadencia de adquisición
+  (ver `cadencia.py`, sección 12) en `Mediciones/<clase>/<experimento>/`, con
+  `<clase>` ∈ `cada_1min`, `cada_30s`, `otros`, y archivos `ch1.h5 … ch4.h5`.
+  `listar_mediciones` busca carpetas con `ch*.h5` directamente en
+  `Mediciones/` o un nivel más abajo; el identificador de medición es la ruta
+  relativa (p. ej. `cada_30s/7`).
+- Cadencia: cada segmento tiene el atributo `SegmentedTimeTag` [s], instante
+  de la descarga relativo al segmento 1 (idéntico en los 4 canales).
+  `MEDICIONES` (en `app.py` y `generate_metadata.py`) se calcula por **ruta
+  directa** desde `AQUI` (`os.path.join(AQUI, os.pardir, "mediciones",
+  "Mediciones")`). Antes se accedía vía un symlink `Mediciones` dentro del
+  repo; se retiró porque git en Windows no lo versiona correctamente
+  (`core.symlinks=false`).
   Cada archivo es un canal con varios **segmentos** (~1.000.003 muestras `int16`).
 - Conversión desde el HDF5: `v = raw * YInc + YOrg`, `t = XOrg + i * XInc`.
 - Frecuencia de muestreo típica: **Fs = 5 GSa/s** (`XInc = 2e-10 s`).
@@ -192,3 +205,55 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 - `t50` inexistente (impulso de cola larga que no baja al 50 % en la ventana).
 - Peaks sin cruces de subida (baseline alto) → sin `t0_lin`/`tmax_lin`.
 - Antes de pulsar el botón, las cruces son de detección en vivo (no clicables).
+
+---
+
+## 12. Scripts auxiliares (fuera de la app)
+
+- **`preprocesar.py`.** Filtro paso-alto Butterworth de fase cero (`sosfiltfilt`,
+  **5 MHz**, orden 4) aplicado a cada segmento de `ch2.h5` (señal completa, no
+  ventaneada). Genera un archivo extra `ch2_hp5MHz.h5` con la **misma
+  estructura** de grupos/datasets que el original (mismos nombres), pero con
+  los datos ya en **voltios** (`YInc=1`, `YOrg=0`) para que `app.py` lo cargue
+  sin cambios. Se ejecuta manualmente y una sola vez por medición
+  (`python3 preprocesar.py`); **no** se invoca desde la app.
+
+- **`generate_metadata.py`.** Genera una **plantilla YAML** de metadatos por
+  medición: `Mediciones/<experimento>/metadata.yaml` (usa `PyYAML`, ver
+  `requirements.txt`). No sobrescribe un `metadata.yaml` existente salvo que
+  se pase `--forzar`. Ejecutar: `python3 generate_metadata.py <experimento>
+  [--forzar]`. Esquema generado (valores en blanco/`null`, a completar a mano
+  con los datos del experimento — condiciones ambientales, tensiones
+  aplicadas y descripción de la probeta):
+
+  ```yaml
+  medicion:
+    fecha_hora: null                     # fecha y hora del experimento
+    humedad_relativa_pct: null
+    temperatura_c: null
+    tension_kv_ac_sec: null              # tensión kV AC secundario
+    tension_v_ac_prim: null              # tensión V AC primario
+    voltaje_dc_kv: null
+    probeta:
+      descripcion: ''
+      nro_vacuolas: null
+      nro_capas_total: null
+      vacuolas: []                       # lista de {diametro_mm, altura_mm, posicion}
+      distancias_entre_vacuolas_mm: []   # N-1 distancias
+      fotos: []                          # rutas/nombres de archivo
+  ```
+
+- **`cadencia.py`.** Diagnostica y clasifica la cadencia de adquisición de cada
+  medición a partir del atributo `SegmentedTimeTag` [s] de cada segmento
+  (`Waveforms/Channel N/Channel N SegKData`, relativo al segmento 1; idéntico
+  en los 4 canales). Calcula Δt entre descargas consecutivas y clasifica por
+  la **mediana**: a ±2 s de 60 s → `cada_1min`; a ±2 s de 30 s → `cada_30s`;
+  si no → `otros`. Un Δt que se aparta más de 2 s del nominal de su clase se
+  marca como **anómalo** en el reporte (no cambia la clasificación).
+  - `python3 cadencia.py` → simulacro: genera `archivos_md/reporte_cadencia.md`
+    (tabla resumen, conteo por clase, anomalías, Δt por medición) y
+    `cadencia_segmentos.csv` (`medicion, segmento, time_tag_s, dt_s, anomalo,
+    clase`), e imprime qué movería sin mover nada.
+  - `python3 cadencia.py --mover` → además mueve cada medición a
+    `Mediciones/<clase>/<medición>/`. Es idempotente: si ya está en su
+    carpeta no la toca, y si el destino ya existe no sobrescribe.
