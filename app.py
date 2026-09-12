@@ -15,6 +15,7 @@ import os
 import h5py
 import numpy as np
 import plotly.graph_objects as go
+import scipy.fft as sfft
 from plotly.subplots import make_subplots
 from scipy.signal import find_peaks, butter, sosfiltfilt, welch
 from dash import Dash, dcc, html, Input, Output, State, no_update, ctx
@@ -34,6 +35,13 @@ T_MIN, T_MAX = -5, 30.0
 # Impulso (CH1): filtro pasa-bajos aplicado a la señal de impulso promediada.
 IMP_FCORTE = 20e6   # Hz, frecuencia de corte del pasa-bajos
 IMP_ORDEN = 4       # orden del Butterworth (fase cero, sosfiltfilt)
+
+# Transformada S: nº de frecuencias (bins lineales entre 0 y f máx) y de
+# columnas de tiempo con que se dibuja cada mapa de calor.
+ST_NFREQ = 250
+ST_NT_VENTANA = 500     # ventana de 1 µs (captura)
+ST_NT_SEGMENTO = 1000   # segmento completo (-5..30 µs)
+ST_FMAX_MHZ = 2500      # por defecto, Nyquist a Fs = 5 GSa/s
 
 
 def canales_presentes(carpeta):
@@ -400,6 +408,112 @@ def figura_fft(cap, sel, canal):
     return fig
 
 
+def transformada_s(x, t_us, dt_us, fmax_mhz=ST_FMAX_MHZ, nfreq=ST_NFREQ,
+                    n_t=ST_NT_VENTANA, bloque=16):
+    """Magnitud de la transformada S (Stockwell) de x, algoritmo rápido vía FFT
+    (Stockwell 1996): S_j[n] = IFFT{ X[(m+j) mod N] · exp(-2π²m²/j²) }[n], con
+    m = índice de frecuencia centrado (-N/2..N/2-1) y j = índice de frecuencia
+    de la fila (bin lineal, f_j = j/(N·dt_us) MHz). La fila f=0 es |media(x)|.
+    Un tono de amplitud A da |S| ≈ A/2 en su frecuencia (mismas unidades que x,
+    p.ej. mV). f máx se recorta a Nyquist (N//2). La gaussiana solo se evalúa
+    en su soporte (|m| <= 1.2·j) para evitar aritmética de subnormales, que
+    ralentiza mucho el cálculo cuando f máx es baja.
+
+    Devuelve (t_dec, f_mhz, A): eje de tiempo decimado a ~n_t puntos (recorte
+    de t_us), eje de frecuencia [MHz] (nfreq+1 filas) y la matriz de magnitud.
+    """
+    N = x.size
+    X = sfft.fft(x, workers=-1)
+    m = sfft.fftfreq(N) * N
+    jmax = max(1, min(N // 2, int(round(fmax_mhz * 1e6 * N * dt_us * 1e-6))))
+    js = np.unique(np.linspace(1, jmax, min(nfreq, jmax)).round().astype(int))
+    paso = max(1, N // n_t)
+    t_dec = t_us[::paso]
+    A = np.empty((js.size + 1, t_dec.size))
+    A[0, :] = abs(float(x.mean()))
+    for a in range(0, js.size, bloque):
+        jb = js[a:a + bloque]
+        idx = (np.arange(N)[None, :] + jb[:, None]) % N
+        soporte = np.abs(m)[None, :] <= 1.2 * jb[:, None]
+        G = np.where(soporte, np.exp(-2 * np.pi ** 2 * m[None, :] ** 2 / jb[:, None] ** 2), 0.0)
+        A[a + 1:a + 1 + jb.size] = np.abs(sfft.ifft(X[idx] * G, axis=1, workers=-1))[:, ::paso]
+    f_mhz = np.concatenate(([0.0], js / (N * dt_us)))
+    return t_dec, f_mhz, A
+
+
+def figura_st_ventana(cap, sel, canal, fmax_mhz=ST_FMAX_MHZ):
+    """Transformada S (magnitud, mV) de la ventana de 1 µs alrededor del peak,
+    promediando SOLO las ventanas de sel (lista), igual que figura_fft."""
+    if not sel:
+        return _fig_sin_seleccion(canal)
+    W, t_rel = cap["W"], cap["t_rel"]
+    filas = list(sel)
+    n = len(filas)
+    acc = t_dec = f_mhz = None
+    for i in filas:
+        t_dec, f_mhz, A = transformada_s(W[i], t_rel, cap["dt_us"], fmax_mhz)
+        acc = A if acc is None else acc + A
+    fig = go.Figure()
+    fig.add_trace(go.Heatmap(
+        x=t_dec, y=f_mhz, z=acc / n, colorscale="Viridis",
+        colorbar=dict(title="mV"),
+        hovertemplate="t=%{x:.4f} µs<br>f=%{y:.1f} MHz<br>%{z:.3g} mV<extra></extra>",
+    ))
+    fig.add_vline(x=0, line=dict(color="white", width=1, dash="dash"),
+                  annotation_text="peak", annotation_position="top")
+    fig.update_layout(
+        title=f"Transformada S {canal.upper()} — {n} señales (promedio |S|)",
+        xaxis_title="Tiempo relativo al peak [µs]", yaxis_title="Frecuencia [MHz]",
+        height=430, margin=dict(t=50, r=20),
+        plot_bgcolor="white", paper_bgcolor="white",
+    )
+    return fig
+
+
+_ST_SEG_CACHE = {}
+
+
+def st_segmento(carpeta, seg, canal, fmax_mhz=ST_FMAX_MHZ):
+    """Transformada S del segmento completo (-5..30 µs) de un canal, con su
+    señal cruda (cargar_segmento; también para CH1). Cacheada por sesión."""
+    key = (carpeta, seg, canal, fmax_mhz)
+    if key not in _ST_SEG_CACHE:
+        t, v = cargar_segmento(carpeta, canal, seg)
+        dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6
+        _ST_SEG_CACHE[key] = transformada_s(v, t, dt_us, fmax_mhz, ST_NFREQ, ST_NT_SEGMENTO)
+    return _ST_SEG_CACHE[key]
+
+
+def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ):
+    """Transformada S del segmento completo, una fila por canal (ch1..ch4),
+    eje temporal compartido con la fila de figura()."""
+    canales = canales_presentes(carpeta)
+    n = len(canales)
+    fig = make_subplots(
+        rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        subplot_titles=canales,
+    )
+    for i, c in enumerate(canales, start=1):
+        t_dec, f_mhz, A = st_segmento(carpeta, seg, c, fmax_mhz)
+        fig.add_trace(
+            go.Heatmap(
+                x=t_dec, y=f_mhz, z=A, colorscale="Viridis",
+                colorbar=dict(title="mV", len=0.85 / n, y=1 - (i - 0.5) / n, thickness=14),
+                hovertemplate="t=%{x:.4f} µs<br>f=%{y:.1f} MHz<br>%{z:.3g} mV<extra>" + c + "</extra>",
+            ),
+            row=i, col=1,
+        )
+        fig.update_yaxes(title_text="MHz", row=i, col=1)
+    fig.update_xaxes(title_text="Tiempo [µs]", row=n, col=1)
+    fig.update_xaxes(range=[T_MIN, T_MAX])
+    fig.update_layout(
+        height=850, margin=dict(t=70, r=20),
+        title=f"{carpeta} — Segmento {seg} — Transformada S",
+        plot_bgcolor="white", paper_bgcolor="white",
+    )
+    return fig
+
+
 def _vpp_energia(cap):
     """Vpp (mV) y Energía (mV²·µs) por señal capturada."""
     W = cap["W"]
@@ -689,16 +803,28 @@ app.layout = html.Div(
                           style={"width": "80px"}),
                 html.Button("Calcular peaks", id="btn", n_clicks=0),
                 html.Span(id="umbral_txt"),
+                html.Label("f máx ST (MHz):"),
+                dcc.Input(id="st_fmax", type="number", value=ST_FMAX_MHZ, min=1,
+                          step="any", debounce=True, style={"width": "90px"}),
             ],
         ),
         html.Div(
             className="row",
             children=[
                 html.Div(className="col card", children=[
-                    dcc.Graph(
-                        id="grafico",
-                        config={"edits": {"shapePosition": True}, "displaylogo": False},
-                    ),
+                    dcc.Tabs(id="tabs_principal", value="senales", children=[
+                        dcc.Tab(label="Señales", value="senales", **_TAB),
+                        dcc.Tab(label="Transformada S", value="st", **_TAB),
+                    ]),
+                    html.Div(id="panel_senales", children=[
+                        dcc.Graph(
+                            id="grafico",
+                            config={"edits": {"shapePosition": True}, "displaylogo": False},
+                        ),
+                    ]),
+                    html.Div(id="panel_st_segmento", hidden=True, children=[
+                        dcc.Loading(dcc.Graph(id="grafico_st_segmento")),
+                    ]),
                 ]),
                 html.Div(
                     className="col",
@@ -727,7 +853,14 @@ app.layout = html.Div(
             className="row",
             children=[
                 html.Div(className="col card", children=[dcc.Graph(id="grafico_ventanas")]),
-                html.Div(className="col card", children=[dcc.Graph(id="grafico_fft")]),
+                html.Div(className="col card", children=[
+                    dcc.Tabs(id="tabs_espectro", value="fft", children=[
+                        dcc.Tab(label="FFT", value="fft",
+                                children=[dcc.Graph(id="grafico_fft")], **_TAB),
+                        dcc.Tab(label="Transformada S", value="st",
+                                children=[dcc.Loading(dcc.Graph(id="grafico_st_ventana"))], **_TAB),
+                    ]),
+                ]),
             ],
         ),
     ],
@@ -770,6 +903,33 @@ def actualizar(carpeta, seg, canal, p, dist_us, tmin, umbral):
     if p and p["canal"] == canal and p["carpeta"] == carpeta:
         cap = capturar(carpeta, canal, p["umbral"], p["dist"], p["tmin"])
     return figura(carpeta, int(seg), canal, umbral, dist_us, tmin, cap=cap)
+
+
+@app.callback(
+    Output("panel_senales", "hidden"),
+    Output("panel_st_segmento", "hidden"),
+    Input("tabs_principal", "value"),
+)
+def alternar_panel_principal(tab):
+    """Alterna Señales/Transformada S sin desmontar `grafico`: así se conserva
+    la posición de la línea de umbral arrastrada, el zoom y los clics en
+    cruces al volver a la pestaña de Señales."""
+    return tab != "senales", tab == "senales"
+
+
+@app.callback(
+    Output("grafico_st_segmento", "figure"),
+    Input("tabs_principal", "value"),
+    Input("carpeta", "value"),
+    Input("segmento", "value"),
+    Input("st_fmax", "value"),
+)
+def actualizar_st_segmento(tab, carpeta, seg, fmax):
+    """Transformada S del segmento completo (4 filas ch1..ch4). Solo se
+    calcula si la pestaña está visible."""
+    if tab != "st" or not carpeta or not seg:
+        return no_update
+    return figura_st_segmento(carpeta, int(seg), fmax or ST_FMAX_MHZ)
 
 
 @app.callback(
@@ -902,6 +1062,22 @@ def actualizar_temporal(sel, p):
     cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
     sel = sel or []
     return figura_ventanas(cap, sel, p["canal"]), figura_fft(cap, sel, p["canal"])
+
+
+@app.callback(
+    Output("grafico_st_ventana", "figure"),
+    Input("seleccion", "data"),
+    Input("tabs_espectro", "value"),
+    Input("st_fmax", "value"),
+    State("captura_params", "data"),
+)
+def actualizar_st_ventana(sel, tab, fmax, p):
+    """Transformada S de la ventana de 1 µs (solo si su pestaña está visible),
+    promediando SOLO las señales seleccionadas (store `seleccion`)."""
+    if tab != "st" or not p:
+        return no_update
+    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+    return figura_st_ventana(cap, sel or [], p["canal"], fmax or ST_FMAX_MHZ)
 
 
 @app.callback(

@@ -2,7 +2,7 @@
 Genera una plantilla YAML de metadatos para una medición.
 
 Crea `Mediciones/<experimento>/metadata.yaml` con el esquema descrito en
-archivos_md/DOCUMENTACION.md (sección 12): condiciones ambientales, tensiones aplicadas y
+archivos_md/DOCUMENTACION.md (sección 13): condiciones ambientales, tensiones aplicadas y
 descripción de la probeta (vacuolas, distancias entre ellas, fotos). No
 sobrescribe un metadata.yaml existente salvo que se pase --forzar.
 

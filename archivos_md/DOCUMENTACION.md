@@ -11,7 +11,7 @@ añada o cambie una funcionalidad.
 
 - Carpeta de datos: `../mediciones/Mediciones/` (hermana del repo, fuera de
   `TRPD_APP`). Las mediciones están clasificadas por cadencia de adquisición
-  (ver `cadencia.py`, sección 12) en `Mediciones/<clase>/<experimento>/`, con
+  (ver `cadencia.py`, sección 13) en `Mediciones/<clase>/<experimento>/`, con
   `<clase>` ∈ `cada_1min`, `cada_30s`, `otros`, y archivos `ch1.h5 … ch4.h5`.
   `listar_mediciones` busca carpetas con `ch*.h5` directamente en
   `Mediciones/` o un nivel más abajo; el identificador de medición es la ruta
@@ -136,8 +136,9 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
     `customdata` **no llega** al `clickData`. Usar `.tolist()`.
 - **R-S3 · Resaltado.** El punto seleccionado se marca en **amarillo** (`#FFD400`)
   en **ambos** scatters, venga la selección del scatter que sea o de las cruces.
-- **R-S4 · Sin selección.** El gráfico temporal y la FFT quedan **vacíos con un
-  aviso** (nunca "todas las señales"). Una **nueva captura limpia** la selección.
+- **R-S4 · Sin selección.** El gráfico temporal, la FFT y la Transformada S de
+  la ventana quedan **vacíos con un aviso** (nunca "todas las señales"). Una
+  **nueva captura limpia** la selección.
 - **R-S5 · Anti-bucle.** Redibujar los scatters resetea su `selectedData`/
   `clickData` a `None`; `set_seleccion` devuelve `no_update` ante `None` para no
   borrar la selección. `uirevision` (estable por captura) preserva zoom/caja.
@@ -159,7 +160,35 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 
 ---
 
-## 8. Reglas de rendimiento
+## 8. Transformada S (Stockwell)
+
+Algoritmo rápido vía FFT (`transformada_s`): para cada frecuencia (bin lineal
+`j`, `f_j = j/(N·dt_us)` MHz), `S_j = IFFT{ X[(m+j) mod N] · exp(-2π²m²/j²) }`,
+con `X = FFT(x)` y `m` el índice de frecuencia centrado. La fila `f=0` es
+`|media(x)|`. La magnitud `|S|` queda en las mismas unidades que la señal
+(mV); un tono de amplitud `A` da `|S| ≈ A/2` en su frecuencia (verificado).
+`f máx` (control `st_fmax`, por defecto `ST_FMAX_MHZ = 2500` MHz = Nyquist a
+Fs = 5 GSa/s) se recorta siempre a Nyquist (`N//2`). Por rendimiento, las
+frecuencias se procesan en bloques con `scipy.fft` multihilo
+(`workers=-1`) y la gaussiana solo se evalúa en su soporte (`|m| ≤ 1.2·j`)
+para evitar aritmética de subnormales, que ralentiza el cálculo con `f máx`
+bajo.
+
+Dos escalas, compartiendo la implementación:
+- **Ventana de 1 µs** (`figura_st_ventana`): la **misma ventana que la FFT**
+  (`cap["W"]`, la captura de `capturar`, R-C1). Con varias señales
+  seleccionadas se **promedia `|S|`** (igual que la FFT). Vive en la tarjeta
+  de la FFT, alternando por pestañas "FFT" | "Transformada S"
+  (`tabs_espectro`), igual que "Peaks" | "Vpp vs Energía".
+- **Segmento completo** (`figura_st_segmento`/`st_segmento`, `_ST_SEG_CACHE`):
+  una fila por canal presente (ch1..ch4), con la **señal cruda del segmento**
+  (`cargar_segmento`) — también para CH1 (no el impulso promedio filtrado de
+  la fila de CH1 en `figura`). Vive en la tarjeta del gráfico principal,
+  alternando por pestañas "Señales" | "Transformada S" (`tabs_principal`).
+
+---
+
+## 9. Reglas de rendimiento
 
 - **R-PF1.** Trazas grandes en **WebGL** (`go.Scattergl`).
 - **R-PF2.** No mezclar capas SVG con WebGL en gráficos pesados. Excepción única:
@@ -169,11 +198,18 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
   ventanas a ~300 puntos); los cálculos van a resolución completa.
 - **R-PF4.** `uirevision` para conservar estado de UI y evitar re-render completo.
 - **R-PF5.** Caches de sesión: `_META_CACHE`, `_IMPULSO_CACHE`,
-  `_IMPULSO_FILT_CACHE`, `_CAPTURA_CACHE` (claves con `umbral` redondeado).
+  `_IMPULSO_FILT_CACHE`, `_CAPTURA_CACHE` (claves con `umbral` redondeado),
+  `_ST_SEG_CACHE` (clave con `carpeta, segmento, canal, f máx`).
+- **R-PF6.** Las Transformadas S solo se calculan si su pestaña está visible
+  (`tabs_principal`/`tabs_espectro` como `Input`; `no_update` si no coincide):
+  cambiar de segmento/medición mientras se ve "Señales" no dispara el cálculo
+  del segmento completo. El panel "Señales" **no se desmonta** al cambiar de
+  pestaña (se oculta con `hidden`), así se conserva la línea de umbral
+  arrastrada, el zoom y el estado de clic de `grafico`.
 
 ---
 
-## 9. Mapa de callbacks
+## 10. Mapa de callbacks
 
 | Callback | Entrada(s) | Salida(s) |
 |---|---|---|
@@ -186,20 +222,27 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 | `set_seleccion` | click/box de 2 scatters + `grafico.clickData` + `captura_params` | `seleccion.data` |
 | `actualizar_scatter` | `captura_params, seleccion` | scatter Peaks + Vpp/Energía |
 | `actualizar_temporal` | `seleccion` (+State `captura_params`) | ventanas + FFT |
+| `alternar_panel_principal` | `tabs_principal` | `hidden` de los paneles Señales/Transformada S |
+| `actualizar_st_segmento` | `tabs_principal, carpeta, segmento, st_fmax` | `grafico_st_segmento.figure` |
+| `actualizar_st_ventana` | `seleccion, tabs_espectro, st_fmax` (+State `captura_params`) | `grafico_st_ventana.figure` |
 | `seleccionar_segmento` | `grafico_peaks.clickData` | `segmento.value` |
 
 ---
 
-## 10. Layout
+## 11. Layout
 
-- Fila de controles: medición, segmento, trigger, distancia, t mín, botón, umbral.
-- Fila central (2 columnas): gráfico principal (4 filas ch1..ch4) | pestañas
-  *Peaks por segmento / Densidad* y pestañas *Peaks / Vpp vs Energía*.
-- Última fila (2 columnas, sin pestañas): **Ventanas** | **FFT**.
+- Fila de controles: medición, segmento, trigger, distancia, t mín, botón,
+  umbral, **f máx ST (MHz)**.
+- Fila central (2 columnas):
+  - Gráfico principal con pestañas **Señales** (4 filas ch1..ch4) /
+    **Transformada S** (4 mapas de calor, mismo eje de tiempo) — `tabs_principal`.
+  - Pestañas *Peaks por segmento / Densidad* y pestañas *Peaks / Vpp vs Energía*.
+- Última fila (2 columnas): **Ventanas** | pestañas **FFT** / **Transformada S**
+  (`tabs_espectro`), esta última de la ventana de 1 µs.
 
 ---
 
-## 11. Casos borde conocidos
+## 12. Casos borde conocidos
 
 - Experimento sin CH1 → fila de CH1 muestra "no disponible".
 - `t50` inexistente (impulso de cola larga que no baja al 50 % en la ventana).
@@ -208,7 +251,7 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 
 ---
 
-## 12. Scripts auxiliares (fuera de la app)
+## 13. Scripts auxiliares (fuera de la app)
 
 - **`preprocesar.py`.** Filtro paso-alto Butterworth de fase cero (`sosfiltfilt`,
   **5 MHz**, orden 4) aplicado a cada segmento de `ch2.h5` (señal completa, no
