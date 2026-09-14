@@ -9,3 +9,6 @@ venv/
 
 # Logs / temporales
 *.log
+
+# Planes temporales / notas internas
+archivos_md/PLAN_*.md
