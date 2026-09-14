@@ -11,6 +11,7 @@ maximo (|pico| = 1). Selector de segmento. Render con WebGL (Scattergl).
 Ejecutar:  python3 app.py   ->  abrir http://127.0.0.1:8050
 """
 import os
+import re
 
 import h5py
 import numpy as np
@@ -18,7 +19,7 @@ import plotly.graph_objects as go
 import scipy.fft as sfft
 from plotly.subplots import make_subplots
 from scipy.signal import find_peaks, butter, sosfiltfilt, welch
-from dash import Dash, dcc, html, Input, Output, State, no_update, ctx
+from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, ctx
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 # Carpeta de datos: vive fuera del repo, en la carpeta hermana "mediciones/Mediciones"
@@ -44,34 +45,98 @@ ST_NT_SEGMENTO = 1000   # segmento completo (-5..30 µs)
 ST_FMAX_MHZ = 2500      # por defecto, Nyquist a Fs = 5 GSa/s
 
 
-def canales_presentes(carpeta):
-    """Canales (ch1..ch4) cuyo archivo existe en la carpeta, en orden."""
-    ruta = os.path.join(MEDICIONES, carpeta)
-    return [c for c in CANALES if os.path.exists(os.path.join(ruta, f"{c}.h5"))]
+_CHAN_RE = re.compile(r"^(.*?)(ch[1-4])(.*?)\.h5$", re.IGNORECASE)
 
 
-def listar_mediciones():
-    """Carpetas con al menos un ch1..ch4.h5, directas en MEDICIONES o un nivel
-    más abajo (carpetas de cadencia, p. ej. "cada_30s/7"; ver cadencia.py)."""
-    if not os.path.isdir(MEDICIONES):
-        return []
-    carpetas = []
-    for nombre in sorted(os.listdir(MEDICIONES)):
-        ruta = os.path.join(MEDICIONES, nombre)
-        if not os.path.isdir(ruta):
-            continue
-        if canales_presentes(nombre):
-            carpetas.append(nombre)
-            continue
-        for sub in sorted(os.listdir(ruta)):
-            rel = f"{nombre}/{sub}"
-            if os.path.isdir(os.path.join(ruta, sub)) and canales_presentes(rel):
-                carpetas.append(rel)
-    return carpetas
+def _orden_natural(s):
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", s)]
 
 
 def _ruta(carpeta, canal):
-    return os.path.join(MEDICIONES, carpeta, f"{canal}.h5")
+    canal = canal.lower()
+    if os.path.isabs(carpeta):
+        if os.path.isfile(carpeta):
+            d, fname = os.path.split(carpeta)
+            m = _CHAN_RE.match(fname)
+            if m:
+                pref, suff = m.group(1), m.group(3)
+                p = os.path.join(d, f"{pref}{canal}{suff}.h5")
+                if os.path.isfile(p):
+                    return p
+            return carpeta if canal in fname.lower() else None
+        elif os.path.isdir(carpeta):
+            carpeta = os.path.relpath(carpeta, MEDICIONES).replace("\\", "/")
+
+    # 1. Caso directo estándar: carpeta/canal.h5
+    p = os.path.join(MEDICIONES, carpeta, f"{canal}.h5")
+    if os.path.isfile(p):
+        return p
+
+    # 2. Si carpeta es un directorio existente (ej. Mediciones/otros/4 o subcarpeta con archivos)
+    dir_directo = os.path.join(MEDICIONES, carpeta)
+    if os.path.isdir(dir_directo):
+        for f in os.listdir(dir_directo):
+            m = _CHAN_RE.match(f)
+            if m and m.group(2).lower() == canal:
+                return os.path.join(dir_directo, f)
+        return None
+
+    # 3. Si carpeta es de la forma 'categoria/stem' (ej. 'otros/1v2-30s')
+    # donde los archivos están sueltos en MEDICIONES/categoria con nombre '1v2chX-30s.h5'
+    parent, stem = os.path.split(carpeta)
+    parent_dir = os.path.join(MEDICIONES, parent)
+    if os.path.isdir(parent_dir):
+        stem_clean = re.sub(r"\.h5$", "", stem, flags=re.IGNORECASE)
+        stem_clean = re.sub(r"ch[1-4]", "", stem_clean, flags=re.IGNORECASE)
+        for f in os.listdir(parent_dir):
+            m = _CHAN_RE.match(f)
+            if m and m.group(2).lower() == canal:
+                pref, suff = m.group(1), m.group(3)
+                if f"{pref}{suff}" == stem_clean or stem_clean in f:
+                    return os.path.join(parent_dir, f)
+
+    return None
+
+
+def canales_presentes(carpeta):
+    """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden."""
+    return [c for c in CANALES if _ruta(carpeta, c) is not None and os.path.isfile(_ruta(carpeta, c))]
+
+
+def listar_mediciones():
+    """Carpetas o mediciones con al menos un ch1..ch4.h5, directas en MEDICIONES,
+    en subcarpetas de cadencia (p. ej. 'cada_30s/7') o archivos agrupados por prefijo/sufijo
+    (p. ej. 'otros/1v2-30s')."""
+    if not os.path.isdir(MEDICIONES):
+        return []
+    mediciones = set()
+    for root, dirs, files in os.walk(MEDICIONES):
+        h5_files = [f for f in files if f.lower().endswith(".h5")]
+        if not h5_files:
+            continue
+        rel_dir = os.path.relpath(root, MEDICIONES).replace("\\", "/")
+        grupos = {}
+        for f in h5_files:
+            m = _CHAN_RE.match(f)
+            if m:
+                pref, ch, suff = m.group(1), m.group(2).lower(), m.group(3)
+                grupos.setdefault((pref, suff), {})[ch] = f
+
+        for (pref, suff), chans in grupos.items():
+            if not chans:
+                continue
+            if not pref and not suff:
+                if rel_dir != ".":
+                    mediciones.add(rel_dir)
+            else:
+                stem = f"{pref}{suff}"
+                if rel_dir.endswith(stem):
+                    mediciones.add(rel_dir)
+                elif rel_dir != ".":
+                    mediciones.add(f"{rel_dir}/{stem}")
+                else:
+                    mediciones.add(stem)
+    return sorted(mediciones, key=_orden_natural)
 
 
 def _meta(carpeta, canal):
@@ -151,15 +216,18 @@ def figura(carpeta, seg, canal, umbral, dist_us, tmin, cap=None):
         # Cruces de peaks. Si hay una captura del MISMO canal, se dibujan desde
         # ella (con customdata = índice global de ventana) para que sean
         # clicables y mapeen 1:1 a las señales/scatters. Si no, detección en vivo.
-        if cap is not None and cap["W"].shape[0]:
+        if cap is not None:
             mask = cap["seg"] == seg
             tp, vp = cap["t_peak"][mask], cap["v_peak"][mask]
             # Lista Python (no ndarray): Plotly 7 serializa numpy como binario y
             # entonces customdata NO llega al clickData. Como lista sí llega.
             customdata = np.nonzero(mask)[0].tolist()  # índice global por cruz
+            mask_b = cap["seg_borde"] == seg
+            tp_b, vp_b = cap["t_peak_borde"][mask_b], cap["v_peak_borde"][mask_b]
         else:
             tp, vp = _detectar(t_trig, v_trig, u0, _muestras(carpeta, canal, dist_us), tmin)
             customdata = None
+            tp_b, vp_b = np.array([]), np.array([])
         # SVG (go.Scatter): pocos puntos y garantiza customdata en clickData,
         # a diferencia de Scattergl. Así las cruces son clicables de forma fiable.
         fig.add_trace(
@@ -171,6 +239,22 @@ def figura(carpeta, seg, canal, umbral, dist_us, tmin, cap=None):
             ),
             row=fila, col=1,
         )
+        # Peaks demasiado pegados al borde del segmento (su ventana de captura
+        # de 1 µs se saldría): SÍ cuentan en "Peaks por segmento"/"Densidad de
+        # eventos", pero no tienen ventana, así que no participan en
+        # scatter/ventanas/FFT/Transformada S. Se marcan aparte para que no
+        # desaparezcan sin explicación (naranja, sin customdata = no clicables).
+        if tp_b.size:
+            fig.add_trace(
+                go.Scatter(
+                    x=tp_b, y=vp_b, mode="markers", name="peak sin ventana",
+                    marker=dict(symbol="x", color="orange", size=9, line=dict(width=1)),
+                    hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV"
+                                  "<extra>peak (sin ventana de captura)</extra>",
+                    showlegend=False,
+                ),
+                row=fila, col=1,
+            )
     # Impulso CH1 filtrado (50 MHz) + líneas verticales de tiempos sobre CH1.
     if "ch1" in canales:
         _dibujar_impulso_ch1(fig, carpeta, canales.index("ch1") + 1)
@@ -259,10 +343,15 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
     las ventanas). Cacheado por sesión. Devuelve un dict con:
       t_rel  : eje temporal relativo al peak (µs), común a todas las ventanas
       W      : matriz (n_ventanas × n_muestras) con las señales capturadas (mV)
-      t_peak, v_peak : instante (µs) y amplitud (mV) de cada peak
+      t_peak, v_peak : instante (µs) y amplitud (mV) de cada peak con ventana
+                       completa (estos son los que se usan en scatter/ventanas/
+                       FFT/Transformada S/Vpp/Energía)
       seg    : segmento de origen de cada ventana
       dt_us  : paso de muestreo (µs)
-    Solo se conservan ventanas completas (peaks no pegados al borde).
+      t_peak_borde, v_peak_borde, seg_borde : peaks detectados pero demasiado
+                       pegados al borde del segmento para tener ventana
+                       completa. Sí cuentan en contar_peaks() (nº real de
+                       eventos), pero no tienen señal capturada.
     """
     key = (carpeta, canal, round(umbral, 6) if umbral is not None else None,
            dist_us, tmin, antes_us, desp_us)
@@ -271,8 +360,9 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
     dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6 if canal in canales_presentes(carpeta) else 0.0
     if canal not in canales_presentes(carpeta):
         res = {"t_rel": np.array([]), "W": np.empty((0, 0)),
-               "t_peak": np.array([]), "v_peak": np.array([]),
-               "seg": np.array([]), "dt_us": dt_us}
+               "t_peak": np.array([]), "v_peak": np.array([]), "seg": np.array([]),
+               "t_peak_borde": np.array([]), "v_peak_borde": np.array([]),
+               "seg_borde": np.array([]), "dt_us": dt_us}
         _CAPTURA_CACHE[key] = res
         return res
     n_antes = int(round(antes_us / dt_us))
@@ -280,6 +370,7 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
     distancia = _muestras(carpeta, canal, dist_us)
     t_rel = np.arange(-n_antes, n_desp + 1) * dt_us
     W, tpk, vpk, segs = [], [], [], []
+    tpk_b, vpk_b, segs_b = [], [], []
     for s in range(1, n_segmentos(carpeta) + 1):
         t, v = cargar_segmento(carpeta, canal, s)
         if tmin is not None:
@@ -289,6 +380,9 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
         for i in idx:
             a, b = i - n_antes, i + n_desp + 1
             if a < 0 or b > v.size:
+                tpk_b.append(t[i])
+                vpk_b.append(v[i])
+                segs_b.append(s)
                 continue  # ventana incompleta (peak muy al borde)
             W.append(v[a:b])
             tpk.append(t[i])
@@ -297,8 +391,9 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
     res = {
         "t_rel": t_rel,
         "W": np.array(W) if W else np.empty((0, t_rel.size)),
-        "t_peak": np.array(tpk), "v_peak": np.array(vpk),
-        "seg": np.array(segs), "dt_us": dt_us,
+        "t_peak": np.array(tpk), "v_peak": np.array(vpk), "seg": np.array(segs),
+        "t_peak_borde": np.array(tpk_b), "v_peak_borde": np.array(vpk_b),
+        "seg_borde": np.array(segs_b), "dt_us": dt_us,
     }
     _CAPTURA_CACHE[key] = res
     return res
@@ -550,17 +645,32 @@ def figura_vpp_energia(cap, canal, highlight=None, uirev=None):
     return fig
 
 
-def figura_densidad(cuentas, canal):
-    """Histograma: nº de segmentos que tienen cada nº de peaks (densidad de eventos)."""
-    vals, freq = np.unique(np.asarray(cuentas), return_counts=True)
-    fig = go.Figure(go.Bar(x=vals, y=freq, marker_color="#00cc96"))
-    fig.update_layout(
-        title=f"Densidad de eventos {canal.upper()} (segmentos por nº de peaks)",
-        xaxis_title="N° de peaks", yaxis_title="N° de segmentos",
-        height=415, margin=dict(t=50, r=20), xaxis=dict(dtick=1),
-        plot_bgcolor="white", paper_bgcolor="white",
-    )
-    return fig
+DENSIDAD_MAX = 6  # filas explícitas 0..DENSIDAD_MAX; el resto va a una fila ">DENSIDAD_MAX"
+
+
+def tabla_densidad(cuentas):
+    """Distribución de segmentos por nº de peaks: filas 0..DENSIDAD_MAX y, si
+    algún segmento supera ese máximo, una fila '>DENSIDAD_MAX' que los agrupa
+    (para no perder eventos silenciosamente)."""
+    cuentas = np.asarray(cuentas)
+    total = cuentas.size
+    filas = []
+    for k in range(DENSIDAD_MAX + 1):
+        n = int(np.sum(cuentas == k))
+        filas.append({"peaks": str(k), "n_segmentos": n,
+                      "pct": f"{100 * n / total:.1f}%" if total else "0.0%"})
+    extra = int(np.sum(cuentas > DENSIDAD_MAX))
+    if extra:
+        filas.append({"peaks": f">{DENSIDAD_MAX}", "n_segmentos": extra,
+                      "pct": f"{100 * extra / total:.1f}%" if total else "0.0%"})
+    return filas
+
+
+COLUMNAS_DENSIDAD = [
+    {"name": "N° de peaks", "id": "peaks"},
+    {"name": "N° de segmentos", "id": "n_segmentos"},
+    {"name": "% de segmentos", "id": "pct"},
+]
 
 
 _IMPULSO_CACHE = {}
@@ -834,7 +944,17 @@ app.layout = html.Div(
                                 dcc.Tab(label="Peaks por segmento", value="barras",
                                         children=[dcc.Graph(id="grafico_peaks")], **_TAB),
                                 dcc.Tab(label="Densidad de eventos", value="densidad",
-                                        children=[dcc.Graph(id="grafico_densidad")], **_TAB),
+                                        children=[dash_table.DataTable(
+                                            id="tabla_densidad",
+                                            columns=COLUMNAS_DENSIDAD,
+                                            data=[],
+                                            style_table={"marginTop": "10px"},
+                                            style_cell={"textAlign": "center",
+                                                        "padding": "6px",
+                                                        "fontFamily": "inherit"},
+                                            style_header={"fontWeight": "bold",
+                                                          "backgroundColor": "#f5f5f5"},
+                                        )], **_TAB),
                             ]),
                         ]),
                         html.Div(className="card", children=[
@@ -977,7 +1097,7 @@ def fijar_captura(n_clicks, carpeta, canal, dist_us, tmin, umbral):
 
 @app.callback(
     Output("grafico_peaks", "figure"),
-    Output("grafico_densidad", "figure"),
+    Output("tabla_densidad", "data"),
     Input("captura_params", "data"),
 )
 def calcular_peaks(p):
@@ -987,9 +1107,8 @@ def calcular_peaks(p):
     if not segs:
         fig = go.Figure()
         fig.update_layout(title=f"{p['canal'].upper()} no disponible en esta medición", height=415)
-        return fig, fig
-    return (figura_peaks(segs, cuentas, p["umbral"], p["canal"]),
-            figura_densidad(cuentas, p["canal"]))
+        return fig, []
+    return figura_peaks(segs, cuentas, p["umbral"], p["canal"]), tabla_densidad(cuentas)
 
 
 @app.callback(

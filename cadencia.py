@@ -37,29 +37,95 @@ REPORTE_MD = os.path.join(AQUI, "archivos_md", "reporte_cadencia.md")
 REPORTE_CSV = os.path.join(AQUI, "cadencia_segmentos.csv")
 
 
+_CHAN_RE = re.compile(r"^(.*?)(ch[1-4])(.*?)\.h5$", re.IGNORECASE)
+
+
 def _orden_natural(s):
-    return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", s)]
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", s)]
 
 
-def canales_presentes(ruta):
-    return [c for c in CANALES if os.path.exists(os.path.join(ruta, f"{c}.h5"))]
+def _ruta(carpeta, canal):
+    canal = canal.lower()
+    if os.path.isabs(carpeta):
+        if os.path.isfile(carpeta):
+            d, fname = os.path.split(carpeta)
+            m = _CHAN_RE.match(fname)
+            if m:
+                pref, suff = m.group(1), m.group(3)
+                p = os.path.join(d, f"{pref}{canal}{suff}.h5")
+                if os.path.isfile(p):
+                    return p
+            return carpeta if canal in fname.lower() else None
+        elif os.path.isdir(carpeta):
+            carpeta = os.path.relpath(carpeta, MEDICIONES).replace("\\", "/")
+
+    # 1. Caso directo estándar: carpeta/canal.h5
+    p = os.path.join(MEDICIONES, carpeta, f"{canal}.h5")
+    if os.path.isfile(p):
+        return p
+
+    # 2. Si carpeta es un directorio existente (ej. Mediciones/otros/4)
+    dir_directo = os.path.join(MEDICIONES, carpeta)
+    if os.path.isdir(dir_directo):
+        for f in os.listdir(dir_directo):
+            m = _CHAN_RE.match(f)
+            if m and m.group(2).lower() == canal:
+                return os.path.join(dir_directo, f)
+        return None
+
+    # 3. Si carpeta es de la forma 'categoria/stem' (ej. 'otros/1v2-30s')
+    parent, stem = os.path.split(carpeta)
+    parent_dir = os.path.join(MEDICIONES, parent)
+    if os.path.isdir(parent_dir):
+        stem_clean = re.sub(r"\.h5$", "", stem, flags=re.IGNORECASE)
+        stem_clean = re.sub(r"ch[1-4]", "", stem_clean, flags=re.IGNORECASE)
+        for f in os.listdir(parent_dir):
+            m = _CHAN_RE.match(f)
+            if m and m.group(2).lower() == canal:
+                pref, suff = m.group(1), m.group(3)
+                if f"{pref}{suff}" == stem_clean or stem_clean in f:
+                    return os.path.join(parent_dir, f)
+
+    return None
+
+
+def canales_presentes(carpeta):
+    """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden."""
+    return [c for c in CANALES if _ruta(carpeta, c) is not None and os.path.isfile(_ruta(carpeta, c))]
 
 
 def listar_mediciones():
-    """Rutas relativas a MEDICIONES ("7" o "cada_30s/7") de las carpetas con
-    algún ch*.h5, directas o un nivel más abajo."""
-    encontradas = []
-    for nombre in sorted(os.listdir(MEDICIONES), key=_orden_natural):
-        ruta = os.path.join(MEDICIONES, nombre)
-        if not os.path.isdir(ruta):
+    """Rutas relativas a MEDICIONES de las mediciones encontradas."""
+    if not os.path.isdir(MEDICIONES):
+        return []
+    mediciones = set()
+    for root, dirs, files in os.walk(MEDICIONES):
+        h5_files = [f for f in files if f.lower().endswith(".h5")]
+        if not h5_files:
             continue
-        if canales_presentes(ruta):
-            encontradas.append(nombre)
-            continue
-        for sub in sorted(os.listdir(ruta), key=_orden_natural):
-            if os.path.isdir(os.path.join(ruta, sub)) and canales_presentes(os.path.join(ruta, sub)):
-                encontradas.append(f"{nombre}/{sub}")
-    return encontradas
+        rel_dir = os.path.relpath(root, MEDICIONES).replace("\\", "/")
+        grupos = {}
+        for f in h5_files:
+            m = _CHAN_RE.match(f)
+            if m:
+                pref, ch, suff = m.group(1), m.group(2).lower(), m.group(3)
+                grupos.setdefault((pref, suff), {})[ch] = f
+
+        for (pref, suff), chans in grupos.items():
+            if not chans:
+                continue
+            if not pref and not suff:
+                if rel_dir != ".":
+                    mediciones.add(rel_dir)
+            else:
+                stem = f"{pref}{suff}"
+                if rel_dir.endswith(stem):
+                    mediciones.add(rel_dir)
+                elif rel_dir != ".":
+                    mediciones.add(f"{rel_dir}/{stem}")
+                else:
+                    mediciones.add(stem)
+    return sorted(mediciones, key=_orden_natural)
 
 
 def marcas_temporales(ruta_h5):
@@ -83,9 +149,8 @@ def clasificar(mediana):
 
 
 def diagnosticar(carpeta):
-    ruta = os.path.join(MEDICIONES, carpeta)
-    canales = canales_presentes(ruta)
-    marcas = {c: marcas_temporales(os.path.join(ruta, f"{c}.h5")) for c in canales}
+    canales = canales_presentes(carpeta)
+    marcas = {c: marcas_temporales(_ruta(carpeta, c)) for c in canales}
     ref = marcas[canales[0]]
     coinciden = all(m.shape == ref.shape and np.allclose(m, ref) for m in marcas.values())
     dt = np.diff(ref)
@@ -115,8 +180,15 @@ def mover(d, ejecutar):
         return f"  {d['ubicacion']}: el destino {destino_rel} ya existe, NO se mueve"
     if not ejecutar:
         return f"  {d['ubicacion']} -> {destino_rel} (simulacro)"
-    os.makedirs(os.path.dirname(destino), exist_ok=True)
-    shutil.move(os.path.join(MEDICIONES, d["ubicacion"]), destino)
+    os.makedirs(destino, exist_ok=True)
+    origen_dir = os.path.join(MEDICIONES, d["ubicacion"])
+    if os.path.isdir(origen_dir):
+        shutil.move(origen_dir, destino)
+    else:
+        for c in d["canales"]:
+            src = _ruta(d["ubicacion"], c)
+            if src and os.path.isfile(src):
+                shutil.move(src, os.path.join(destino, f"{c}.h5"))
     origen = d["ubicacion"]
     d["ubicacion"] = destino_rel
     return f"  {origen} -> {destino_rel} (movido)"
