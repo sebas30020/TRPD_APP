@@ -259,17 +259,19 @@ unificadas:
 
 ### Resumen de participación de peaks por análisis
 
-| Análisis / Visualización | Peaks completos | Peaks sin ventana | Filtrado por selección (`seleccion`) |
-|---|:---:|:---:|:---:|
-| **Barras de peaks por segmento** (`figura_peaks`) | Sí | Sí | No (todos los del segmento) |
-| **Tabla de densidad de eventos** (`tabla_densidad`) | Sí | Sí | No (evaluación multi-sensor independiente) |
-| **Cruces negras en gráfico principal** (`figura`) | Sí | No | Clicables (alimentan `seleccion`) |
-| **Cruces naranjas en gráfico principal** (`figura`) | No | Sí | No clicables (informativas) |
-| **Patrón TRPD ($V_{\max}$ o $V_{\text{pp}}$)** (`figura_scatter`) | Sí | No | Resalta seleccionados en amarillo |
-| **Scatter Vpp vs Energía** (`figura_vpp_energia`) | Sí | No | Resalta seleccionados en amarillo |
-| **Ventanas temporales** (`figura_ventanas`) | Sí | No | **Solo los seleccionados** |
-| **FFT Welch** (`figura_fft`) | Sí | No | **Solo los seleccionados** (promedio) |
-| **Transformada S de la ventana** (`figura_st_ventana`) | Sí | No | **Solo los seleccionados** (promedio \|S\|) |
+| Análisis / Visualización | Peaks válidos (ventana 70 ns completa) | Filtrado por selección (`seleccion`) |
+|---|:---:|:---:|
+| **Barras de peaks por segmento** (`figura_peaks`) | Sí | No (todos los del segmento) |
+| **Tabla de densidad de eventos** (`tabla_densidad`) | Sí | No (evaluación multi-sensor independiente) |
+| **Cruces negras en gráfico principal** (`figura`) | Sí | Clicables (alimentan `seleccion`) |
+| **Patrón TRPD ($V_{\max}$ o $V_{\text{pp}}$)** (`figura_scatter`) | Sí | Resalta seleccionados en amarillo |
+| **Scatter Vpp vs Energía** (`figura_vpp_energia`) | Sí | Resalta seleccionados en amarillo |
+| **Ventanas temporales** (`figura_ventanas`) | Sí | **Solo los seleccionados** |
+| **FFT Welch** (`figura_fft`) | Sí | **Solo los seleccionados** (promedio) |
+| **Transformada S de la ventana** (`figura_st_ventana`) | Sí | **Solo los seleccionados** (promedio \|S\|) |
+
+> [!NOTE]
+> Cualquier descarga cuyo intervalo temporal de $70\text{ ns}$ ($-7\text{ ns}$ antes a $+63\text{ ns}$ después del peak) no quepa íntegramente dentro de los límites del segmento o de $t \ge t_{\text{mín}}$ es **descartada de forma estricta**. No se dibujan cruces, no se contabiliza en barras ni en densidad, y no participa en los scatters.
 
 ---
 
@@ -281,23 +283,19 @@ Al pulsar **"Calcular peaks"** se fija un *snapshot* de parámetros en el store
 cruces del gráfico principal) derivan de ese snapshot vía `capturar`.
 
 - **R-C1 · `capturar`** (cacheado en `_CAPTURA_CACHE`) detecta los peaks de
-  todos los segmentos y extrae una **ventana de 1 µs por peak**: **20 % antes /
-  80 % después** del peak (`antes_us = 0.2`, `desp_us = 0.8`), alineada al peak en $t = 0$. Devuelve:
-  - `t_rel`: eje temporal relativo al peak (µs), común a todas las ventanas.
-  - `W`: matriz ($n_{\text{ventanas}} \times n_{\text{muestras}}$) con las señales capturadas (mV).
+  todos los segmentos y extrae una **ventana de 70 ns por peak**: **10 % antes /
+  90 % después** del peak (`antes_us = 0.007`, `desp_us = 0.063`), alineada al peak en $t = 0$. Devuelve:
+  - `t_rel`: eje temporal relativo al peak (µs), común a todas las ventanas (de $-0.007$ a $+0.063\text{ µs}$, 351 muestras a $5\text{ GSa/s}$).
+  - `W`: matriz ($n_{\text{ventanas}} \times 351$) con las señales capturadas (mV).
   - `t_peak`, `v_peak`: instante (µs) y amplitud máxima instantánea $V_{\max}$ (mV) de cada peak con ventana completa.
-  - `vpp`: amplitud peak-to-peak $V_{\text{pp}} = \max(W_i) - \min(W_i)$ (mV) calculada estrictamente en la ventana de 1 µs.
+  - `vpp`: amplitud peak-to-peak $V_{\text{pp}} = \max(W_i) - \min(W_i)$ (mV) calculada estrictamente en la ventana de 70 ns.
   - `seg`: segmento de origen de cada ventana completa.
-  - `t_peak_borde`, `v_peak_borde`, `seg_borde`: peaks detectados pero demasiado pegados al borde.
   - `dt_us`: paso de muestreo (µs).
-- **R-C2 · Criterio de exclusión y borde efectivo.**
+- **R-C2 · Criterio de exclusión estricto de bordes.**
   El recorte se valida con $a = i - n_{\text{antes}} < 0$ o $b = i + n_{\text{desp}} + 1 > v.\text{size}$,
-  donde $v$ es la señal **ya recortada a $t \ge t_{\text{mín}}$**.
-  Como consecuencia directa, el borde izquierdo efectivo para la captura es
-  $t_{\text{mín}}$ (y no $T_{\text{MIN}} = -5 \text{ µs}$). Cualquier peak situado
-  en el intervalo $[t_{\text{mín}}, t_{\text{mín}} + 0.2 \text{ µs})$ o a menos de
-  $0.8 \text{ µs}$ del final del segmento ($T_{\text{MAX}} = 30 \text{ µs}$) se
-  clasifica como "sin ventana".
+  donde $v$ es la señal **recortada a $t \ge t_{\text{mín}}$**.
+  Cualquier peak que diste menos de $7\text{ ns}$ de $t_{\text{mín}}$ o menos de $63\text{ ns}$ del
+  final del segmento ($T_{\text{MAX}} = 30 \text{ µs}$) se descarta de forma absoluta.
 - **R-C3 · Conjunto único y ordenado.** Peaks completos y ventanas comparten
   **exactamente el mismo conjunto y orden**, de modo que el índice $i$ de una fila
   en la matriz $W$ mapea 1:1 al punto $i$ de los scatters.
@@ -360,46 +358,41 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
   - `Media de N_PD`: promedio de eventos detectados por disparo ($\bar{N}_{PD}$).
   - `d (mm)`: diámetro(s) de cavidad(es) de la probeta inferidos del código o leídos de los metadatos (ej. `D1=3 mm, D2=3 mm`).
   - `V̄_max (V)`: amplitud de pico máxima media de todas las descargas detectadas (expresada en Voltios y con valor en mV).
-  - `V̄_pp (V)`: amplitud peak-to-peak media de las descargas en su ventana de 1 µs (expresada en Voltios y con valor en mV).
+  - `V̄_pp (V)`: amplitud peak-to-peak media de las descargas en su ventana de 70 ns (expresada en Voltios y con valor en mV).
   - `t̄_abs (µs)`: tiempo absoluto medio de ocurrencia de las descargas en el segmento (respecto al inicio del registro/trigger), clave para análisis TRPD.
   Dispone de botón **"⚡ Calcular todos los sensores (CH2..CH4)"** (que procesa cada sensor con su propia configuración calibrada de trigger), botón **"Limpiar tabla"** y exportación nativa a **CSV**. Almacena su historial en `densidad_store`.
 - **Patrón TRPD** (`figura_scatter`): Dispone de selector de magnitud con dos modos:
   1. **Modo $V_{\max}$:** Grafica el par $(t_{\text{abs}}, V_{\max})$, representando el pico máximo instantáneo junto con la traza de referencia del impulso en CH1.
-  2. **Modo $V_{\text{pp}}$:** Grafica el par $(t_{\text{abs}}, V_{\text{pp}})$, donde $V_{\text{pp}}$ es la amplitud peak-to-peak calculada en la ventana de 1 µs $[-0.2, +0.8]\text{ µs}$ centrada en el peak.
+  2. **Modo $V_{\text{pp}}$:** Grafica el par $(t_{\text{abs}}, V_{\text{pp}})$, donde $V_{\text{pp}}$ es la amplitud peak-to-peak calculada en la ventana normalizada de 70 ns $[-7\text{ ns}, +63\text{ ns}]$ centrada en el peak.
   El `hovertemplate` despliega simultáneamente $t_{\text{abs}}$, $V_{\max}$ y $V_{\text{pp}}$.
 - **Vpp vs Energía** (`figura_vpp_energia`): por señal capturada,
   `Vpp = ptp(ventana)` [mV], `Energía = Σ v² · dt_us` [mV²·µs].
 - **Ventanas** (`figura_ventanas`): señales seleccionadas superpuestas, alineadas
-  al peak ($t = 0$). Decimadas a ~300 puntos para visualización ágil.
+  al peak ($t = 0$). Con 351 muestras en 70 ns se visualiza punto a punto sin submuestreo.
 - **FFT** (`figura_fft`): `scipy.signal.welch(scaling="spectrum")`, **escala
   lineal** (mV²), promediando el espectro de las ventanas seleccionadas.
-  `nperseg = min(len, 1024)`, eje en MHz (hasta Nyquist = Fs/2).
+  `nperseg = min(len, 256)`, eje en MHz (hasta Nyquist = Fs/2).
 
 ### Límites de cálculo de la FFT
 
 A partir de las constantes y configuración vigentes ($XInc = 2 \times 10^{-10} \text{ s} \implies Fs = 5 \text{ GSa/s}$,
-$dt = 2 \times 10^{-4} \text{ µs}$, `antes_us = 0.2`, `desp_us = 0.8`):
+$dt = 2 \times 10^{-4} \text{ µs}$, `antes_us = 0.007`, `desp_us = 0.063`):
 
 - **Longitud de la señal analizada:**
-  $n_{\text{antes}} = \text{round}(0.2 / 2 \times 10^{-4}) = 1000$ muestras,
-  $n_{\text{desp}} = \text{round}(0.8 / 2 \times 10^{-4}) = 4000$ muestras.
-  La ventana temporal contiene $[-1000, 4000]$ muestras, es decir **5001 muestras** ($1 \text{ µs}$).
+  $n_{\text{antes}} = \text{round}(0.007 / 2 \times 10^{-4}) = 35$ muestras ($-7\text{ ns}$),
+  $n_{\text{desp}} = \text{round}(0.063 / 2 \times 10^{-4}) = 315$ muestras ($+63\text{ ns}$).
+  La ventana temporal contiene $[-35, 315]$ muestras, es decir **351 muestras** ($70\text{ ns}$).
 - **Parámetros de Welch:**
-  - `nperseg = min(5001, 1024) = 1024`.
-  - Welch utiliza por defecto una ventana Hann con 50 % de solapamiento (`noverlap = 512`),
-    lo que da un salto de 512 muestras entre bloques.
-  - Sub-segmentos promediados por ventana individual:
-    $$\frac{5001 - 512}{512} = 8 \text{ sub-segmentos}$$
-  - **Doble promediado:** Welch promedia los 8 sub-segmentos dentro de cada
+  - `nperseg = min(351, 256) = 256`.
+  - Welch utiliza una ventana Hann con 50 % de solapamiento (`noverlap = 128`),
+    lo que da un salto de 128 muestras entre bloques.
+  - Sub-segmentos por ventana:
+    $$\frac{351 - 128}{128} \approx 2 \text{ sub-segmentos}$$
+  - **Doble promediado:** Welch promedia los sub-segmentos dentro de cada
     señal capturada para reducir varianza. Luego, `figura_fft` promedia esos
     espectros resultantes **entre todas las señales seleccionadas** en el store `seleccion`.
-    Este doble promedio suaviza el espectro final.
 - **Resolución en frecuencia:**
-  $$\Delta f = \frac{Fs}{\text{nperseg}} = \frac{5 \times 10^9 \text{ Sa/s}}{1024} \approx 4.8828 \text{ MHz por bin}$$
-  - Componentes espectrales separadas por menos de $\sim 10 \text{ MHz}$ (2 bins)
-    no pueden resolverse de forma independiente.
-  - Cualquier componente de frecuencia inferior a $\sim 5 \text{ MHz}$ cae en el
-    bin 0 (continua) o en el bin 1.
+  $$\Delta f = \frac{Fs}{\text{nperseg}} = \frac{5 \times 10^9 \text{ Sa/s}}{256} \approx 19.5312 \text{ MHz por bin}$$
 - **Rango de frecuencia:**
   De 0 a Nyquist ($Fs / 2 = 2500 \text{ MHz}$).
   El control `f máx ST` **no** afecta a la FFT; la FFT siempre muestra el rango
@@ -408,9 +401,9 @@ $dt = 2 \times 10^{-4} \text{ µs}$, `antes_us = 0.2`, `desp_us = 0.8`):
   - `scaling="spectrum"` entrega $\text{mV}^2$ (potencia por bin de frecuencia, no
     densidad espectral $\text{mV}^2/\text{Hz}$). Eje vertical lineal.
   - Welch aplica por defecto `detrend="constant"`, eliminando la componente continua
-    (media) de cada sub-segmento de 1024 muestras.
-- **Resolución temporal / decimado:**
-  La FFT se calcula sobre la ventana a resolución completa (las 5001 muestras sin decimar).
+    (media) de cada sub-segmento.
+- **Resolución temporal:**
+  La FFT se calcula sobre la ventana de 70 ns a resolución completa (las 351 muestras sin decimar).
 
 ---
 
@@ -472,8 +465,8 @@ Dos escalas, compartiendo la misma función:
   Las operaciones FFT e IFFT se ejecutan siempre a resolución completa sobre las $N$
   muestras. El resultado se decima exclusivamente al construir la matriz final mediante
   `paso = max(1, N // n_t)`:
-  - **Ventana de 1 µs:** $N = 5001$, `ST_NT_VENTANA = 500` $\implies \text{paso} = 5001 // 500 = 10$.
-    Cada columna dista $10 \times 2 \times 10^{-4} \text{ µs} = 2 \text{ ns}$ ($\sim 501$ columnas de tiempo).
+  - **Ventana de 70 ns:** $N = 351$, `ST_NT_VENTANA = 350` $\implies \text{paso} = \max(1, 351 // 350) = 1$.
+    Cada columna dista exactamente $0.2 \text{ ns}$ (resolución nativa punto a punto sin decimado).
   - **Segmento completo (-5..30 µs = 35 µs):** $N \approx 175\,001$, `ST_NT_SEGMENTO = 1000` $\implies \text{paso} = 175001 // 1000 = 175$.
     Cada columna dista $175 \times 0.2 \text{ ns} = 35 \text{ ns}$ ($\sim 1001$ columnas de tiempo).
   - **Consecuencia del decimado:** Se realiza por submuestreo directo (`[::paso]`),
@@ -481,10 +474,10 @@ Dos escalas, compartiendo la misma función:
     con duración inferior a $\sim 35 \text{ ns}$ en el segmento completo pueden
     caer entre columnas y atenuarse visualmente. El mapa del segmento sirve para
     ubicar intervalos temporales con actividad; para el análisis morfológico fino
-    se utiliza la Transformada S de la ventana de $1 \text{ µs}$.
+    se utiliza la Transformada S de la ventana de $70\text{ ns}$.
 - **Efectos de borde (periodicidad circular):**
   La formulación discreta vía FFT asume periodicidad de la señal. En las proximidades
-  de los bordes ($-0.2$ y $+0.8 \text{ µs}$ en la ventana; $-5$ y $+30 \text{ µs}$
+  de los bordes ($-7\text{ ns}$ y $+63\text{ ns}$ en la ventana; $-5$ y $+30 \text{ µs}$
   en el segmento) pueden aparecer artefactos de energía espuria. Este efecto es más
   notorio a bajas frecuencias, donde la campana temporal de la ventana gaussiana es
   más extendida.
@@ -585,8 +578,7 @@ Dos escalas, compartiendo la misma función:
 - **Medición sin canal CH1:** La fila de CH1 muestra "no disponible".
 - **`t50` inexistente:** Impulso con cola larga que no llega a descender al 50 % de su valor máximo dentro de la ventana de recorte.
 - **Impulso con baseline alto:** Si no hay cruces de subida claros, `t0_lin` y `tmax_lin` quedan en `None`.
-- **Detección previa al botón "Calcular peaks":** Las cruces visibles en el gráfico principal corresponden a la detección reactiva local con los controles de la UI; no poseen `customdata` y no son clicables hasta pulsar el botón.
-- **Peaks pegados al borde del segmento o de $t_{\text{mín}}$:** Si un peak detectado dista menos de $0.2 \text{ µs}$ de $t_{\text{mín}}$ o menos de $0.8 \text{ µs}$ de $T_{\text{MAX}}$, su ventana de $1 \text{ µs}$ queda incompleta. Se dibuja como una cruz naranja en el gráfico principal ("peak sin ventana", no clicable), se incluye en el conteo total por segmento y en la tabla de densidad, pero queda excluido de los scatters, ventanas superpuestas, FFT y Transformada S.
+- **Peaks pegados al borde del segmento o de $t_{\text{mín}}$:** Si un peak detectado dista menos de $7\text{ ns}$ ($0.007\text{ µs}$) de $t_{\text{mín}}$ o menos de $63\text{ ns}$ ($0.063\text{ µs}$) del final del segmento ($T_{\text{MAX}} = 30 \text{ µs}$), su ventana de $70\text{ ns}$ queda incompleta. La aplicación **descarta completamente** estas descargas: no se dibujan en el osciloscopio, no se computan en las barras de peaks ni en la tabla de densidad de eventos, y quedan excluidas de los patrones TRPD, ventanas superpuestas, FFT y Transformada S. Todo evento visualizado o computado en la aplicación posee garantizada su ventana íntegra de $70\text{ ns}$.
 
 ---
 

@@ -36,6 +36,11 @@ TRIGGERS = ["ch2", "ch3", "ch4"]  # canales seleccionables como trigger
 # Ventana temporal a graficar (microsegundos)
 T_MIN, T_MAX = -5, 30.0
 
+# Ventana normalizada de captura alrededor de cada descarga de DP
+VENTANA_PD_TOTAL_US = 0.070    # 70 ns de duración total
+VENTANA_PD_ANTES_US = 0.007    # 10% antes del peak (7 ns)
+VENTANA_PD_DESP_US = 0.063     # 90% después del peak (63 ns)
+
 # Impulso (CH1): filtro pasa-bajos aplicado a la señal de impulso promediada.
 IMP_FCORTE = 20e6   # Hz, frecuencia de corte del pasa-bajos
 IMP_ORDEN = 4       # orden del Butterworth (fase cero, sosfiltfilt)
@@ -43,7 +48,7 @@ IMP_ORDEN = 4       # orden del Butterworth (fase cero, sosfiltfilt)
 # Transformada S: nº de frecuencias (bins lineales entre 0 y f máx) y de
 # columnas de tiempo con que se dibuja cada mapa de calor.
 ST_NFREQ = 250
-ST_NT_VENTANA = 500     # ventana de 1 µs (captura)
+ST_NT_VENTANA = 350     # ventana de 70 ns (captura punto a punto)
 ST_NT_SEGMENTO = 1000   # segmento completo (-5..30 µs)
 ST_FMAX_MHZ = 2500      # por defecto, Nyquist a Fs = 5 GSa/s
 
@@ -281,12 +286,10 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
             mask = cap["seg"] == seg
             tp, vp = cap["t_peak"][mask], cap["v_peak"][mask]
             customdata = np.nonzero(mask)[0].tolist()
-            mask_b = cap["seg_borde"] == seg
-            tp_b, vp_b = cap["t_peak_borde"][mask_b], cap["v_peak_borde"][mask_b]
         else:
-            tp, vp = _detectar(t_trig, v_trig, u0, _muestras(carpeta, canal, dist_act), tmin_act)
+            tp, vp = _detectar_con_ventana(carpeta, canal, t_trig, v_trig, u0,
+                                           _muestras(carpeta, canal, dist_act), tmin_act)
             customdata = None
-            tp_b, vp_b = np.array([]), np.array([])
 
         fig.add_trace(
             go.Scatter(
@@ -297,17 +300,6 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
             ),
             row=fila, col=1,
         )
-        if tp_b.size:
-            fig.add_trace(
-                go.Scatter(
-                    x=tp_b, y=vp_b, mode="markers", name="peak sin ventana",
-                    marker=dict(symbol="x", color="orange", size=9, line=dict(width=1)),
-                    hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV"
-                                  "<extra>peak (sin ventana de captura)</extra>",
-                    showlegend=False,
-                ),
-                row=fila, col=1,
-            )
 
     # Impulso CH1 filtrado (50 MHz) + líneas verticales de tiempos sobre CH1.
     if "ch1" in canales:
@@ -338,6 +330,25 @@ def _detectar(t, v, umbral, distancia, tmin):
         t, v = t[mask], v[mask]
     idx, _ = find_peaks(v, height=umbral, distance=distancia)
     return t[idx], v[idx]
+
+
+def _detectar_con_ventana(carpeta, canal, t, v, umbral, distancia, tmin,
+                          antes_us=VENTANA_PD_ANTES_US, desp_us=VENTANA_PD_DESP_US):
+    """find_peaks acotado a t >= tmin que descarta descargas que no quepan en la ventana."""
+    if tmin is not None:
+        mask = t >= tmin
+        t, v = t[mask], v[mask]
+    if not v.size:
+        return np.array([]), np.array([])
+    dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6
+    n_antes = int(round(antes_us / dt_us))
+    n_desp = int(round(desp_us / dt_us))
+    idx, _ = find_peaks(v, height=umbral, distance=distancia)
+    validos = [i for i in idx if (i - n_antes >= 0 and i + n_desp + 1 <= v.size)]
+    if not validos:
+        return np.array([]), np.array([])
+    validos = np.array(validos)
+    return t[validos], v[validos]
 
 
 def _muestras(carpeta, canal, dist_us):
@@ -379,17 +390,15 @@ def umbral_desde_relayout(relayout, fallback):
 
 
 def contar_peaks(carpeta, canal, umbral, dist_us, tmin):
-    """Nº de peaks del canal trigger por segmento (umbral=altura, t>=tmin)."""
-    if canal not in canales_presentes(carpeta):
-        return [], []
-    distancia = _muestras(carpeta, canal, dist_us)
-    segs, cuentas = [], []
-    for s in range(1, n_segmentos(carpeta) + 1):
-        t, v = cargar_segmento(carpeta, canal, s)
-        tp, _ = _detectar(t, v, umbral, distancia, tmin)
-        segs.append(s)
-        cuentas.append(len(tp))
-    return segs, cuentas
+    """Nº de peaks válidos (con ventana completa de 70 ns) del canal trigger por segmento."""
+    cap = capturar(carpeta, canal, umbral, dist_us, tmin)
+    n_segs = n_segmentos(carpeta)
+    segs = list(range(1, n_segs + 1))
+    if cap["seg"].size:
+        conteos = {s: int(np.sum(cap["seg"] == s)) for s in segs}
+    else:
+        conteos = {s: 0 for s in segs}
+    return segs, [conteos[s] for s in segs]
 
 
 def figura_peaks(segs, cuentas, umbral, canal):
@@ -406,24 +415,21 @@ def figura_peaks(segs, cuentas, umbral, canal):
 _CAPTURA_CACHE = {}
 
 
-def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
+def capturar(carpeta, canal, umbral, dist_us, tmin,
+             antes_us=VENTANA_PD_ANTES_US, desp_us=VENTANA_PD_DESP_US):
     """Detecta los peaks del canal trigger y extrae, alrededor de cada uno, una
-    ventana de 1 µs (20% antes / 80% después), alineada al peak (t=0).
+    ventana de 70 ns (10% antes = 7 ns / 90% después = 63 ns), alineada al peak (t=0).
 
+    Las descargas cuya ventana sobrepase los bordes de la señal se descartan completamente.
     Unifica peaks y ventanas para que el scatter y el gráfico temporal compartan
     EXACTamente el mismo conjunto y orden (la selección del scatter mapea 1:1 a
     las ventanas). Cacheado por sesión. Devuelve un dict con:
       t_rel  : eje temporal relativo al peak (µs), común a todas las ventanas
       W      : matriz (n_ventanas × n_muestras) con las señales capturadas (mV)
-      t_peak, v_peak : instante (µs) y amplitud (mV) de cada peak con ventana
-                       completa (estos son los que se usan en scatter/ventanas/
-                       FFT/Transformada S/Vpp/Energía)
+      t_peak, v_peak : instante (µs) y amplitud (mV) de cada peak con ventana completa
+      vpp    : amplitud peak-to-peak calculada en la ventana de 70 ns (mV)
       seg    : segmento de origen de cada ventana
       dt_us  : paso de muestreo (µs)
-      t_peak_borde, v_peak_borde, seg_borde : peaks detectados pero demasiado
-                       pegados al borde del segmento para tener ventana
-                       completa. Sí cuentan en contar_peaks() (nº real de
-                       eventos), pero no tienen señal capturada.
     """
     key = (carpeta, canal, round(umbral, 6) if umbral is not None else None,
            dist_us, tmin, antes_us, desp_us)
@@ -443,7 +449,6 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
     distancia = _muestras(carpeta, canal, dist_us)
     t_rel = np.arange(-n_antes, n_desp + 1) * dt_us
     W, tpk, vpk, segs = [], [], [], []
-    tpk_b, vpk_b, segs_b = [], [], []
     for s in range(1, n_segmentos(carpeta) + 1):
         t, v = cargar_segmento(carpeta, canal, s)
         if tmin is not None:
@@ -453,10 +458,7 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
         for i in idx:
             a, b = i - n_antes, i + n_desp + 1
             if a < 0 or b > v.size:
-                tpk_b.append(t[i])
-                vpk_b.append(v[i])
-                segs_b.append(s)
-                continue  # ventana incompleta (peak muy al borde)
+                continue  # Descartar: no cabe íntegramente en la ventana de 70 ns
             W.append(v[a:b])
             tpk.append(t[i])
             vpk.append(v[i])
@@ -468,8 +470,8 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
         "W": W_arr,
         "t_peak": np.array(tpk), "v_peak": np.array(vpk), "vpp": vpp_arr,
         "seg": np.array(segs),
-        "t_peak_borde": np.array(tpk_b), "v_peak_borde": np.array(vpk_b),
-        "seg_borde": np.array(segs_b), "dt_us": dt_us,
+        "t_peak_borde": np.array([]), "v_peak_borde": np.array([]),
+        "seg_borde": np.array([]), "dt_us": dt_us,
     }
     _CAPTURA_CACHE[key] = res
     return res
@@ -561,7 +563,7 @@ def figura_fft(cap, sel, canal):
     n = len(filas)
     if n and W.shape[1] > 1:
         fs = 1.0 / (cap["dt_us"] * 1e-6)  # Hz
-        nperseg = min(W.shape[1], 1024)
+        nperseg = min(W.shape[1], 256)
         acc = None
         for i in filas:
             f, Pxx = welch(W[i], fs=fs, nperseg=nperseg, scaling="spectrum")
@@ -613,7 +615,7 @@ def transformada_s(x, t_us, dt_us, fmax_mhz=ST_FMAX_MHZ, nfreq=ST_NFREQ,
 
 
 def figura_st_ventana(cap, sel, canal, fmax_mhz=ST_FMAX_MHZ):
-    """Transformada S (magnitud, mV) de la ventana de 1 µs alrededor del peak,
+    """Transformada S (magnitud, mV) de la ventana de 70 ns alrededor del peak,
     promediando SOLO las ventanas de sel (lista), igual que figura_fft."""
     if not sel:
         return _fig_sin_seleccion(canal)
@@ -843,9 +845,9 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin):
     diametro = inferir_diametros(prob, codigo_prob)
 
     cap = capturar(carpeta, canal, umbral, dist_us, tmin)
-    todos_vp = np.concatenate([cap["v_peak"], cap["v_peak_borde"]]) if cap["v_peak"].size or cap["v_peak_borde"].size else np.array([])
-    todos_tp = np.concatenate([cap["t_peak"], cap["t_peak_borde"]]) if cap["t_peak"].size or cap["t_peak_borde"].size else np.array([])
-    todos_vpp = cap["vpp"] if cap["vpp"].size else np.array([])
+    todos_vp = cap["v_peak"]
+    todos_tp = cap["t_peak"]
+    todos_vpp = cap["vpp"]
 
     if todos_vp.size > 0:
         vp_mean_mv = float(np.mean(np.abs(todos_vp)))
@@ -1345,7 +1347,7 @@ app.layout = html.Div(
                                                         id="modo_magnitud_trpd",
                                                         options=[
                                                             {"label": " Vmax (pico máximo)", "value": "vmax"},
-                                                            {"label": " Vpp (peak-to-peak en 1 µs)", "value": "vpp"},
+                                                            {"label": " Vpp (peak-to-peak en 70 ns)", "value": "vpp"},
                                                         ],
                                                         value="vmax",
                                                         inline=True,
@@ -1843,7 +1845,7 @@ def actualizar_temporal(sel, p):
     State("captura_params", "data"),
 )
 def actualizar_st_ventana(sel, tab, fmax, p):
-    """Transformada S de la ventana de 1 µs (solo si su pestaña está visible),
+    """Transformada S de la ventana de 70 ns (solo si su pestaña está visible),
     promediando SOLO las señales seleccionadas (store `seleccion`)."""
     if tab != "st" or not p:
         return no_update
