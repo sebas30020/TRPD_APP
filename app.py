@@ -17,9 +17,12 @@ import h5py
 import numpy as np
 import plotly.graph_objects as go
 import scipy.fft as sfft
+import yaml
 from plotly.subplots import make_subplots
 from scipy.signal import find_peaks, butter, sosfiltfilt, welch
 from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, ctx
+
+from generate_metadata import plantilla_metadata, inferir_parametros, inferir_diametros
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 # Carpeta de datos: vive fuera del repo, en la carpeta hermana "mediciones/Mediciones"
@@ -645,32 +648,157 @@ def figura_vpp_energia(cap, canal, highlight=None, uirev=None):
     return fig
 
 
-DENSIDAD_MAX = 6  # filas explícitas 0..DENSIDAD_MAX; el resto va a una fila ">DENSIDAD_MAX"
+def _dir_medicion(carpeta):
+    """Encuentra el directorio físico que contiene los archivos de la medición."""
+    for c in CANALES:
+        p = _ruta(carpeta, c)
+        if p and os.path.isfile(p):
+            return os.path.dirname(p)
+    p_dir = os.path.join(MEDICIONES, carpeta)
+    if os.path.isdir(p_dir):
+        return p_dir
+    parent, _ = os.path.split(carpeta)
+    p_parent = os.path.join(MEDICIONES, parent)
+    if os.path.isdir(p_parent):
+        return p_parent
+    return p_dir
 
 
-def tabla_densidad(cuentas):
-    """Distribución de segmentos por nº de peaks: filas 0..DENSIDAD_MAX y, si
-    algún segmento supera ese máximo, una fila '>DENSIDAD_MAX' que los agrupa
-    (para no perder eventos silenciosamente)."""
-    cuentas = np.asarray(cuentas)
-    total = cuentas.size
-    filas = []
-    for k in range(DENSIDAD_MAX + 1):
-        n = int(np.sum(cuentas == k))
-        filas.append({"peaks": str(k), "n_segmentos": n,
-                      "pct": f"{100 * n / total:.1f}%" if total else "0.0%"})
-    extra = int(np.sum(cuentas > DENSIDAD_MAX))
-    if extra:
-        filas.append({"peaks": f">{DENSIDAD_MAX}", "n_segmentos": extra,
-                      "pct": f"{100 * extra / total:.1f}%" if total else "0.0%"})
-    return filas
+def obtener_metadata(carpeta):
+    """Carga metadata.yaml si existe en la carpeta de medición; de lo contrario,
+    genera la estructura enriquecida en memoria a partir de los HDF5 y parámetros inferidos."""
+    if not carpeta:
+        return {}
+    d = _dir_medicion(carpeta)
+    meta_path = os.path.join(d, "metadata.yaml")
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+                if isinstance(data, dict):
+                    data["_ruta_yaml"] = meta_path
+                    data["_existe_en_disco"] = True
+                    return data
+        except Exception as e:
+            print(f"Advertencia: no se pudo leer {meta_path} ({e})")
+    try:
+        data = plantilla_metadata(carpeta, d)
+        data["_ruta_yaml"] = meta_path
+        data["_existe_en_disco"] = False
+        return data
+    except Exception as e:
+        print(f"Advertencia: error al generar plantilla de metadata para {carpeta} ({e})")
+        return {
+            "experimento": {"id": carpeta},
+            "_ruta_yaml": meta_path,
+            "_existe_en_disco": False,
+        }
+
+
+def guardar_metadata_archivo(carpeta, contenido_yaml_str):
+    """Guarda una cadena YAML en metadata.yaml en la carpeta física de la medición."""
+    if not carpeta or not contenido_yaml_str:
+        return False, "No hay contenido para guardar."
+    d = _dir_medicion(carpeta)
+    meta_path = os.path.join(d, "metadata.yaml")
+    try:
+        yaml.safe_load(contenido_yaml_str)  # validar sintaxis YAML
+        with open(meta_path, "w", encoding="utf-8") as f:
+            f.write(contenido_yaml_str)
+        return True, f"Guardado exitoso en {os.path.basename(meta_path)}"
+    except Exception as e:
+        return False, f"Error al guardar: {e}"
 
 
 COLUMNAS_DENSIDAD = [
-    {"name": "N° de peaks", "id": "peaks"},
-    {"name": "N° de segmentos", "id": "n_segmentos"},
-    {"name": "% de segmentos", "id": "pct"},
+    {"name": "Specimen", "id": "specimen"},
+    {"name": "Voltage (kV)", "id": "voltage"},
+    {"name": "Sensor", "id": "sensor"},
+    {"name": "N_PD distribution [0, 1, 2, 3, 4, > 4]", "id": "distribucion"},
+    {"name": "Media de N_PD", "id": "media_npd"},
+    {"name": "d (mm)", "id": "diametro"},
+    {"name": "V̄_p (V)", "id": "vp_media"},
+    {"name": "t̄_abs (µs)", "id": "tabs_media"},
 ]
+
+
+def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin):
+    """Calcula la fila de la tabla de densidad para la medición y canal dados,
+    inspirada en la tabla experimental de resumen (Specimen, Voltage, Sensor,
+    N_PD distribution [0, 1, 2, 3, 4, > 4], Media de N_PD, d (mm), V̄_p (V), t̄_abs (µs))."""
+    meta = obtener_metadata(carpeta)
+    prob = meta.get("probeta", {})
+    circ = meta.get("circuito_impulso", {})
+    canales_cfg = meta.get("canales", {})
+
+    codigo_prob = prob.get("codigo") or ""
+    tipo_geom = prob.get("tipo_geometria") or ""
+    if codigo_prob and tipo_geom:
+        specimen = f"{codigo_prob} ({tipo_geom})"
+    elif codigo_prob:
+        specimen = codigo_prob
+    else:
+        specimen = prob.get("descripcion") or "Pressboard"
+
+    v_dc = circ.get("tension_dc_condensador_kv")
+    if v_dc is not None:
+        voltage = f"{v_dc} kV"
+    else:
+        inf = inferir_parametros(carpeta)
+        voltage = f"{inf['tension_dc']} kV" if inf.get("tension_dc") else "-"
+
+    sens_info = canales_cfg.get(canal, {})
+    sens_nom = sens_info.get("sensor") or canal.upper()
+    sensor = f"{sens_nom} ({canal.upper()})"
+
+    segs, cuentas = contar_peaks(carpeta, canal, umbral, dist_us, tmin)
+    cuentas_arr = np.asarray(cuentas)
+    if cuentas_arr.size > 0:
+        c0 = int(np.sum(cuentas_arr == 0))
+        c1 = int(np.sum(cuentas_arr == 1))
+        c2 = int(np.sum(cuentas_arr == 2))
+        c3 = int(np.sum(cuentas_arr == 3))
+        c4 = int(np.sum(cuentas_arr == 4))
+        c_mas = int(np.sum(cuentas_arr > 4))
+        distribucion = f"[{c0}, {c1}, {c2}, {c3}, {c4}, {c_mas}]"
+        media_npd = f"{np.mean(cuentas_arr):.2f}"
+    else:
+        distribucion = "[0, 0, 0, 0, 0, 0]"
+        media_npd = "0.00"
+
+    diametro = inferir_diametros(prob, codigo_prob)
+
+    cap = capturar(carpeta, canal, umbral, dist_us, tmin)
+    todos_vp = np.concatenate([cap["v_peak"], cap["v_peak_borde"]]) if cap["v_peak"].size or cap["v_peak_borde"].size else np.array([])
+    todos_tp = np.concatenate([cap["t_peak"], cap["t_peak_borde"]]) if cap["t_peak"].size or cap["t_peak_borde"].size else np.array([])
+
+    if todos_vp.size > 0:
+        vp_mean_mv = float(np.mean(np.abs(todos_vp)))
+        vp_mean_v = vp_mean_mv / 1000.0
+        vp_str = f"{vp_mean_v:.4f} V ({vp_mean_mv:.1f} mV)"
+    else:
+        vp_str = "-"
+
+    if todos_tp.size > 0:
+        tabs_mean = float(np.mean(todos_tp))
+        tabs_str = f"{tabs_mean:.3f} µs"
+    else:
+        tabs_str = "-"
+
+    return {
+        "id": f"{carpeta}_{canal}",
+        "specimen": specimen,
+        "voltage": voltage,
+        "sensor": sensor,
+        "distribucion": distribucion,
+        "media_npd": media_npd,
+        "diametro": diametro,
+        "vp_media": vp_str,
+        "tabs_media": tabs_str,
+        "_carpeta": carpeta,
+        "_canal": canal,
+    }
+
 
 
 _IMPULSO_CACHE = {}
@@ -881,6 +1009,7 @@ app.layout = html.Div(
         dcc.Store(id="umbral"),
         dcc.Store(id="captura_params"),
         dcc.Store(id="seleccion", data=[]),
+        dcc.Store(id="densidad_store", data=[]),
         html.Div(
             className="header",
             children=[
@@ -925,6 +1054,7 @@ app.layout = html.Div(
                     dcc.Tabs(id="tabs_principal", value="senales", children=[
                         dcc.Tab(label="Señales", value="senales", **_TAB),
                         dcc.Tab(label="Transformada S", value="st", **_TAB),
+                        dcc.Tab(label="Metadata", value="metadata", **_TAB),
                     ]),
                     html.Div(id="panel_senales", children=[
                         dcc.Graph(
@@ -935,6 +1065,73 @@ app.layout = html.Div(
                     html.Div(id="panel_st_segmento", hidden=True, children=[
                         dcc.Loading(dcc.Graph(id="grafico_st_segmento")),
                     ]),
+                    html.Div(id="panel_metadata", hidden=True, style={"padding": "10px 4px"}, children=[
+                        html.Div(
+                            style={
+                                "display": "flex", "justifyContent": "space-between",
+                                "alignItems": "center", "marginBottom": "12px", "flexWrap": "wrap",
+                                "gap": "8px", "borderBottom": "1px solid #e2e8f0", "paddingBottom": "8px",
+                            },
+                            children=[
+                                html.Div([
+                                    html.H3(id="meta_titulo", style={"margin": "0 0 4px 0", "fontSize": "15px", "color": "#0f172a"}),
+                                    html.Span(id="meta_badge_estado", style={
+                                        "display": "inline-block", "fontSize": "11px", "padding": "2px 8px",
+                                        "borderRadius": "10px", "fontWeight": "600",
+                                    }),
+                                ]),
+                                html.Div(style={"display": "flex", "gap": "6px", "alignItems": "center"}, children=[
+                                    html.Button("💾 Guardar metadata.yaml", id="btn_guardar_metadata",
+                                                style={"backgroundColor": "#10b981", "color": "white", "border": "none",
+                                                       "padding": "6px 12px", "borderRadius": "6px", "fontWeight": "600",
+                                                       "cursor": "pointer", "fontSize": "12px"}),
+                                ]),
+                            ],
+                        ),
+                        html.Div(id="meta_msg_feedback", style={"marginBottom": "8px", "fontSize": "12px"}),
+                        html.Div(
+                            style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(200px, 1fr))", "gap": "10px", "marginBottom": "12px"},
+                            children=[
+                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
+                                    html.H4("🔬 Experimento", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
+                                    html.Div(id="meta_card_experimento", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                ]),
+                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
+                                    html.H4("⚡ Circuito de Impulso (LI)", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
+                                    html.Div(id="meta_card_circuito", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                ]),
+                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
+                                    html.H4("🧪 Probeta / Espécimen", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
+                                    html.Div(id="meta_card_probeta", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                ]),
+                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
+                                    html.H4("📊 Osciloscopio & Adquisición", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
+                                    html.Div(id="meta_card_osc", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                ]),
+                            ],
+                        ),
+                        html.Div(className="card", style={"padding": "8px 10px", "marginBottom": "12px"}, children=[
+                            html.H4("📡 Asignación de Sensores y Canales de Adquisición", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b"}),
+                            html.Div(id="meta_tabla_canales"),
+                        ]),
+                        html.Details([
+                            html.Summary("Ver / Editar YAML crudo", style={"cursor": "pointer", "fontSize": "12px", "fontWeight": "600", "color": "#475569", "padding": "4px 0"}),
+                            html.Div(style={"marginTop": "6px"}, children=[
+                                dcc.Textarea(
+                                    id="meta_yaml_text",
+                                    style={"width": "100%", "height": "200px", "fontFamily": "monospace",
+                                           "fontSize": "11px", "padding": "6px", "border": "1px solid #cbd5e1",
+                                           "borderRadius": "6px", "boxSizing": "border-box"},
+                                ),
+                                html.Div(style={"marginTop": "4px", "textAlign": "right"}, children=[
+                                    html.Button("Guardar cambios del texto YAML", id="btn_guardar_yaml_texto",
+                                                style={"backgroundColor": "#3b82f6", "color": "white", "border": "none",
+                                                       "padding": "4px 10px", "borderRadius": "4px", "fontWeight": "600",
+                                                       "cursor": "pointer", "fontSize": "11px"}),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
                 ]),
                 html.Div(
                     className="col",
@@ -944,17 +1141,35 @@ app.layout = html.Div(
                                 dcc.Tab(label="Peaks por segmento", value="barras",
                                         children=[dcc.Graph(id="grafico_peaks")], **_TAB),
                                 dcc.Tab(label="Densidad de eventos", value="densidad",
-                                        children=[dash_table.DataTable(
-                                            id="tabla_densidad",
-                                            columns=COLUMNAS_DENSIDAD,
-                                            data=[],
-                                            style_table={"marginTop": "10px"},
-                                            style_cell={"textAlign": "center",
-                                                        "padding": "6px",
-                                                        "fontFamily": "inherit"},
-                                            style_header={"fontWeight": "bold",
-                                                          "backgroundColor": "#f5f5f5"},
-                                        )], **_TAB),
+                                        children=[
+                                            html.Div(style={"display": "flex", "gap": "8px", "marginTop": "6px", "marginBottom": "4px", "alignItems": "center", "flexWrap": "wrap"}, children=[
+                                                html.Button("⚡ Calcular todos los sensores (CH2..CH4)", id="btn_calc_todos_sensores",
+                                                            style={"fontSize": "11px", "padding": "4px 8px", "backgroundColor": "#2563eb",
+                                                                   "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}),
+                                                html.Button("🗑 Limpiar tabla", id="btn_limpiar_densidad",
+                                                            style={"fontSize": "11px", "padding": "4px 8px", "backgroundColor": "#64748b",
+                                                                   "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}),
+                                            ]),
+                                            dash_table.DataTable(
+                                                id="tabla_densidad",
+                                                columns=COLUMNAS_DENSIDAD,
+                                                data=[],
+                                                export_format="csv",
+                                                style_table={"overflowX": "auto", "maxHeight": "360px", "marginTop": "4px"},
+                                                style_cell={"textAlign": "center",
+                                                            "padding": "5px 8px",
+                                                            "fontSize": "11px",
+                                                            "fontFamily": "inherit"},
+                                                style_header={"fontWeight": "bold",
+                                                              "backgroundColor": "#f1f5f9",
+                                                              "color": "#1e293b"},
+                                                style_data_conditional=[
+                                                    {"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"},
+                                                    {"if": {"column_id": "sensor"}, "fontWeight": "600"},
+                                                    {"if": {"column_id": "distribucion"}, "fontFamily": "monospace"},
+                                                ],
+                                            ),
+                                        ], **_TAB),
                             ]),
                         ]),
                         html.Div(className="card", children=[
@@ -1028,13 +1243,14 @@ def actualizar(carpeta, seg, canal, p, dist_us, tmin, umbral):
 @app.callback(
     Output("panel_senales", "hidden"),
     Output("panel_st_segmento", "hidden"),
+    Output("panel_metadata", "hidden"),
     Input("tabs_principal", "value"),
 )
 def alternar_panel_principal(tab):
-    """Alterna Señales/Transformada S sin desmontar `grafico`: así se conserva
-    la posición de la línea de umbral arrastrada, el zoom y los clics en
-    cruces al volver a la pestaña de Señales."""
-    return tab != "senales", tab == "senales"
+    """Alterna Señales / Transformada S / Metadata sin desmontar `grafico`: así
+    se conserva la posición de la línea de umbral arrastrada, el zoom y los
+    clics en cruces al volver a la pestaña de Señales."""
+    return tab != "senales", tab != "st", tab != "metadata"
 
 
 @app.callback(
@@ -1097,18 +1313,201 @@ def fijar_captura(n_clicks, carpeta, canal, dist_us, tmin, umbral):
 
 @app.callback(
     Output("grafico_peaks", "figure"),
-    Output("tabla_densidad", "data"),
     Input("captura_params", "data"),
 )
 def calcular_peaks(p):
     if not p:
-        return no_update, no_update
+        return no_update
     segs, cuentas = contar_peaks(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
     if not segs:
         fig = go.Figure()
         fig.update_layout(title=f"{p['canal'].upper()} no disponible en esta medición", height=415)
-        return fig, []
-    return figura_peaks(segs, cuentas, p["umbral"], p["canal"]), tabla_densidad(cuentas)
+        return fig
+    return figura_peaks(segs, cuentas, p["umbral"], p["canal"])
+
+
+@app.callback(
+    Output("densidad_store", "data"),
+    Input("captura_params", "data"),
+    Input("btn_calc_todos_sensores", "n_clicks"),
+    Input("btn_limpiar_densidad", "n_clicks"),
+    State("densidad_store", "data"),
+    State("dist", "value"),
+    State("tmin", "value"),
+    prevent_initial_call=True,
+)
+def actualizar_densidad_store(p, n_todos, n_limpiar, data_actual, dist_us, tmin):
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if trig == "btn_limpiar_densidad":
+        return []
+
+    filas = list(data_actual) if data_actual else []
+    def _upsert(fila):
+        idx = next((i for i, r in enumerate(filas) if r.get("id") == fila["id"]), None)
+        if idx is not None:
+            filas[idx] = fila
+        else:
+            filas.append(fila)
+
+    if trig == "btn_calc_todos_sensores" and p:
+        carpeta = p["carpeta"]
+        dist = dist_us if dist_us is not None else 1.0
+        tm = tmin if tmin is not None else 0.0
+        for ch in ["ch2", "ch3", "ch4"]:
+            if ch in canales_presentes(carpeta):
+                u_ch = p["umbral"] if ch == p["canal"] else umbral_defecto(carpeta, ch)
+                f = calcular_fila_densidad(carpeta, ch, u_ch, dist, tm)
+                _upsert(f)
+        return filas
+
+    if trig == "captura_params" and p:
+        f = calcular_fila_densidad(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+        _upsert(f)
+        return filas
+
+    return filas
+
+
+@app.callback(
+    Output("tabla_densidad", "data"),
+    Input("densidad_store", "data"),
+)
+def sincronizar_tabla_densidad(data):
+    return data or []
+
+
+@app.callback(
+    Output("meta_titulo", "children"),
+    Output("meta_badge_estado", "children"),
+    Output("meta_badge_estado", "style"),
+    Output("meta_msg_feedback", "children"),
+    Output("meta_card_experimento", "children"),
+    Output("meta_card_circuito", "children"),
+    Output("meta_card_probeta", "children"),
+    Output("meta_card_osc", "children"),
+    Output("meta_tabla_canales", "children"),
+    Output("meta_yaml_text", "value"),
+    Input("carpeta", "value"),
+    Input("btn_guardar_metadata", "n_clicks"),
+    Input("btn_guardar_yaml_texto", "n_clicks"),
+    State("meta_yaml_text", "value"),
+)
+def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, yaml_txt_state):
+    if not carpeta:
+        return "", "", {}, "", "", "", "", "", "", ""
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    msg_fb = ""
+
+    if trig == "btn_guardar_yaml_texto" and yaml_txt_state:
+        ok, msg = guardar_metadata_archivo(carpeta, yaml_txt_state)
+        color = "#10b981" if ok else "#ef4444"
+        msg_fb = html.Span(msg, style={"color": color, "fontWeight": "600"})
+    elif trig == "btn_guardar_metadata":
+        meta_act = obtener_metadata(carpeta)
+        meta_clean = {k: v for k, v in meta_act.items() if not k.startswith("_")}
+        meta_str = yaml.safe_dump(meta_clean, sort_keys=False, allow_unicode=True)
+        ok, msg = guardar_metadata_archivo(carpeta, meta_str)
+        color = "#10b981" if ok else "#ef4444"
+        msg_fb = html.Span(msg, style={"color": color, "fontWeight": "600"})
+
+    meta = obtener_metadata(carpeta)
+    existe = meta.get("_existe_en_disco", False)
+    badge_txt = "Archivo en disco: metadata.yaml" if existe else "Autogenerado desde HDF5 (no guardado)"
+    badge_style = {
+        "display": "inline-block", "fontSize": "11px", "padding": "2px 8px",
+        "borderRadius": "10px", "fontWeight": "600",
+        "backgroundColor": "#d1fae5" if existe else "#fef3c7",
+        "color": "#065f46" if existe else "#92400e",
+    }
+
+    exp = meta.get("experimento", {})
+    circ = meta.get("circuito_impulso", {})
+    prob = meta.get("probeta", {})
+    osc = meta.get("osciloscopio", {})
+    canales_cfg = meta.get("canales", {})
+
+    card_exp = [
+        html.Div([html.Strong("ID: "), str(exp.get("id") or carpeta)]),
+        html.Div([html.Strong("Fecha/Hora: "), str(exp.get("fecha_hora") or "N/D")]),
+        html.Div([html.Strong("Temperatura: "), f"{exp.get('temperatura_c')} °C" if exp.get("temperatura_c") is not None else "N/D"]),
+        html.Div([html.Strong("Humedad: "), f"{exp.get('humedad_relativa_pct')} %" if exp.get("humedad_relativa_pct") is not None else "N/D"]),
+    ]
+
+    card_circ = [
+        html.Div([html.Strong("Forma de onda: "), str(circ.get("forma_onda_nominal") or "1.2/50 µs")]),
+        html.Div([html.Strong("Tensión DC (carga): "), f"{circ.get('tension_dc_condensador_kv')} kV" if circ.get("tension_dc_condensador_kv") is not None else "N/D"]),
+        html.Div([html.Strong("Polaridad: "), str(circ.get("polaridad") or "positiva")]),
+        html.Div([html.Strong("Disparos programados: "), str(circ.get("nro_disparos_programados") or 50)]),
+        html.Div([html.Strong("Intervalo entre disparos: "), f"{circ.get('intervalo_entre_disparos_s')} s" if circ.get("intervalo_entre_disparos_s") is not None else "30 s"]),
+    ]
+
+    diam = inferir_diametros(prob, prob.get("codigo"))
+    card_prob = [
+        html.Div([html.Strong("Código: "), str(prob.get("codigo") or "N/D")]),
+        html.Div([html.Strong("Geometría: "), str(prob.get("tipo_geometria") or "N/D")]),
+        html.Div([html.Strong("N° vacuolas: "), str(prob.get("nro_vacuolas") or "N/D")]),
+        html.Div([html.Strong("Diámetros (d): "), diam]),
+        html.Div([html.Strong("Capas / Espesor: "), f"{prob.get('nro_capas_total', 4)} capas ({prob.get('espesor_capa_mm', 0.48)} mm)"]),
+    ]
+
+    fs_val = osc.get("frecuencia_muestreo_gsas")
+    pts_val = osc.get("puntos_por_segmento")
+    card_osc = [
+        html.Div([html.Strong("Modelo: "), str(osc.get("modelo") or "DSOS804A")]),
+        html.Div([html.Strong("Serial: "), str(osc.get("serial") or "N/D")]),
+        html.Div([html.Strong("Frecuencia muestreo: "), f"{fs_val} GSa/s" if fs_val else "5.0 GSa/s"]),
+        html.Div([html.Strong("Ventana / Puntos: "), f"{pts_val} pts ({osc.get('tiempo_total_ventana_us', 35)} µs)" if pts_val else "35 µs"]),
+        html.Div([html.Strong("N° segmentos: "), str(osc.get("num_segmentos_capturados") or n_segmentos(carpeta))]),
+    ]
+
+    filas_ch = []
+    for c in CANALES:
+        cfg = canales_cfg.get(c, {})
+        filas_ch.append(html.Tr([
+            html.Td(c.upper(), style={"fontWeight": "bold", "padding": "4px 8px"}),
+            html.Td(cfg.get("sensor", "-"), style={"padding": "4px 8px"}),
+            html.Td(cfg.get("funcion", "-"), style={"padding": "4px 8px"}),
+            html.Td(f"{cfg.get('escala_v_div', '-')} V/div" if cfg.get("escala_v_div") else "-", style={"padding": "4px 8px"}),
+            html.Td(cfg.get("unidad", "V"), style={"padding": "4px 8px"}),
+            html.Td(cfg.get("filtro", "-") if cfg.get("filtro") else f"-{cfg.get('atenuacion_db')} dB" if cfg.get("atenuacion_db") else "-", style={"padding": "4px 8px"}),
+        ]))
+
+    tabla_ch = html.Table(
+        style={"width": "100%", "borderCollapse": "collapse", "fontSize": "11px", "marginTop": "4px"},
+        children=[
+            html.Thead(html.Tr([
+                html.Th("Canal", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
+                html.Th("Sensor", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
+                html.Th("Función", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
+                html.Th("Escala V/div", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
+                html.Th("Unidad", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
+                html.Th("Filtro / Atenuación", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
+            ])),
+            html.Tbody(filas_ch),
+        ],
+    )
+
+    meta_clean = {k: v for k, v in meta.items() if not k.startswith("_")}
+    yaml_dump = yaml.safe_dump(meta_clean, sort_keys=False, allow_unicode=True)
+
+    return (
+        f"Medición: {carpeta}",
+        badge_txt,
+        badge_style,
+        msg_fb,
+        card_exp,
+        card_circ,
+        card_prob,
+        card_osc,
+        tabla_ch,
+        yaml_dump,
+    )
 
 
 @app.callback(

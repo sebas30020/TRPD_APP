@@ -98,11 +98,11 @@ def inferir_parametros(experimento):
     tipo_geometria = None
     nro_vacuolas = None
 
-    patron_probeta = re.compile(r"^[1-4]V[2-4]+[H]?(_\d+)?$", re.IGNORECASE)
+    patron_probeta = re.compile(r"([1-4]V[2-4]+[H]?)(?:[_\-\s]|\b|$)", re.IGNORECASE)
     for p in partes:
-        m = patron_probeta.match(p)
+        m = patron_probeta.search(p)
         if m:
-            codigo_probeta = p.upper()
+            codigo_probeta = m.group(1).upper()
             break
 
     if codigo_probeta:
@@ -128,6 +128,30 @@ def inferir_parametros(experimento):
         "nro_vacuolas": nro_vacuolas,
         "tension_dc": tension_dc,
     }
+
+
+def inferir_diametros(probeta_data=None, codigo_probeta=None):
+    """Extrae o infiere los diámetros de las cavidades (mm) como string legible (ej. 'D1=3 mm, D2=3 mm')."""
+    if isinstance(probeta_data, dict):
+        vacs = probeta_data.get("vacuolas") or []
+        if vacs:
+            partes = []
+            for i, v in enumerate(vacs, start=1):
+                d = v.get("diametro_mm") or v.get("d_mm")
+                if d is not None:
+                    partes.append(f"D{i}={d} mm")
+            if partes:
+                return ", ".join(partes)
+        if not codigo_probeta:
+            codigo_probeta = probeta_data.get("codigo")
+
+    if codigo_probeta:
+        m = re.search(r"^[1-4]V([2-4]+)", str(codigo_probeta), re.IGNORECASE)
+        if m:
+            digitos = m.group(1)
+            return ", ".join([f"D{i+1}={d} mm" for i, d in enumerate(digitos)])
+    return "N/D"
+
 
 
 def plantilla_metadata(experimento, carpeta_medicion):

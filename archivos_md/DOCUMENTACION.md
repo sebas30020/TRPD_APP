@@ -346,13 +346,17 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 
 - **Barras** (`figura_peaks`): nº de peaks por segmento.
 - **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` id="tabla_densidad"):
-  Distribución de segmentos según la cantidad de peaks que contienen. Presenta filas
-  explícitas para $0, 1, 2, \dots, \text{DENSIDAD\_MAX}$ (`DENSIDAD_MAX = 6`) y, si
-  algún segmento supera ese valor, añade automáticamente una fila agregada `>6`
-  para no perder eventos silenciosamente. Columnas:
-  - `peaks`: "N° de peaks",
-  - `n_segmentos`: "N° de segmentos",
-  - `pct`: "% de segmentos".
+  Tabla resumen de caracterización experimental inspirada en el estándar de ensayo
+  de descargas parciales bajo impulso:
+  - `Specimen`: código y geometría de la probeta (ej. `2V33H (asimetrica)`).
+  - `Voltage (kV)`: tensión DC previa en el condensador de carga (ej. `15.0 kV`).
+  - `Sensor`: sensor y canal evaluado (ej. `HFCT (CH2)`, `Antena Vivaldi (CH3)`, `Antena Bioinspirada (CH4)`).
+  - `N_PD distribution [0, 1, 2, 3, 4, > 4]`: vector con el conteo de disparos/segmentos que registraron exactamente 0, 1, 2, 3, 4 y más de 4 eventos de DP (ej. `[9, 33, 8, 0, 0, 0]`).
+  - `Media de N_PD`: promedio de eventos detectados por disparo ($\bar{N}_{PD}$).
+  - `d (mm)`: diámetro(s) de cavidad(es) de la probeta inferidos del código o leídos de los metadatos (ej. `D1=3 mm, D2=3 mm`).
+  - `V̄_p (V)`: amplitud pico media de todas las descargas detectadas (expresada en Voltios y con valor en mV).
+  - `t̄_abs (µs)`: tiempo absoluto medio de ocurrencia de las descargas en el segmento (respecto al inicio del registro/trigger), clave para análisis TRPD.
+  Dispone de botón **"⚡ Calcular todos los sensores (CH2..CH4)"**, botón **"Limpiar tabla"** y exportación nativa a **CSV**. Almacena su historial en `densidad_store`, permitiendo comparar ensayos a diferentes niveles de tensión y sobre distintos sensores.
 - **Scatter Peaks** (`figura_scatter`): `t_peak` vs `v_peak` (+ CH1 promedio de ref.).
 - **Vpp vs Energía** (`figura_vpp_energia`): por señal capturada,
   `Vpp = ptp(ventana)` [mV], `Energía = Σ v² · dt_us` [mV²·µs].
@@ -527,11 +531,14 @@ Dos escalas, compartiendo la misma función:
 | `set_umbral` | `grafico.relayoutData, canal, carpeta` | `umbral.data` |
 | `mostrar_umbral` | `umbral.data` | `umbral_txt.children` |
 | `fijar_captura` | `btn.n_clicks` (+State carpeta, canal, dist, tmin, umbral) | `captura_params.data` |
-| `calcular_peaks` | `captura_params.data` | `grafico_peaks.figure, tabla_densidad.data` |
+| `calcular_peaks` | `captura_params.data` | `grafico_peaks.figure` |
+| `actualizar_densidad_store` | `captura_params.data, btn_calc_todos_sensores.n_clicks, btn_limpiar_densidad.n_clicks` (+State densidad_store, dist, tmin) | `densidad_store.data` |
+| `sincronizar_tabla_densidad` | `densidad_store.data` | `tabla_densidad.data` |
+| `actualizar_panel_metadata` | `carpeta, btn_guardar_metadata.n_clicks, btn_guardar_yaml_texto.n_clicks` (+State meta_yaml_text) | Tarjetas, tabla canales y YAML de `panel_metadata` |
 | `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico_vpp_energia.selectedData, grafico_vpp_energia.clickData, grafico.clickData` (+State captura_params) | `seleccion.data` |
 | `actualizar_scatter` | `captura_params.data, seleccion.data` | `grafico_scatter.figure, grafico_vpp_energia.figure` |
 | `actualizar_temporal` | `seleccion.data` (+State `captura_params`) | `grafico_ventanas.figure, grafico_fft.figure` |
-| `alternar_panel_principal` | `tabs_principal.value` | `panel_senales.hidden, panel_st_segmento.hidden` |
+| `alternar_panel_principal` | `tabs_principal.value` | `panel_senales.hidden, panel_st_segmento.hidden, panel_metadata.hidden` |
 | `actualizar_st_segmento` | `tabs_principal.value, carpeta, segmento, st_fmax` | `grafico_st_segmento.figure` |
 | `actualizar_st_ventana` | `seleccion.data, tabs_espectro.value, st_fmax` (+State `captura_params`) | `grafico_st_ventana.figure` |
 | `seleccionar_segmento` | `grafico_peaks.clickData` | `segmento.value` |
@@ -544,12 +551,15 @@ Dos escalas, compartiendo la misma función:
   distancia (`dist`), t mín (`tmin`), botón "Calcular peaks" (`btn`), texto de umbral
   (`umbral_txt`), f máx ST (`st_fmax`).
 - **Fila central (2 columnas):**
-  - Columna izquierda: Gráfico principal con pestañas **Señales** (4 filas ch1..ch4) /
-    **Transformada S** (4 mapas de calor, mismo eje de tiempo) — `tabs_principal`.
+  - Columna izquierda: Panel principal con pestañas **Señales** (4 filas ch1..ch4) /
+    **Transformada S** (4 mapas de calor de segmento completo) / **Metadata**
+    (panel técnico con tarjetas de experimento, circuito LI, probeta, osciloscopio,
+    asignación de sensores por canal y editor/visor YAML) — `tabs_principal`.
   - Columna derecha:
     - Tarjeta superior: Pestañas **Peaks por segmento** (`grafico_peaks`) /
-      **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` con distribución
-      0..6 y fila `>6`) — `tabs_peaks`.
+      **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` resumen de
+      8 columnas: Specimen, Voltage, Sensor, $N_{PD}$ dist., Media $N_{PD}$, $d$, $\bar{V}_p$, $\bar{t}_{abs}$,
+      con botones para calcular todos los sensores, limpiar y exportar a CSV) — `tabs_peaks`.
     - Tarjeta inferior: Pestañas **Peaks** (`grafico_scatter`) /
       **Vpp vs Energía** (`grafico_vpp_energia`) — `tabs_scatter`.
 - **Última fila (2 columnas):**
