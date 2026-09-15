@@ -250,16 +250,22 @@ unificadas:
 - **R-P4 · Snapshot de captura.** Al pulsar **"Calcular peaks"**, los parámetros
   se congelan en `captura_params`. Mientras no se pulse el botón, las cruces del
   gráfico principal corresponden a detección en vivo y no son clicables.
+- **R-P5 · Multi-Trigger independiente por sensor.** Cada canal detector (`ch2`: HFCT,
+  `ch3`: Antena Vivaldi, `ch4`: Antena Bioinspirada) cuenta con su propia configuración
+  de trigger independiente: umbral $u$ (mV), distancia mínima $\Delta t$ (µs) y tiempo
+  mínimo $t_{\text{mín}}$ (µs). Las líneas de umbral se representan en el osciloscopio
+  con colores distintivos (roja para el canal activo, azul/verde/ámbar para los demás)
+  y son interactivamente arrastrables.
 
 ### Resumen de participación de peaks por análisis
 
 | Análisis / Visualización | Peaks completos | Peaks sin ventana | Filtrado por selección (`seleccion`) |
 |---|:---:|:---:|:---:|
 | **Barras de peaks por segmento** (`figura_peaks`) | Sí | Sí | No (todos los del segmento) |
-| **Tabla de densidad de eventos** (`tabla_densidad`) | Sí | Sí | No (todos los segmentos) |
+| **Tabla de densidad de eventos** (`tabla_densidad`) | Sí | Sí | No (evaluación multi-sensor independiente) |
 | **Cruces negras en gráfico principal** (`figura`) | Sí | No | Clicables (alimentan `seleccion`) |
 | **Cruces naranjas en gráfico principal** (`figura`) | No | Sí | No clicables (informativas) |
-| **Scatter Peaks** (`figura_scatter`) | Sí | No | Resalta seleccionados en amarillo |
+| **Patrón TRPD ($V_{\max}$ o $V_{\text{pp}}$)** (`figura_scatter`) | Sí | No | Resalta seleccionados en amarillo |
 | **Scatter Vpp vs Energía** (`figura_vpp_energia`) | Sí | No | Resalta seleccionados en amarillo |
 | **Ventanas temporales** (`figura_ventanas`) | Sí | No | **Solo los seleccionados** |
 | **FFT Welch** (`figura_fft`) | Sí | No | **Solo los seleccionados** (promedio) |
@@ -270,8 +276,8 @@ unificadas:
 ## 4. Captura (fuente única de análisis)
 
 Al pulsar **"Calcular peaks"** se fija un *snapshot* de parámetros en el store
-`captura_params` = `{carpeta, canal, umbral, dist, tmin}`. **Todos** los análisis
-(barras, densidad, scatter Peaks, Vpp/Energía, ventanas, FFT, Transformada S y las
+`captura_params` = `{carpeta, canal, umbral, dist, tmin, cfg_sensores}`. **Todos** los análisis
+(barras, densidad, patrón TRPD, Vpp/Energía, ventanas, FFT, Transformada S y las
 cruces del gráfico principal) derivan de ese snapshot vía `capturar`.
 
 - **R-C1 · `capturar`** (cacheado en `_CAPTURA_CACHE`) detecta los peaks de
@@ -279,7 +285,8 @@ cruces del gráfico principal) derivan de ese snapshot vía `capturar`.
   80 % después** del peak (`antes_us = 0.2`, `desp_us = 0.8`), alineada al peak en $t = 0$. Devuelve:
   - `t_rel`: eje temporal relativo al peak (µs), común a todas las ventanas.
   - `W`: matriz ($n_{\text{ventanas}} \times n_{\text{muestras}}$) con las señales capturadas (mV).
-  - `t_peak`, `v_peak`: instante (µs) y amplitud (mV) de cada peak con ventana completa.
+  - `t_peak`, `v_peak`: instante (µs) y amplitud máxima instantánea $V_{\max}$ (mV) de cada peak con ventana completa.
+  - `vpp`: amplitud peak-to-peak $V_{\text{pp}} = \max(W_i) - \min(W_i)$ (mV) calculada estrictamente en la ventana de 1 µs.
   - `seg`: segmento de origen de cada ventana completa.
   - `t_peak_borde`, `v_peak_borde`, `seg_borde`: peaks detectados pero demasiado pegados al borde.
   - `dt_us`: paso de muestreo (µs).
@@ -302,14 +309,13 @@ cruces del gráfico principal) derivan de ese snapshot vía `capturar`.
 ## 5. Política de recálculo
 
 - **R-R1.** Cambios que **NO** recalculan automáticamente (son `State`, no `Input`):
-  - mover la línea de **umbral**,
-  - cambiar **"distancia entre peaks"**,
-  - cambiar **"t mín"**.
+  - mover cualquiera de las líneas de **umbral** en el osciloscopio,
+  - cambiar valores en los campos de entrada de los sensores (`umbral`, `dist`, `tmin`).
 - **R-R2.** El recálculo de peaks y ventanas ocurre **solo** al pulsar
   **"Calcular peaks"** (modifica el store `captura_params`).
 - **R-R3.** El gráfico principal se redibuja al pulsar el botón o al cambiar de
-  **segmento / canal / medición**. Al cambiar de canal o medición se fuerza el
-  umbral por defecto (evita arrastrar el valor del canal anterior).
+  **segmento / canal / medición**. Al cambiar de medición se cargan los umbrales
+  y parámetros calibrados en `metadata.yaml` (o inferidos por defecto).
 
 ---
 
@@ -319,11 +325,11 @@ Store central **`seleccion`** = lista de índices globales de ventana. Es la ún
 fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 
 - **R-S1 · Fuentes.** Alimentan la selección (`set_seleccion`):
-  1. clic o caja en el scatter **Peaks**,
+  1. clic o caja en el **Patrón TRPD** (ya sea en modo $V_{\max}$ o $V_{\text{pp}}$),
   2. clic o caja en el scatter **Vpp vs Energía**,
   3. **clic en las cruces negras** del canal trigger en el gráfico principal.
 - **R-S2 · Mapeo por fuente** (crítico por fiabilidad de eventos WebGL):
-  - Scatters (Peaks, Vpp/Energía): trazas **Scattergl**, la **curva 0** es 1:1
+  - Scatters (TRPD, Vpp/Energía): trazas **Scattergl**, la **curva 0** es 1:1
     con las ventanas → se usa **`pointNumber`** (siempre presente). `_idx_scatter`.
   - Cruces del trigger: traza **`go.Scatter` (SVG)** con **`customdata` = índice
     global**; SVG garantiza `customdata` en `clickData`. `_idx_cruces`.
@@ -338,7 +344,7 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
   **nueva captura limpia** la selección.
 - **R-S5 · Anti-bucle.** Redibujar los scatters resetea su `selectedData`/
   `clickData` a `None`; `set_seleccion` devuelve `no_update` ante `None` para no
-  borrar la selección. `uirevision` (estable por captura) preserva zoom/caja.
+  borrar la selección. `uirevision` (estable por captura y modo) preserva zoom/caja.
 
 ---
 
@@ -346,18 +352,21 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 
 - **Barras** (`figura_peaks`): nº de peaks por segmento.
 - **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` id="tabla_densidad"):
-  Tabla resumen de caracterización experimental inspirada en el estándar de ensayo
-  de descargas parciales bajo impulso:
+  Tabla resumen de caracterización experimental multi-sensor de 9 columnas:
   - `Specimen`: código y geometría de la probeta (ej. `2V33H (asimetrica)`).
   - `Voltage (kV)`: tensión DC previa en el condensador de carga (ej. `15.0 kV`).
   - `Sensor`: sensor y canal evaluado (ej. `HFCT (CH2)`, `Antena Vivaldi (CH3)`, `Antena Bioinspirada (CH4)`).
   - `N_PD distribution [0, 1, 2, 3, 4, > 4]`: vector con el conteo de disparos/segmentos que registraron exactamente 0, 1, 2, 3, 4 y más de 4 eventos de DP (ej. `[9, 33, 8, 0, 0, 0]`).
   - `Media de N_PD`: promedio de eventos detectados por disparo ($\bar{N}_{PD}$).
   - `d (mm)`: diámetro(s) de cavidad(es) de la probeta inferidos del código o leídos de los metadatos (ej. `D1=3 mm, D2=3 mm`).
-  - `V̄_p (V)`: amplitud pico media de todas las descargas detectadas (expresada en Voltios y con valor en mV).
+  - `V̄_max (V)`: amplitud de pico máxima media de todas las descargas detectadas (expresada en Voltios y con valor en mV).
+  - `V̄_pp (V)`: amplitud peak-to-peak media de las descargas en su ventana de 1 µs (expresada en Voltios y con valor en mV).
   - `t̄_abs (µs)`: tiempo absoluto medio de ocurrencia de las descargas en el segmento (respecto al inicio del registro/trigger), clave para análisis TRPD.
-  Dispone de botón **"⚡ Calcular todos los sensores (CH2..CH4)"**, botón **"Limpiar tabla"** y exportación nativa a **CSV**. Almacena su historial en `densidad_store`, permitiendo comparar ensayos a diferentes niveles de tensión y sobre distintos sensores.
-- **Scatter Peaks** (`figura_scatter`): `t_peak` vs `v_peak` (+ CH1 promedio de ref.).
+  Dispone de botón **"⚡ Calcular todos los sensores (CH2..CH4)"** (que procesa cada sensor con su propia configuración calibrada de trigger), botón **"Limpiar tabla"** y exportación nativa a **CSV**. Almacena su historial en `densidad_store`.
+- **Patrón TRPD** (`figura_scatter`): Dispone de selector de magnitud con dos modos:
+  1. **Modo $V_{\max}$:** Grafica el par $(t_{\text{abs}}, V_{\max})$, representando el pico máximo instantáneo junto con la traza de referencia del impulso en CH1.
+  2. **Modo $V_{\text{pp}}$:** Grafica el par $(t_{\text{abs}}, V_{\text{pp}})$, donde $V_{\text{pp}}$ es la amplitud peak-to-peak calculada en la ventana de 1 µs $[-0.2, +0.8]\text{ µs}$ centrada en el peak.
+  El `hovertemplate` despliega simultáneamente $t_{\text{abs}}$, $V_{\max}$ y $V_{\text{pp}}$.
 - **Vpp vs Energía** (`figura_vpp_energia`): por señal capturada,
   `Vpp = ptp(ventana)` [mV], `Energía = Σ v² · dt_us` [mV²·µs].
 - **Ventanas** (`figura_ventanas`): señales seleccionadas superpuestas, alineadas
@@ -527,16 +536,15 @@ Dos escalas, compartiendo la misma función:
 | Callback | Entrada(s) | Salida(s) |
 |---|---|---|
 | `actualizar_segmentos` | `carpeta` | opciones y valor de `segmento` |
-| `actualizar` | `carpeta, segmento, canal, captura_params` (+State dist, tmin, umbral) | `grafico.figure` |
-| `set_umbral` | `grafico.relayoutData, canal, carpeta` | `umbral.data` |
-| `mostrar_umbral` | `umbral.data` | `umbral_txt.children` |
-| `fijar_captura` | `btn.n_clicks` (+State carpeta, canal, dist, tmin, umbral) | `captura_params.data` |
+| `sincronizar_parametros_sensores` | `carpeta, grafico.relayoutData` | `umbral_ch{2,3,4}, dist_ch{2,3,4}, tmin_ch{2,3,4}` |
+| `actualizar` | `carpeta, segmento, canal, captura_params` (+State 9 inputs sensores) | `grafico.figure` |
+| `fijar_captura` | `btn.n_clicks` (+State carpeta, canal, 9 inputs sensores) | `captura_params.data` |
 | `calcular_peaks` | `captura_params.data` | `grafico_peaks.figure` |
-| `actualizar_densidad_store` | `captura_params.data, btn_calc_todos_sensores.n_clicks, btn_limpiar_densidad.n_clicks` (+State densidad_store, dist, tmin) | `densidad_store.data` |
+| `actualizar_densidad_store` | `captura_params.data, btn_calc_todos_sensores.n_clicks, btn_limpiar_densidad.n_clicks` (+State densidad_store, 9 inputs sensores) | `densidad_store.data` |
 | `sincronizar_tabla_densidad` | `densidad_store.data` | `tabla_densidad.data` |
 | `actualizar_panel_metadata` | `carpeta, btn_guardar_metadata.n_clicks, btn_guardar_yaml_texto.n_clicks` (+State meta_yaml_text) | Tarjetas, tabla canales y YAML de `panel_metadata` |
 | `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico_vpp_energia.selectedData, grafico_vpp_energia.clickData, grafico.clickData` (+State captura_params) | `seleccion.data` |
-| `actualizar_scatter` | `captura_params.data, seleccion.data` | `grafico_scatter.figure, grafico_vpp_energia.figure` |
+| `actualizar_scatter` | `captura_params.data, seleccion.data, modo_magnitud_trpd.value` | `grafico_scatter.figure, grafico_vpp_energia.figure` |
 | `actualizar_temporal` | `seleccion.data` (+State `captura_params`) | `grafico_ventanas.figure, grafico_fft.figure` |
 | `alternar_panel_principal` | `tabs_principal.value` | `panel_senales.hidden, panel_st_segmento.hidden, panel_metadata.hidden` |
 | `actualizar_st_segmento` | `tabs_principal.value, carpeta, segmento, st_fmax` | `grafico_st_segmento.figure` |
@@ -547,20 +555,23 @@ Dos escalas, compartiendo la misma función:
 
 ## 11. Layout
 
-- **Fila de controles:** medición (`carpeta`), segmento (`segmento`), trigger (`canal`),
-  distancia (`dist`), t mín (`tmin`), botón "Calcular peaks" (`btn`), texto de umbral
-  (`umbral_txt`), f máx ST (`st_fmax`).
+- **Barra de controles principales:** Medición (`carpeta`), segmento (`segmento`), trigger activo (`canal`),
+  botón "⚡ Calcular peaks" (`btn`), f máx ST (`st_fmax`).
+- **Barra sub-panel multi-trigger:** Contenedor estilizado con 3 tarjetas identificadas por color:
+  - `CH2 (HFCT)` en azul (`#2563eb`): `umbral_ch2`, `dist_ch2`, `tmin_ch2`.
+  - `CH3 (Vivaldi)` en verde (`#059669`): `umbral_ch3`, `dist_ch3`, `tmin_ch3`.
+  - `CH4 (Bioinspirada)` en ámbar (`#d97706`): `umbral_ch4`, `dist_ch4`, `tmin_ch4`.
 - **Fila central (2 columnas):**
-  - Columna izquierda: Panel principal con pestañas **Señales** (4 filas ch1..ch4) /
+  - Columna izquierda: Panel principal con pestañas **Señales** (4 filas ch1..ch4 con líneas de umbral interactivas para ch2, ch3, ch4) /
     **Transformada S** (4 mapas de calor de segmento completo) / **Metadata**
     (panel técnico con tarjetas de experimento, circuito LI, probeta, osciloscopio,
     asignación de sensores por canal y editor/visor YAML) — `tabs_principal`.
   - Columna derecha:
     - Tarjeta superior: Pestañas **Peaks por segmento** (`grafico_peaks`) /
       **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` resumen de
-      8 columnas: Specimen, Voltage, Sensor, $N_{PD}$ dist., Media $N_{PD}$, $d$, $\bar{V}_p$, $\bar{t}_{abs}$,
-      con botones para calcular todos los sensores, limpiar y exportar a CSV) — `tabs_peaks`.
-    - Tarjeta inferior: Pestañas **Peaks** (`grafico_scatter`) /
+      9 columnas: Specimen, Voltage, Sensor, $N_{PD}$ dist., Media $N_{PD}$, $d$, $\bar{V}_{\max}$, $\bar{V}_{\text{pp}}$, $\bar{t}_{\text{abs}}$,
+      con botones para calcular todos los sensores con sus respectivos triggers, limpiar y exportar a CSV) — `tabs_peaks`.
+    - Tarjeta inferior: Pestañas **Patrón TRPD** (`grafico_scatter` con selector radio para alternar entre $V_{\max}$ y $V_{\text{pp}}$) /
       **Vpp vs Energía** (`grafico_vpp_energia`) — `tabs_scatter`.
 - **Última fila (2 columnas):**
   - Columna izquierda: **Ventanas** (`grafico_ventanas`), señales superpuestas alineadas en $t = 0$.

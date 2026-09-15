@@ -185,13 +185,56 @@ def cargar_segmento(carpeta, canal, seg, ventana=(T_MIN, T_MAX)):
     return t, v
 
 
-def figura(carpeta, seg, canal, umbral, dist_us, tmin, cap=None):
+_COLORES_CANALES = {
+    "ch1": "#1f77b4",
+    "ch2": "#2563eb",  # azul
+    "ch3": "#059669",  # verde
+    "ch4": "#d97706",  # naranja
+}
+
+
+def config_sensores_defecto(carpeta):
+    """Genera la configuración de trigger (umbral, dist, tmin) para los canales
+    trigger (ch2, ch3, ch4), leyendo de metadata.yaml si existen o calculando valores iniciales."""
+    defaults = {
+        "ch2": {"umbral": None, "dist": 1.0, "tmin": 0.0},
+        "ch3": {"umbral": None, "dist": 0.5, "tmin": 0.0},
+        "ch4": {"umbral": None, "dist": 0.5, "tmin": 0.0},
+    }
+    if not carpeta:
+        return defaults
+
+    meta = obtener_metadata(carpeta)
+    canales_meta = meta.get("canales", {}) if isinstance(meta, dict) else {}
+
+    cfg = {}
+    for ch in TRIGGERS:
+        cfg[ch] = dict(defaults[ch])
+        meta_ch = canales_meta.get(ch, {})
+        trig_meta = meta_ch.get("trigger", {}) if isinstance(meta_ch, dict) else {}
+        if isinstance(trig_meta, dict):
+            if trig_meta.get("umbral_mv") is not None:
+                cfg[ch]["umbral"] = float(trig_meta["umbral_mv"])
+            if trig_meta.get("distancia_us") is not None:
+                cfg[ch]["dist"] = float(trig_meta["distancia_us"])
+            if trig_meta.get("tmin_us") is not None:
+                cfg[ch]["tmin"] = float(trig_meta["tmin_us"])
+
+        if cfg[ch]["umbral"] is None:
+            cfg[ch]["umbral"] = umbral_defecto(carpeta, ch)
+    return cfg
+
+
+def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
     canales = canales_presentes(carpeta)
     fig = make_subplots(
         rows=len(canales), cols=1,
         shared_xaxes=True, vertical_spacing=0.04,
         subplot_titles=[c for c in canales],
     )
+    if cfg_sensores is None:
+        cfg_sensores = config_sensores_defecto(carpeta)
+
     t_trig = v_trig = None
     for i, c in enumerate(canales, start=1):
         fig.update_yaxes(title_text="mV", row=i, col=1)
@@ -207,46 +250,53 @@ def figura(carpeta, seg, canal, umbral, dist_us, tmin, cap=None):
             ),
             row=i, col=1,
         )
-    # Umbral (linea movible) y marcado de peaks sobre el canal trigger
+
+    # Añadir líneas de umbral para cada canal trigger presente (ch2, ch3, ch4)
+    for ch in TRIGGERS:
+        if ch in canales:
+            fila = canales.index(ch) + 1
+            u_ch = cfg_sensores.get(ch, {}).get("umbral")
+            if u_ch is None:
+                u_ch = umbral_defecto(carpeta, ch, seg)
+            es_activo = (ch == canal)
+            color_linea = "#dc2626" if es_activo else _COLORES_CANALES.get(ch, "#666")
+            ancho_linea = 2.0 if es_activo else 1.3
+            dash_linea = "dash" if es_activo else "dot"
+            fig.add_hline(
+                y=u_ch, row=fila, col=1,
+                line=dict(color=color_linea, width=ancho_linea, dash=dash_linea),
+            )
+
+    # Cruces de peaks sobre el canal activo inspeccionado
     if canal in canales and v_trig is not None:
-        u0 = umbral if umbral is not None else (
-            0.5 * float(np.max(np.abs(v_trig))) if v_trig.size else 0.0)
         fila = canales.index(canal) + 1
-        fig.add_hline(
-            y=u0, row=fila, col=1,
-            line=dict(color="red", width=1.5, dash="dash"),
-        )
-        # Cruces de peaks. Si hay una captura del MISMO canal, se dibujan desde
-        # ella (con customdata = índice global de ventana) para que sean
-        # clicables y mapeen 1:1 a las señales/scatters. Si no, detección en vivo.
+        cfg_act = cfg_sensores.get(canal, {})
+        u0 = cfg_act.get("umbral")
+        if u0 is None:
+            u0 = 0.5 * float(np.max(np.abs(v_trig))) if v_trig.size else 0.0
+        dist_act = cfg_act.get("dist", 1.0)
+        tmin_act = cfg_act.get("tmin", 0.0)
+
         if cap is not None:
             mask = cap["seg"] == seg
             tp, vp = cap["t_peak"][mask], cap["v_peak"][mask]
-            # Lista Python (no ndarray): Plotly 7 serializa numpy como binario y
-            # entonces customdata NO llega al clickData. Como lista sí llega.
-            customdata = np.nonzero(mask)[0].tolist()  # índice global por cruz
+            customdata = np.nonzero(mask)[0].tolist()
             mask_b = cap["seg_borde"] == seg
             tp_b, vp_b = cap["t_peak_borde"][mask_b], cap["v_peak_borde"][mask_b]
         else:
-            tp, vp = _detectar(t_trig, v_trig, u0, _muestras(carpeta, canal, dist_us), tmin)
+            tp, vp = _detectar(t_trig, v_trig, u0, _muestras(carpeta, canal, dist_act), tmin_act)
             customdata = None
             tp_b, vp_b = np.array([]), np.array([])
-        # SVG (go.Scatter): pocos puntos y garantiza customdata en clickData,
-        # a diferencia de Scattergl. Así las cruces son clicables de forma fiable.
+
         fig.add_trace(
             go.Scatter(
-                x=tp, y=vp, mode="markers", name="peaks", customdata=customdata,
+                x=tp, y=vp, mode="markers", name=f"peaks {canal.upper()}", customdata=customdata,
                 marker=dict(symbol="x", color="black", size=9, line=dict(width=1)),
                 hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak</extra>",
                 showlegend=False,
             ),
             row=fila, col=1,
         )
-        # Peaks demasiado pegados al borde del segmento (su ventana de captura
-        # de 1 µs se saldría): SÍ cuentan en "Peaks por segmento"/"Densidad de
-        # eventos", pero no tienen ventana, así que no participan en
-        # scatter/ventanas/FFT/Transformada S. Se marcan aparte para que no
-        # desaparezcan sin explicación (naranja, sin customdata = no clicables).
         if tp_b.size:
             fig.add_trace(
                 go.Scatter(
@@ -258,6 +308,7 @@ def figura(carpeta, seg, canal, umbral, dist_us, tmin, cap=None):
                 ),
                 row=fila, col=1,
             )
+
     # Impulso CH1 filtrado (50 MHz) + líneas verticales de tiempos sobre CH1.
     if "ch1" in canales:
         _dibujar_impulso_ch1(fig, carpeta, canales.index("ch1") + 1)
@@ -267,8 +318,6 @@ def figura(carpeta, seg, canal, umbral, dist_us, tmin, cap=None):
         height=850, showlegend=False, margin=dict(t=70, r=20),
         title=f"{carpeta} — Segmento {seg}",
         plot_bgcolor="white", paper_bgcolor="white",
-        # uirevision atado a medicion+canal: conserva zoom y la posicion de la
-        # linea al cambiar de segmento; se reinicia al cambiar de canal/medicion.
         uirevision=f"{carpeta}-{canal}",
     )
     return fig
@@ -295,6 +344,26 @@ def _muestras(carpeta, canal, dist_us):
     """Distancia en µs -> nº de muestras para find_peaks."""
     dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6
     return max(1, int(round(dist_us / dt_us))) if dist_us else None
+
+
+def umbrales_desde_relayout(relayout, canales):
+    """Extrae las posiciones 'y' de las líneas de umbral movibles (shapes) desde relayoutData,
+    mapeando cada shape a su canal trigger (ch2, ch3, ch4) en el orden en que fueron agregadas."""
+    if not relayout:
+        return {}
+    trigs_presentes = [c for c in TRIGGERS if c in canales]
+    cambios = {}
+    for k, val in relayout.items():
+        if k.startswith("shapes[") and k.endswith(".y0"):
+            try:
+                idx_str = k.split("[")[1].split("]")[0]
+                idx = int(idx_str)
+                if 0 <= idx < len(trigs_presentes):
+                    ch = trigs_presentes[idx]
+                    cambios[ch] = float(val)
+            except (TypeError, ValueError, IndexError):
+                pass
+    return cambios
 
 
 def umbral_desde_relayout(relayout, fallback):
@@ -363,7 +432,8 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
     dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6 if canal in canales_presentes(carpeta) else 0.0
     if canal not in canales_presentes(carpeta):
         res = {"t_rel": np.array([]), "W": np.empty((0, 0)),
-               "t_peak": np.array([]), "v_peak": np.array([]), "seg": np.array([]),
+               "t_peak": np.array([]), "v_peak": np.array([]), "vpp": np.array([]),
+               "seg": np.array([]),
                "t_peak_borde": np.array([]), "v_peak_borde": np.array([]),
                "seg_borde": np.array([]), "dt_us": dt_us}
         _CAPTURA_CACHE[key] = res
@@ -391,10 +461,13 @@ def capturar(carpeta, canal, umbral, dist_us, tmin, antes_us=0.2, desp_us=0.8):
             tpk.append(t[i])
             vpk.append(v[i])
             segs.append(s)
+    W_arr = np.array(W) if W else np.empty((0, t_rel.size))
+    vpp_arr = np.ptp(W_arr, axis=1) if W_arr.size else np.array([])
     res = {
         "t_rel": t_rel,
-        "W": np.array(W) if W else np.empty((0, t_rel.size)),
-        "t_peak": np.array(tpk), "v_peak": np.array(vpk), "seg": np.array(segs),
+        "W": W_arr,
+        "t_peak": np.array(tpk), "v_peak": np.array(vpk), "vpp": vpp_arr,
+        "seg": np.array(segs),
         "t_peak_borde": np.array(tpk_b), "v_peak_borde": np.array(vpk_b),
         "seg_borde": np.array(segs_b), "dt_us": dt_us,
     }
@@ -717,7 +790,8 @@ COLUMNAS_DENSIDAD = [
     {"name": "N_PD distribution [0, 1, 2, 3, 4, > 4]", "id": "distribucion"},
     {"name": "Media de N_PD", "id": "media_npd"},
     {"name": "d (mm)", "id": "diametro"},
-    {"name": "V̄_p (V)", "id": "vp_media"},
+    {"name": "V̄_max (V)", "id": "vmax_media"},
+    {"name": "V̄_pp (V)", "id": "vpp_media"},
     {"name": "t̄_abs (µs)", "id": "tabs_media"},
 ]
 
@@ -725,7 +799,7 @@ COLUMNAS_DENSIDAD = [
 def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin):
     """Calcula la fila de la tabla de densidad para la medición y canal dados,
     inspirada en la tabla experimental de resumen (Specimen, Voltage, Sensor,
-    N_PD distribution [0, 1, 2, 3, 4, > 4], Media de N_PD, d (mm), V̄_p (V), t̄_abs (µs))."""
+    N_PD distribution [0, 1, 2, 3, 4, > 4], Media de N_PD, d (mm), V̄_max (V), V̄_pp (V), t̄_abs (µs))."""
     meta = obtener_metadata(carpeta)
     prob = meta.get("probeta", {})
     circ = meta.get("circuito_impulso", {})
@@ -771,13 +845,21 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin):
     cap = capturar(carpeta, canal, umbral, dist_us, tmin)
     todos_vp = np.concatenate([cap["v_peak"], cap["v_peak_borde"]]) if cap["v_peak"].size or cap["v_peak_borde"].size else np.array([])
     todos_tp = np.concatenate([cap["t_peak"], cap["t_peak_borde"]]) if cap["t_peak"].size or cap["t_peak_borde"].size else np.array([])
+    todos_vpp = cap["vpp"] if cap["vpp"].size else np.array([])
 
     if todos_vp.size > 0:
         vp_mean_mv = float(np.mean(np.abs(todos_vp)))
         vp_mean_v = vp_mean_mv / 1000.0
-        vp_str = f"{vp_mean_v:.4f} V ({vp_mean_mv:.1f} mV)"
+        vmax_str = f"{vp_mean_v:.4f} V ({vp_mean_mv:.1f} mV)"
     else:
-        vp_str = "-"
+        vmax_str = "-"
+
+    if todos_vpp.size > 0:
+        vpp_mean_mv = float(np.mean(todos_vpp))
+        vpp_mean_v = vpp_mean_mv / 1000.0
+        vpp_str = f"{vpp_mean_v:.4f} V ({vpp_mean_mv:.1f} mV)"
+    else:
+        vpp_str = "-"
 
     if todos_tp.size > 0:
         tabs_mean = float(np.mean(todos_tp))
@@ -793,7 +875,8 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin):
         "distribucion": distribucion,
         "media_npd": media_npd,
         "diametro": diametro,
-        "vp_media": vp_str,
+        "vmax_media": vmax_str,
+        "vpp_media": vpp_str,
         "tabs_media": tabs_str,
         "_carpeta": carpeta,
         "_canal": canal,
@@ -962,32 +1045,41 @@ def _dibujar_impulso_ch1(fig, carpeta, fila):
         )
 
 
-def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None):
+def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="vmax"):
     # Peaks SIEMPRE como curva 0 (la selección mapea por pointNumber = índice de
     # ventana). La referencia CH1 y el resaltado amarillo van como trazas extra.
     n = cap["t_peak"].size
     fig = go.Figure()
+    es_vpp = (modo == "vpp")
+    y_val = cap["vpp"] if es_vpp else cap["v_peak"]
+    y_label = "Vpp [mV]" if es_vpp else "Vmax [mV]"
+    traza_nombre = f"Vpp {canal.upper()}" if es_vpp else f"Vmax {canal.upper()}"
+
+    cd = np.stack([cap["v_peak"], cap["vpp"]], axis=1) if n > 0 else None
+
     fig.add_trace(go.Scattergl(
-        x=cap["t_peak"], y=cap["v_peak"], mode="markers", name=f"Peaks {canal.upper()}",
+        x=cap["t_peak"], y=y_val, mode="markers", name=traza_nombre,
+        customdata=cd,
         marker=dict(color="#EF553B", size=6, opacity=0.6),
-        hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak</extra>",
+        hovertemplate="t=%{x:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<extra>" + canal.upper() + "</extra>",
     ))
-    if t_ref is not None:
+    if t_ref is not None and not es_vpp:
         fig.add_trace(go.Scattergl(
             x=t_ref, y=v_ref, mode="lines", name="CH1 promedio (ref.)",
             line=dict(color="#999", width=1), opacity=0.6,
             hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>CH1</extra>",
         ))
     h = [i for i in (highlight or []) if 0 <= i < n]
-    if h:
+    if h and y_val.size > 0:
         fig.add_trace(go.Scattergl(
-            x=cap["t_peak"][h], y=cap["v_peak"][h], mode="markers", name="sel",
+            x=cap["t_peak"][h], y=y_val[h], mode="markers", name="sel",
             marker=dict(color="#FFD400", size=11, line=dict(color="black", width=1)),
             hoverinfo="skip", showlegend=False,
         ))
+    titulo_patron = f"Patrón TRPD ({'Vpp' if es_vpp else 'Vmax'}) vs Tiempo — {canal.upper()}"
     fig.update_layout(
-        title=f"Peaks {canal.upper()}",
-        xaxis_title="Tiempo [µs]", yaxis_title="Valor del peak [mV]",
+        title=titulo_patron,
+        xaxis_title="Tiempo [µs]", yaxis_title=y_label,
         height=415, margin=dict(t=50, r=20), showlegend=True, dragmode="select",
         legend=dict(orientation="h", y=1.02, yanchor="bottom"),
         plot_bgcolor="white", paper_bgcolor="white", uirevision=uirev,
@@ -1028,23 +1120,87 @@ app.layout = html.Div(
                 ),
                 html.Label("Segmento:"),
                 dcc.Dropdown(id="segmento", value=1, clearable=False, style={"width": "110px"}),
-                html.Label("Trigger:"),
+                html.Label("Trigger activo:"),
                 dcc.Dropdown(
                     id="canal",
-                    options=[{"label": c, "value": c} for c in TRIGGERS],
-                    value="ch4", clearable=False, style={"width": "100px"},
+                    options=[
+                        {"label": "CH2 (HFCT)", "value": "ch2"},
+                        {"label": "CH3 (Vivaldi)", "value": "ch3"},
+                        {"label": "CH4 (Bioinspirada)", "value": "ch4"},
+                    ],
+                    value="ch4", clearable=False, style={"width": "175px"},
                 ),
-                html.Label("Distancia (µs):"),
-                dcc.Input(id="dist", type="number", value=1.0, min=0, step="any",
-                          style={"width": "80px"}),
-                html.Label("t mín (µs):"),
-                dcc.Input(id="tmin", type="number", value=0.0, step="any",
-                          style={"width": "80px"}),
-                html.Button("Calcular peaks", id="btn", n_clicks=0),
-                html.Span(id="umbral_txt"),
+                html.Button("⚡ Calcular peaks", id="btn", n_clicks=0,
+                            style={"backgroundColor": "#2563eb", "color": "white", "fontWeight": "600"}),
                 html.Label("f máx ST (MHz):"),
                 dcc.Input(id="st_fmax", type="number", value=ST_FMAX_MHZ, min=1,
-                          step="any", debounce=True, style={"width": "90px"}),
+                          step="any", debounce=True, style={"width": "80px"}),
+            ],
+        ),
+        html.Div(
+            style={
+                "display": "flex", "gap": "10px", "alignItems": "center",
+                "padding": "6px 12px", "backgroundColor": "#f8fafc",
+                "border": "1px solid #e2e8f0", "borderRadius": "6px",
+                "margin": "0 12px 10px 12px", "flexWrap": "wrap",
+            },
+            children=[
+                html.Span("🎯 Configuración Multi-Trigger:",
+                          style={"fontSize": "11px", "fontWeight": "bold", "color": "#1e293b", "marginRight": "4px"}),
+                # CH2: HFCT
+                html.Div(
+                    style={
+                        "display": "flex", "alignItems": "center", "gap": "6px",
+                        "padding": "4px 8px", "backgroundColor": "white",
+                        "border": "1px solid #bfdbfe", "borderLeft": "4px solid #2563eb",
+                        "borderRadius": "4px", "fontSize": "11px",
+                    },
+                    children=[
+                        html.Span("CH2 (HFCT):", style={"fontWeight": "bold", "color": "#1d4ed8"}),
+                        html.Span("u (mV):"),
+                        dcc.Input(id="umbral_ch2", type="number", step="any", style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        html.Span("Δt (µs):"),
+                        dcc.Input(id="dist_ch2", type="number", step="any", min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        html.Span("t_mín (µs):"),
+                        dcc.Input(id="tmin_ch2", type="number", step="any", style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                    ],
+                ),
+                # CH3: Vivaldi
+                html.Div(
+                    style={
+                        "display": "flex", "alignItems": "center", "gap": "6px",
+                        "padding": "4px 8px", "backgroundColor": "white",
+                        "border": "1px solid #a7f3d0", "borderLeft": "4px solid #059669",
+                        "borderRadius": "4px", "fontSize": "11px",
+                    },
+                    children=[
+                        html.Span("CH3 (Vivaldi):", style={"fontWeight": "bold", "color": "#047857"}),
+                        html.Span("u (mV):"),
+                        dcc.Input(id="umbral_ch3", type="number", step="any", style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        html.Span("Δt (µs):"),
+                        dcc.Input(id="dist_ch3", type="number", step="any", min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        html.Span("t_mín (µs):"),
+                        dcc.Input(id="tmin_ch3", type="number", step="any", style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                    ],
+                ),
+                # CH4: Bioinspirada
+                html.Div(
+                    style={
+                        "display": "flex", "alignItems": "center", "gap": "6px",
+                        "padding": "4px 8px", "backgroundColor": "white",
+                        "border": "1px solid #fde68a", "borderLeft": "4px solid #d97706",
+                        "borderRadius": "4px", "fontSize": "11px",
+                    },
+                    children=[
+                        html.Span("CH4 (Bioinspirada):", style={"fontWeight": "bold", "color": "#b45309"}),
+                        html.Span("u (mV):"),
+                        dcc.Input(id="umbral_ch4", type="number", step="any", style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        html.Span("Δt (µs):"),
+                        dcc.Input(id="dist_ch4", type="number", step="any", min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        html.Span("t_mín (µs):"),
+                        dcc.Input(id="tmin_ch4", type="number", step="any", style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                    ],
+                ),
             ],
         ),
         html.Div(
@@ -1174,8 +1330,33 @@ app.layout = html.Div(
                         ]),
                         html.Div(className="card", children=[
                             dcc.Tabs(id="tabs_scatter", value="peaks", children=[
-                                dcc.Tab(label="Peaks", value="peaks",
-                                        children=[dcc.Graph(id="grafico_scatter")], **_TAB),
+                                dcc.Tab(label="Patrón TRPD", value="peaks",
+                                        children=[
+                                            html.Div(
+                                                style={
+                                                    "display": "flex", "alignItems": "center", "gap": "10px",
+                                                    "padding": "4px 8px", "backgroundColor": "#f8fafc",
+                                                    "borderBottom": "1px solid #e2e8f0", "marginBottom": "4px",
+                                                    "flexWrap": "wrap",
+                                                },
+                                                children=[
+                                                    html.Span("Magnitud TRPD:", style={"fontSize": "11px", "fontWeight": "bold", "color": "#334155"}),
+                                                    dcc.RadioItems(
+                                                        id="modo_magnitud_trpd",
+                                                        options=[
+                                                            {"label": " Vmax (pico máximo)", "value": "vmax"},
+                                                            {"label": " Vpp (peak-to-peak en 1 µs)", "value": "vpp"},
+                                                        ],
+                                                        value="vmax",
+                                                        inline=True,
+                                                        style={"fontSize": "11px"},
+                                                        inputStyle={"marginRight": "4px"},
+                                                        labelStyle={"marginRight": "12px", "cursor": "pointer", "fontWeight": "500"},
+                                                    ),
+                                                ],
+                                            ),
+                                            dcc.Graph(id="grafico_scatter"),
+                                        ], **_TAB),
                                 dcc.Tab(label="Vpp vs Energía", value="vpp",
                                         children=[dcc.Graph(id="grafico_vpp_energia")], **_TAB),
                             ]),
@@ -1215,29 +1396,82 @@ def actualizar_segmentos(carpeta):
 
 
 @app.callback(
+    Output("umbral_ch2", "value"),
+    Output("dist_ch2", "value"),
+    Output("tmin_ch2", "value"),
+    Output("umbral_ch3", "value"),
+    Output("dist_ch3", "value"),
+    Output("tmin_ch3", "value"),
+    Output("umbral_ch4", "value"),
+    Output("dist_ch4", "value"),
+    Output("tmin_ch4", "value"),
+    Input("carpeta", "value"),
+    Input("grafico", "relayoutData"),
+    prevent_initial_call=False,
+)
+def sincronizar_parametros_sensores(carpeta, relayout):
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+
+    if trig == "grafico" and relayout and carpeta:
+        cambios = umbrales_desde_relayout(relayout, canales_presentes(carpeta))
+        if not cambios:
+            return (no_update,) * 9
+        u2 = round(cambios["ch2"], 4) if "ch2" in cambios else no_update
+        u3 = round(cambios["ch3"], 4) if "ch3" in cambios else no_update
+        u4 = round(cambios["ch4"], 4) if "ch4" in cambios else no_update
+        return u2, no_update, no_update, u3, no_update, no_update, u4, no_update, no_update
+
+    if not carpeta:
+        return (no_update,) * 9
+    cfg = config_sensores_defecto(carpeta)
+    return (
+        round(cfg["ch2"]["umbral"], 4) if cfg["ch2"]["umbral"] is not None else None,
+        cfg["ch2"]["dist"], cfg["ch2"]["tmin"],
+        round(cfg["ch3"]["umbral"], 4) if cfg["ch3"]["umbral"] is not None else None,
+        cfg["ch3"]["dist"], cfg["ch3"]["tmin"],
+        round(cfg["ch4"]["umbral"], 4) if cfg["ch4"]["umbral"] is not None else None,
+        cfg["ch4"]["dist"], cfg["ch4"]["tmin"],
+    )
+
+
+@app.callback(
     Output("grafico", "figure"),
     Input("carpeta", "value"),
     Input("segmento", "value"),
     Input("canal", "value"),
     Input("captura_params", "data"),
-    State("dist", "value"),
-    State("tmin", "value"),
-    State("umbral", "data"),
+    State("umbral_ch2", "value"),
+    State("dist_ch2", "value"),
+    State("tmin_ch2", "value"),
+    State("umbral_ch3", "value"),
+    State("dist_ch3", "value"),
+    State("tmin_ch3", "value"),
+    State("umbral_ch4", "value"),
+    State("dist_ch4", "value"),
+    State("tmin_ch4", "value"),
 )
-def actualizar(carpeta, seg, canal, p, dist_us, tmin, umbral):
-    # umbral, dist y tmin son State (no Input): mover la línea o cambiar esos
-    # parámetros NO redibuja. Se redibuja al pulsar "Calcular peaks" (cambia
-    # captura_params) o al cambiar de segmento/canal/medición. Las cruces del
-    # canal trigger salen de la captura vigente (si es del mismo canal) para que
-    # sean clicables y mapeen a las señales.
+def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4):
     if not carpeta or not seg:
         return go.Figure()
-    if ctx.triggered_id in ("canal", "carpeta"):
-        umbral = None
+
+    cfg_sensores = {
+        "ch2": {"umbral": float(u2) if u2 is not None else None,
+                "dist": float(d2) if d2 is not None else 1.0,
+                "tmin": float(t2) if t2 is not None else 0.0},
+        "ch3": {"umbral": float(u3) if u3 is not None else None,
+                "dist": float(d3) if d3 is not None else 0.5,
+                "tmin": float(t3) if t3 is not None else 0.0},
+        "ch4": {"umbral": float(u4) if u4 is not None else None,
+                "dist": float(d4) if d4 is not None else 0.5,
+                "tmin": float(t4) if t4 is not None else 0.0},
+    }
     cap = None
     if p and p["canal"] == canal and p["carpeta"] == carpeta:
         cap = capturar(carpeta, canal, p["umbral"], p["dist"], p["tmin"])
-    return figura(carpeta, int(seg), canal, umbral, dist_us, tmin, cap=cap)
+    return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap)
 
 
 @app.callback(
@@ -1269,46 +1503,45 @@ def actualizar_st_segmento(tab, carpeta, seg, fmax):
 
 
 @app.callback(
-    Output("umbral", "data"),
-    Input("grafico", "relayoutData"),
-    Input("canal", "value"),
-    Input("carpeta", "value"),
-)
-def set_umbral(relayout, canal, carpeta):
-    """Fuente de verdad del umbral: se mueve con la linea (drag) y se
-    reinicia al valor por defecto al cambiar de canal o de medición."""
-    if ctx.triggered_id == "grafico":
-        u = umbral_desde_relayout(relayout, None)
-        return u if u is not None else no_update
-    return umbral_defecto(carpeta, canal) if carpeta else no_update
-
-
-@app.callback(
-    Output("umbral_txt", "children"),
-    Input("umbral", "data"),
-)
-def mostrar_umbral(u):
-    return "" if u is None else f"Umbral: {u:.4g} mV"
-
-
-@app.callback(
     Output("captura_params", "data"),
     Input("btn", "n_clicks"),
     State("carpeta", "value"),
     State("canal", "value"),
-    State("dist", "value"),
-    State("tmin", "value"),
-    State("umbral", "data"),
+    State("umbral_ch2", "value"),
+    State("dist_ch2", "value"),
+    State("tmin_ch2", "value"),
+    State("umbral_ch3", "value"),
+    State("dist_ch3", "value"),
+    State("tmin_ch3", "value"),
+    State("umbral_ch4", "value"),
+    State("dist_ch4", "value"),
+    State("tmin_ch4", "value"),
 )
-def fijar_captura(n_clicks, carpeta, canal, dist_us, tmin, umbral):
+def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4):
     """Fija el snapshot de parámetros al pulsar el botón. Todos los análisis
     derivan de aquí, garantizando que scatter y ventanas usan el mismo conjunto."""
     if not n_clicks or not carpeta:
         return no_update
-    if umbral is None:
-        umbral = umbral_defecto(carpeta, canal)
-    return {"carpeta": carpeta, "canal": canal, "umbral": umbral,
-            "dist": dist_us, "tmin": tmin}
+    cfg_sensores = {
+        "ch2": {"umbral": float(u2) if u2 is not None else umbral_defecto(carpeta, "ch2"),
+                "dist": float(d2) if d2 is not None else 1.0,
+                "tmin": float(t2) if t2 is not None else 0.0},
+        "ch3": {"umbral": float(u3) if u3 is not None else umbral_defecto(carpeta, "ch3"),
+                "dist": float(d3) if d3 is not None else 0.5,
+                "tmin": float(t3) if t3 is not None else 0.0},
+        "ch4": {"umbral": float(u4) if u4 is not None else umbral_defecto(carpeta, "ch4"),
+                "dist": float(d4) if d4 is not None else 0.5,
+                "tmin": float(t4) if t4 is not None else 0.0},
+    }
+    cfg_act = cfg_sensores.get(canal, cfg_sensores["ch4"])
+    return {
+        "carpeta": carpeta,
+        "canal": canal,
+        "umbral": cfg_act["umbral"],
+        "dist": cfg_act["dist"],
+        "tmin": cfg_act["tmin"],
+        "cfg_sensores": cfg_sensores,
+    }
 
 
 @app.callback(
@@ -1332,11 +1565,19 @@ def calcular_peaks(p):
     Input("btn_calc_todos_sensores", "n_clicks"),
     Input("btn_limpiar_densidad", "n_clicks"),
     State("densidad_store", "data"),
-    State("dist", "value"),
-    State("tmin", "value"),
+    State("umbral_ch2", "value"),
+    State("dist_ch2", "value"),
+    State("tmin_ch2", "value"),
+    State("umbral_ch3", "value"),
+    State("dist_ch3", "value"),
+    State("tmin_ch3", "value"),
+    State("umbral_ch4", "value"),
+    State("dist_ch4", "value"),
+    State("tmin_ch4", "value"),
     prevent_initial_call=True,
 )
-def actualizar_densidad_store(p, n_todos, n_limpiar, data_actual, dist_us, tmin):
+def actualizar_densidad_store(p, n_todos, n_limpiar, data_actual,
+                              u2, d2, t2, u3, d3, t3, u4, d4, t4):
     try:
         trig = ctx.triggered_id
     except Exception:
@@ -1352,14 +1593,24 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, data_actual, dist_us, tmin)
         else:
             filas.append(fila)
 
+    cfg_inputs = {
+        "ch2": {"umbral": u2, "dist": d2, "tmin": t2},
+        "ch3": {"umbral": u3, "dist": d3, "tmin": t3},
+        "ch4": {"umbral": u4, "dist": d4, "tmin": t4},
+    }
+
     if trig == "btn_calc_todos_sensores" and p:
         carpeta = p["carpeta"]
-        dist = dist_us if dist_us is not None else 1.0
-        tm = tmin if tmin is not None else 0.0
+        cfg_p = p.get("cfg_sensores", {})
         for ch in ["ch2", "ch3", "ch4"]:
             if ch in canales_presentes(carpeta):
-                u_ch = p["umbral"] if ch == p["canal"] else umbral_defecto(carpeta, ch)
-                f = calcular_fila_densidad(carpeta, ch, u_ch, dist, tm)
+                cfg_ch = cfg_p.get(ch) or cfg_inputs.get(ch, {})
+                u_ch = cfg_ch.get("umbral")
+                if u_ch is None:
+                    u_ch = umbral_defecto(carpeta, ch)
+                dist_ch = cfg_ch.get("dist") or 1.0
+                tmin_ch = cfg_ch.get("tmin") if cfg_ch.get("tmin") is not None else 0.0
+                f = calcular_fila_densidad(carpeta, ch, float(u_ch), float(dist_ch), float(tmin_ch))
                 _upsert(f)
         return filas
 
@@ -1552,18 +1803,20 @@ def set_seleccion(_cap_in, sel_pk, click_pk, sel_ve, click_ve, click_g, p):
     Output("grafico_vpp_energia", "figure"),
     Input("captura_params", "data"),
     Input("seleccion", "data"),
+    Input("modo_magnitud_trpd", "value"),
 )
-def actualizar_scatter(p, sel):
+def actualizar_scatter(p, sel, modo_trpd):
     """Scatters de Peaks y Vpp vs Energía, con los puntos seleccionados en
     amarillo (venga la selección de los scatters o de las cruces del trigger)."""
     if not p:
         return no_update, no_update
     cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
     t_ref, v_ref = promedio_impulso(p["carpeta"])
+    modo = modo_trpd or "vmax"
     # uirevision estable dentro de una captura: al pintar el amarillo no se
-    # pierde zoom ni la caja de selección; cambia al hacer una captura nueva.
-    rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}"
-    return (figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev),
+    # pierde zoom ni la caja de selección; cambia al hacer una captura nueva o cambiar modo.
+    rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}"
+    return (figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo),
             figura_vpp_energia(cap, p["canal"], sel, rev))
 
 
