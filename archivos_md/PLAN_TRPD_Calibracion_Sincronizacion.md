@@ -387,3 +387,58 @@ No hacer merge a `main` ni push sin confirmación del usuario.
 - `generate_metadata.py`: `bloque_calibracion_retardo` y docstring.
 - `archivos_md/DOCUMENTACION.md`.
 - `archivos_md/PLAN_TRPD_Calibracion_Sincronizacion.md` (este documento).
+
+---
+
+## Resultados de verificación (Fase 5)
+
+Ejecución de `scripts_tmp/verificar_trpd_cal.py` sobre el entorno virtual (`.venv\Scripts\python.exe`):
+
+```text
+=== TEST 1: Verificación sintética de _t_arribo ===
+1.1 Cruce exacto esperado: 0.300130, obtenido: 0.300130
+1.2 Sin cruce: None [OK]
+1.3 Precursor EMI absorbido por pico mayor, ta observado: 0.301000 s [OK]
+1.4 Señal negativa: ta=0.300130 igual a positivo [OK]
+Test 1 completado exitosamente.
+
+=== TEST 2: t10 por segmento en mediciones_filtros/cada_30s/7 ===
+Segmentos: 50, Fallbacks: 0/50
+t10 media: -149.188 ns, std: 9.983 ns
+t10 min:   -170.407 ns, max: -137.886 ns
+t10 promedio global CH1: -151.870 ns
+|mean - t10_prom| = 2.6824 ns (< 3*std = 29.9496 ns)
+Test 2 completado exitosamente.
+
+=== TEST 3: Humo de calibración en mediciones_filtros/cada_30s/7 ===
+Umbral de prueba para CH4: 329.99 mV
+CH4: Válidos: 39/50
+t_lag_mean: 2425.11 ns, sigma: 1497.00 ns
+Atípicos detectados por MAD: 2
+Umbral absurdo (1e9 mV) manejado limpiamente: n_valid = 0, t_lag_us = None [OK]
+Test 3 completado exitosamente.
+
+=== TEST 4: TRPD antes vs después de calibración en mediciones_filtros/cada_30s/7 ===
+Canal  N_peaks  mean(t_peak) [µs]  mean(t_abs 0 ns) [µs]  mean(t_abs 12.4ns) [µs] 
+--------------------------------------------------------------------------------
+CH2    39       2.2383             2.3884                 2.3760                  
+CH3    72       2.6107             2.7604                 2.7480                  
+CH4    42       2.6046             2.7554                 2.7430                  
+--------------------------------------------------------------------------------
+Propiedades matemáticas de t_abs verificadas: O(N), traslación exacta [OK]
+Test 4 completado exitosamente.
+
+=== TEST 5: Persistencia y round-trip en metadata.yaml de mediciones_filtros/cada_30s/7 ===
+Copia de seguridad creada en C:\0_matrix\doctorado\proyectos\inv_pd_vac\mediciones\Mediciones\mediciones_filtros/cada_30s/7\metadata.yaml.bak_test
+Guardado exitoso: Guardado exitoso en metadata.yaml
+mediciones_con_calibracion() encontró: 1 carpetas (incluye mediciones_filtros/cada_30s/7)
+Secciones originales de metadata.yaml preservadas intactas.
+Round-trip de persistencia verificado [OK]
+Respaldo restaurado limpiamente en C:\0_matrix\doctorado\proyectos\inv_pd_vac\mediciones\Mediciones\mediciones_filtros/cada_30s/7\metadata.yaml
+Test 5 completado exitosamente.
+
+=====================================================
+✅ TODAS LAS FASES DE VERIFICACIÓN PASARON CON ÉXITO!
+=====================================================
+```
+

@@ -66,6 +66,8 @@ hasta cada gráfico y tabla de la interfaz:
    y calcula los tiempos característicos ($t_{10}, t_{30}, t_{90}, t_{50}, t_0^{\text{lin}}, t_{\text{max}}^{\text{lin}}$).
    Se muestra en la fila de CH1 del gráfico principal y como curva de referencia
    en el scatter de Peaks; no alimenta la detección de peaks, la FFT ni la Transformada S.
+10. **Calibración de retardo instrumental y sincronización TRPD:**
+    El retardo instrumental $\bar{t}_{\text{lag}, c}$ por canal (leído de `metadata.yaml` bajo `calibracion_retardo` o ingresado en sesión) se gestiona centralizadamente en `calibracion_store`. El gráfico TRPD (`figura_scatter`) y la tabla de densidad de eventos (`tabla_densidad`) calculan el tiempo absoluto sincronizado $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$, garantizando la alineación física precisa de todas las descargas respecto al origen de tensión en la probeta.
 
 ### Diagrama de flujo de datos
 
@@ -81,46 +83,47 @@ hasta cada gráfico y tabla de la interfaz:
           |                                |                               |
 [ Rama Impulso CH1 ]             [ Rama Segmento Completo ]      [ Rama Peaks y Ventanas ]
           |                                |                               |
-promedio_impulso()                         | (pestaña "Transformada S"     | (control canal trigger,
-(promedio todos segmentos)                 |  en tabs_principal;           |  umbral, dist_us, tmin)
-          |                                |  control st_fmax)             v
-impulso_filtrado()                         v                     _detectar() / capturar()
-(Butterworth pasa-bajos            st_segmento() /               (find_peaks en t >= tmin)
- 20 MHz, orden 4)                  figura_st_segmento()                    |
-          |                        (ST cruda de ch1..ch4,                  v
-tiempos_impulso()                   cacheada por sesión)          Bifurcación en capturar()
-(t10, t30, t90, t50,                                              (botón "Calcular peaks")
- t0_lin, tmax_lin)                                                +--------+--------+
-          |                                                       |                 |
-          v                                                       v                 v
-_dibujar_impulso_ch1()                                     Peaks completos    Peaks sin ventana
-(trazo fila CH1 en figura()                               (con margen 1 µs)   (muy cerca de borde/tmin)
- y trazo ref en figura_scatter())                                 |                 |
-                                                          Ventana W (1 µs)          |
-                                                          [t_peak, v_peak, seg]     | [t_peak_borde, seg_borde]
-                                                                  |                 |
-                                                           +------+------+          |
-                                                           |             |          |
-                                                           |       contar_peaks()   |
-                                                           |       tabla_densidad() |
-                                                           |       (barras y tabla) <
-                                                           |       (cruces naranjas
-                                                           |        en figura())
-                                                           v
-                                                figura_scatter() / figura_vpp_energia()
-                                                (cruces negras en figura(); Scattergl)
-                                                           |
-                                                           | (clic/caja en scatters o
-                                                           |  clic en cruces negras)
-                                                           v
-                                                    Store seleccion
-                                                (lista de índices de ventana)
-                                                           |
-                                            +--------------+--------------+
-                                            |                             |
-                                    figura_ventanas()             figura_fft() / figura_st_ventana()
-                                    (ventanas superpuestas,       (Welch espectro lineal / ST promedio |S|;
-                                     alineadas en t=0)             pestañas tabs_espectro, control st_fmax)
+promedio_impulso() /                       | (pestaña "Transformada S"     | (control canal trigger,
+t10_por_segmento()                         |  en tabs_principal;           |  umbral, dist_us, tmin)
+(t10 individual por seg.)                  |  control st_fmax)             v
+          |                                v                     _detectar() / capturar()
+impulso_filtrado()                         st_segmento() /               (find_peaks en t >= tmin)
+(Butterworth pasa-bajos                    figura_st_segmento()                    |
+ 20 MHz, orden 4)                          (ST cruda de ch1..ch4,                  v
+          |                                cacheada por sesión)          Bifurcación en capturar()
+tiempos_impulso()                                                         (botón "Calcular peaks")
+(t10, t30, t90, t50,                                                      +--------+--------+
+ t0_lin, tmax_lin)                                                        |                 |
+          |                                                               v                 v
+          |      [ Calibración t_lag ]                             Peaks completos    Peaks sin ventana
+          |   (calibracion_store / metadata)                      (con margen 70 ns)  (muy cerca de borde/tmin)
+          |                 |                                             |                 |
+          v                 v                                      Ventana W (70 ns)        |
+_dibujar_impulso_ch1()     |                                     [t_peak, v_peak, seg]     | [t_peak_borde, seg_borde]
+(fila CH1 en figura())     |                                     [t10_seg]                 |
+          |                 |                                             |                 |
+          +--------+--------+                                      +------+------+          |
+                   |                                               |             |          |
+                   v                                               |       contar_peaks()   |
+   t_abs = t_peak - t10_seg - t_lag                                |       tabla_densidad() |
+                   |                                               |       (barras y tabla) <
+                   v                                               |       (cruces naranjas
+   figura_scatter() (Patrón TRPD) / tabla_densidad()               |        en figura())
+   (cruces negras en figura(); Scattergl)                          v
+                   |                                  figura_vpp_energia()
+                   +-----------------------+-----------------------+
+                                           |
+                                           | (clic/caja en scatters o
+                                           |  clic en cruces negras)
+                                           v
+                                    Store seleccion
+                                (lista de índices de ventana)
+                                           |
+                            +--------------+--------------+
+                            |                             |
+                    figura_ventanas()             figura_fft() / figura_st_ventana()
+                    (ventanas superpuestas,       (Welch espectro lineal / ST promedio |S|;
+                     alineadas en t=0)             pestañas tabs_espectro, control st_fmax)
 ```
 
 ---
@@ -204,6 +207,87 @@ Sobre el gráfico principal, la fila de **CH1 muestra la señal promedio filtrad
 - **R-I5 · Umbral por defecto.** La función `umbral_defecto(carpeta, canal, seg=1)`
   calcula el 50 % de `max(|v|)` del canal trigger evaluado específicamente sobre el
   **segmento 1**.
+- **R-I6 · t10 por segmento.** La función `t10_por_segmento(carpeta)` (cacheada en
+  `_T10_SEG_CACHE`) extrae el instante de inicio $t_{10}^{(k)}$ de cada segmento $k$ de
+  CH1 de forma individual. Cada segmento se filtra con `_filtrar_impulso` (filtro
+  Butterworth pasa-bajos $20\text{ MHz}$, orden 4) y se interpola linealmente a
+  sub-muestra para encontrar el cruce al 10 % de su propio $V_{\max}^{(k)}$. Si un segmento
+  anómalo no registra cruce válido, recurre como *fallback* al $t_{10}$ del impulso
+  promedio (`_IMPULSO_CACHE`), garantizando robustez total y reportando el conteo en
+  `n_fallback_t10`.
+
+---
+
+## 2b. Calibración de retardo instrumental y sincronización temporal
+
+### Justificación física
+El sistema de adquisición captura simultáneamente la tensión de impulso LI (CH1, mediante divisor capacitivo) y las señales de descarga parcial emitidas hacia los sensores (CH2: HFCT, CH3: Antena Vivaldi, CH4: Antena Bioinspirada).
+Debido a que cada canal utiliza longitudes de cable coaxial distintas (p. ej. RG-58 vs. doble apantallado), atenuadores, filtros pasa-altos acoplados y antenas con diferentes características de propagación, las señales experimentan un retardo de propagación instrumental intrínseco respecto a CH1.
+
+Para sincronizar con precisión física el patrón TRPD (Time-Resolved Partial Discharge), cada canal detector $c \in \{\text{ch2}, \text{ch3}, \text{ch4}\}$ cuenta con un retardo medio característico $\bar{t}_{\text{lag}, c}$, de modo que el tiempo absoluto de ocurrencia de cada evento de DP se define como:
+$$t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$$
+donde $t_{\text{pd}}$ es el instante temporal del peak en el registro del osciloscopio, $t_{10}^{(k)}$ es el tiempo de inicio al 10 % del impulso de tensión en el segmento $k$, y $\bar{t}_{\text{lag}, c}$ es el retardo instrumental calibrado.
+
+### Principio de calibración por explosor de esferas
+La calibración se efectúa típicamente sobre mediciones de referencia con explosor de esferas (breakdown dieléctrico rápido sin probeta). Durante la ruptura, se produce simultáneamente la caída de tensión en el explosor y la emisión de radiación electromagnética de frente ultra-empinado:
+1. **Instante del impulso ($t_{\text{imp}}^{(k)}$):** Se toma el tiempo de inicio al 10 % de la tensión del segmento $k$ en CH1:
+   $$t_{\text{imp}}^{(k)} = t_{10}^{(k)}$$
+2. **Instante de arribo del sensor ($t_{\text{ant}}^{(k)}$):** Se calcula con `_t_arribo(t, v, umbral, dist_us, tmin)`. Se evalúa el primer cruce de umbral ascendente $v[i] \ge u$ para $t \ge t_{\text{mín}}$, interpolando linealmente a sub-muestra entre $(t_{i-1}, v_{i-1})$ y $(t_i, v_i)$. Para evitar disparos espurios por precursores electromagnéticos o ruido previo, la función absorbe precursores menores mediante una ventana de guarda `dist_us`.
+3. **Retardo por disparo ($t_{\text{lag}}^{(k)}$):**
+   $$t_{\text{lag}}^{(k)} = t_{\text{ant}}^{(k)} - t_{\text{imp}}^{(k)}$$
+
+### Algoritmo de filtrado de outliers (MAD)
+En ensayos reales, algunos disparos pueden presentar conmutaciones anómalas o pre-disparos. La función `calibrar_retardo(carpeta, canal, umbral, dist_us, tmin)` implementa un descarte robusto mediante la Desviación Absoluta respecto a la Mediana (**MAD**):
+1. Se calcula la mediana: $\tilde{t} = \text{median}(t_{\text{lag}})$.
+2. Se evalúa el MAD: $\text{MAD} = \text{median}\left(\left| t_{\text{lag}}^{(k)} - \tilde{t} \right|\right)$.
+3. El estimador de escala consistente con una distribución normal es $\hat{\sigma} = 1.4826 \times \text{MAD}$.
+4. Se marcan como válidos los disparos que cumplen:
+   $$\left| t_{\text{lag}}^{(k)} - \tilde{t} \right| \le k_{\text{mad}} \times \hat{\sigma}, \quad \text{con } k_{\text{mad}} = 5.0$$
+   *(Si todos los puntos son idénticos y $\text{MAD} = 0$, se emplea como fallback $3\sigma$ de la muestra).*
+5. Se calcula la media y desviación estándar de los puntos válidos:
+   $$\bar{t}_{\text{lag}, c} = \frac{1}{N_{\text{valid}}} \sum_{k \in \text{valid}} t_{\text{lag}}^{(k)}, \qquad \sigma_c = \sqrt{\frac{1}{N_{\text{valid}}-1} \sum_{k \in \text{valid}} \left(t_{\text{lag}}^{(k)} - \bar{t}_{\text{lag}, c}\right)^2}$$
+
+### Fuentes de calibración y flujo de trabajo
+La aplicación soporta tres modalidades para alimentar `calibracion_store`:
+- **Modo 1: Calibrar desde la medición actual:** El usuario abre el panel de calibración, ajusta umbral/distancia/tmin para CH2, CH3 y CH4, y presiona *"Calcular retardo"*. El sistema ejecuta `calibrar_retardo` multicanal, presenta el gráfico diagnóstico de dispersión e histograma, y permite persistir los valores en `metadata.yaml` mediante *"Guardar en metadata.yaml"*.
+- **Modo 2: Importar calibración de otra medición:** Se selecciona una medición previa del catálogo que ya posea calibración y se pulsa *"Importar"*. Los parámetros se cargan inmediatamente a la sesión activa.
+- **Modo 3: Ajuste manual:** El usuario puede ingresar directamente los valores en nanosegundos en los campos de entrada manual de cada canal.
+
+### Esquema de persistencia en `metadata.yaml`
+```yaml
+calibracion_retardo:
+  fuente: "medicion_actual"          # "medicion_actual" | "importado" | "manual"
+  fecha_calibracion: "2026-09-16 13:00:00"
+  medicion_origen: "3V224/20260915_30kV_rep01"
+  canales:
+    ch2:
+      sensor: "HFCT"
+      t_lag_ns: 12.34
+      std_ns: 0.45
+      n_puntos: 48
+      n_outliers: 2
+      umbral_mv: 50.0
+      dist_us: 0.5
+      tmin_us: -2.0
+    ch3:
+      sensor: "Antena Vivaldi"
+      t_lag_ns: -5.67
+      std_ns: 0.32
+      n_puntos: 50
+      n_outliers: 0
+      umbral_mv: 15.0
+      dist_us: 0.2
+      tmin_us: -1.0
+    ch4:
+      sensor: "Antena Bioinspirada"
+      t_lag_ns: 8.90
+      std_ns: 0.61
+      n_puntos: 49
+      n_outliers: 1
+      umbral_mv: 20.0
+      dist_us: 0.3
+      tmin_us: -1.5
+```
 
 ---
 
@@ -301,6 +385,17 @@ cruces del gráfico principal) derivan de ese snapshot vía `capturar`.
   en la matriz $W$ mapea 1:1 al punto $i$ de los scatters.
 - **R-C4 · Coherencia.** Mientras no se pulse el botón, los análisis mantienen el
   snapshot anterior aunque se muevan parámetros en la interfaz.
+- **R-C5 · Vector t10_seg en captura y sincronización O(N).** La función `capturar`
+  asocia a cada descarga capturada el tiempo de inicio de su respectivo segmento de CH1,
+  incluyendo en el diccionario el array `t10_seg`. La proyección a tiempo absoluto
+  sincronizado se realiza mediante `t_abs_captura(cap, t_lag_us)`:
+  $$t_{\text{abs}} = t_{\text{peak}} - t_{\text{10\_seg}} - t_{\text{lag\_us}}$$
+  Este cálculo se ejecuta **estrictamente fuera** de `_CAPTURA_CACHE`. De este modo,
+  recalibrar o modificar los retardos $t_{\text{lag}}$ recomputa el eje temporal de forma
+  instantánea en $O(N)$ ($\sim 1\text{ ms}$) sin requerir una nueva lectura de los archivos
+  HDF5 ni invalidar la matriz de formas de onda $W$, la FFT, la Transformada S o la
+  selección activa de eventos.
+
 
 ---
 
@@ -350,21 +445,25 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 
 - **Barras** (`figura_peaks`): nº de peaks por segmento.
 - **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` id="tabla_densidad"):
-  Tabla resumen de caracterización experimental multi-sensor de 9 columnas:
+  Tabla resumen de caracterización experimental multi-sensor de **10 columnas**:
   - `Specimen`: código y geometría de la probeta (ej. `2V33H (asimetrica)`).
   - `Voltage (kV)`: tensión DC previa en el condensador de carga (ej. `15.0 kV`).
   - `Sensor`: sensor y canal evaluado (ej. `HFCT (CH2)`, `Antena Vivaldi (CH3)`, `Antena Bioinspirada (CH4)`).
+  - `t_lag (ns)`: retardo instrumental aplicado al canal ($\bar{t}_{\text{lag}, c}$), obtenido de la calibración activa o 0.0 ns si no está calibrado.
   - `N_PD distribution [0, 1, 2, 3, 4, > 4]`: vector con el conteo de disparos/segmentos que registraron exactamente 0, 1, 2, 3, 4 y más de 4 eventos de DP (ej. `[9, 33, 8, 0, 0, 0]`).
   - `Media de N_PD`: promedio de eventos detectados por disparo ($\bar{N}_{PD}$).
   - `d (mm)`: diámetro(s) de cavidad(es) de la probeta inferidos del código o leídos de los metadatos (ej. `D1=3 mm, D2=3 mm`).
   - `V̄_max (V)`: amplitud de pico máxima media de todas las descargas detectadas (expresada en Voltios y con valor en mV).
   - `V̄_pp (V)`: amplitud peak-to-peak media de las descargas en su ventana de 70 ns (expresada en Voltios y con valor en mV).
-  - `t̄_abs (µs)`: tiempo absoluto medio de ocurrencia de las descargas en el segmento (respecto al inicio del registro/trigger), clave para análisis TRPD.
-  Dispone de botón **"⚡ Calcular todos los sensores (CH2..CH4)"** (que procesa cada sensor con su propia configuración calibrada de trigger), botón **"Limpiar tabla"** y exportación nativa a **CSV**. Almacena su historial en `densidad_store`.
+  - `t̄_abs (µs)`: tiempo absoluto medio sincronizado de ocurrencia de las descargas en la probeta, respecto al inicio del impulso al 10 % y corregido por retardo instrumental:
+    $$t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$$
+  Dispone de botón **"⚡ Calcular todos los sensores (CH2..CH4)"** (que procesa cada sensor con su propia configuración calibrada de trigger y su respectivo retardo instrumental), botón **"Limpiar tabla"** y exportación nativa a **CSV**. Almacena su historial en `densidad_store`.
 - **Patrón TRPD** (`figura_scatter`): Dispone de selector de magnitud con dos modos:
-  1. **Modo $V_{\max}$:** Grafica el par $(t_{\text{abs}}, V_{\max})$, representando el pico máximo instantáneo junto con la traza de referencia del impulso en CH1.
+  1. **Modo $V_{\max}$:** Grafica el par $(t_{\text{abs}}, V_{\max})$, representando el pico máximo instantáneo junto con la traza de referencia del impulso en CH1 alineada en $t_{\text{abs}} = 0$.
   2. **Modo $V_{\text{pp}}$:** Grafica el par $(t_{\text{abs}}, V_{\text{pp}})$, donde $V_{\text{pp}}$ es la amplitud peak-to-peak calculada en la ventana normalizada de 70 ns $[-7\text{ ns}, +63\text{ ns}]$ centrada en el peak.
-  El `hovertemplate` despliega simultáneamente $t_{\text{abs}}$, $V_{\max}$ y $V_{\text{pp}}$.
+  - **Alineación temporal:** El eje horizontal representa el tiempo absoluto $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$. La traza del impulso promedio de CH1 se desplaza temporalmente a $t - t_{10}^{\text{ref}}$, de modo que el 10 % del flanco de subida coincide exactamente en $t_{\text{abs}} = 0\text{ µs}$. Una línea vertical discontinua marca la referencia en $t = 0\text{ µs}$.
+  - **Hover multivariable:** El `hovertemplate` despliega simultáneamente $t_{\text{abs}}$, el tiempo original sin sincronizar del osciloscopio $t_{\text{osc}}$, $V_{\max}$, $V_{\text{pp}}$, segmento y orden de la descarga.
+  - **Subtítulo dinámico:** Indica explícitamente el factor de retardo instrumental aplicado (ej. `t_lag aplicado: 12.3 ns`).
 - **Vpp vs Energía** (`figura_vpp_energia`): por señal capturada,
   `Vpp = ptp(ventana)` [mV], `Energía = Σ v² · dt_us` [mV²·µs].
 - **Ventanas** (`figura_ventanas`): señales seleccionadas superpuestas, alineadas
@@ -533,16 +632,24 @@ Dos escalas, compartiendo la misma función:
 | `actualizar` | `carpeta, segmento, canal, captura_params` (+State 9 inputs sensores) | `grafico.figure` |
 | `fijar_captura` | `btn.n_clicks` (+State carpeta, canal, 9 inputs sensores) | `captura_params.data` |
 | `calcular_peaks` | `captura_params.data` | `grafico_peaks.figure` |
-| `actualizar_densidad_store` | `captura_params.data, btn_calc_todos_sensores.n_clicks, btn_limpiar_densidad.n_clicks` (+State densidad_store, 9 inputs sensores) | `densidad_store.data` |
+| `actualizar_densidad_store` | `captura_params.data, btn_calc_todos_sensores.n_clicks, btn_limpiar_densidad.n_clicks, calibracion_store.data` (+State densidad_store, 9 inputs sensores) | `densidad_store.data` |
 | `sincronizar_tabla_densidad` | `densidad_store.data` | `tabla_densidad.data` |
-| `actualizar_panel_metadata` | `carpeta, btn_guardar_metadata.n_clicks, btn_guardar_yaml_texto.n_clicks` (+State meta_yaml_text) | Tarjetas, tabla canales y YAML de `panel_metadata` |
+| `actualizar_panel_metadata` | `carpeta, btn_guardar_metadata.n_clicks, btn_guardar_yaml_texto.n_clicks, calibracion_store.data` (+State meta_yaml_text) | Tarjetas, tabla canales y YAML de `panel_metadata` |
 | `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico_vpp_energia.selectedData, grafico_vpp_energia.clickData, grafico.clickData` (+State captura_params) | `seleccion.data` |
-| `actualizar_scatter` | `captura_params.data, seleccion.data, modo_magnitud_trpd.value` | `grafico_scatter.figure, grafico_vpp_energia.figure` |
+| `actualizar_scatter` | `captura_params.data, seleccion.data, modo_magnitud_trpd.value, calibracion_store.data` | `grafico_scatter.figure, grafico_vpp_energia.figure` |
 | `actualizar_temporal` | `seleccion.data` (+State `captura_params`) | `grafico_ventanas.figure, grafico_fft.figure` |
 | `alternar_panel_principal` | `tabs_principal.value` | `panel_senales.hidden, panel_st_segmento.hidden, panel_metadata.hidden` |
 | `actualizar_st_segmento` | `tabs_principal.value, carpeta, segmento, st_fmax` | `grafico_st_segmento.figure` |
 | `actualizar_st_ventana` | `seleccion.data, tabs_espectro.value, st_fmax` (+State `captura_params`) | `grafico_st_ventana.figure` |
 | `seleccionar_segmento` | `grafico_peaks.clickData` | `segmento.value` |
+| **C1** `toggle_panel_calibracion` | `btn_toggle_calibracion.n_clicks` (+State `panel_calibracion_colapsable.is_open`) | `panel_calibracion_colapsable.is_open, btn_toggle_calibracion.children` |
+| **C2** `init_params_calibracion` | `carpeta, umbral_ch{2,3,4}, dist_ch{2,3,4}, tmin_ch{2,3,4}` | `cal_umbral_ch{2,3,4}, cal_dist_ch{2,3,4}, cal_tmin_ch{2,3,4}, cal_import_dropdown.options` |
+| **C3** `ejecutar_calibracion` | `btn_calc_calibracion.n_clicks` (+State `carpeta, cal_check_canales.value, cal_umbral_ch{2,3,4}, cal_dist_ch{2,3,4}, cal_tmin_ch{2,3,4}`) | `calibracion_resultado.data, cal_msg_feedback.children` |
+| **C4** `mostrar_calibracion` | `calibracion_resultado.data` | `grafico_calibracion.figure, cal_resumen_tabla.children` |
+| **C5** `gestionar_calibracion_store` | `carpeta, btn_aplicar_sesion.n_clicks, btn_guardar_cal_yaml.n_clicks, btn_importar_cal.n_clicks` (+State `calibracion_store, calibracion_resultado, tlag_manual_ch{2,3,4}, cal_import_dropdown.value`) | `calibracion_store.data, cal_msg_feedback.children` |
+| **C6** `rellenar_manual_desde_store` | `calibracion_store.data` | `tlag_manual_ch2.value, tlag_manual_ch3.value, tlag_manual_ch4.value` |
+| **C7** `badges_calibracion` | `calibracion_store.data, carpeta` | `cal_status_pill.children, cal_badge_ch2.children, cal_badge_ch3.children, cal_badge_ch4.children` |
+
 
 ---
 
@@ -554,20 +661,32 @@ Dos escalas, compartiendo la misma función:
   - `CH2 (HFCT)` en azul (`#2563eb`): `umbral_ch2`, `dist_ch2`, `tmin_ch2`.
   - `CH3 (Vivaldi)` en verde (`#059669`): `umbral_ch3`, `dist_ch3`, `tmin_ch3`.
   - `CH4 (Bioinspirada)` en ámbar (`#d97706`): `umbral_ch4`, `dist_ch4`, `tmin_ch4`.
+- **Barra y panel de calibración de retardo instrumental:**
+  - **Barra de estado (`barra_calibracion`):** Botón colapsable para desplegar la sección de calibración, píldora de resumen de estado (`cal_status_pill`: "Calibrado (metadata)", "Calibrado (sesión)" o "Sin calibrar") y tres badges por canal (`cal_badge_ch2`, `cal_badge_ch3`, `cal_badge_ch4`) que indican el retardo vigente en nanosegundos (ej. `CH2: 12.3 ns`).
+  - **Panel colapsable (`panel_calibracion_colapsable`):**
+    - Tarjetas de configuración de arribo por sensor: umbral (mV), distancia de guarda para absorción de precursores EMI (µs) y tiempo mínimo (µs).
+    - Selector de canales a calibrar y botón "⚡ Calcular retardo".
+    - Controles manuales (`tlag_manual_ch2`, `tlag_manual_ch3`, `tlag_manual_ch4`) y botón "Aplicar a sesión".
+    - Importador desde catálogo: selector desplegable con mediciones que poseen calibración previa y botón "Importar".
+    - Gráfico diagnóstico interactivo (`grafico_calibracion`): 2 subplots con la dispersión de $t_{\text{lag}}$ por segmento (puntos válidos en verde, descartados por MAD en rojo con cruz) y el histograma con curva gaussiana teórica.
+    - Tabla resumen estadística y botón "💾 Guardar en metadata.yaml".
+- **Stores de sesión:**
+  - `calibracion_store`: diccionario con los retardos aplicados a la sesión `{fuente, canales: {ch: {t_lag_ns, ...}}}`.
+  - `calibracion_resultado`: almacena los datos numéricos brutos del último cálculo de calibración para visualización diagnóstica.
 - **Fila central (2 columnas):**
   - Columna izquierda: Panel principal con pestañas **Señales** (4 filas ch1..ch4 con líneas de umbral interactivas para ch2, ch3, ch4) /
     **Transformada S** (4 mapas de calor de segmento completo) / **Metadata**
     (panel técnico con tarjetas de experimento, circuito LI, probeta, osciloscopio,
-    asignación de sensores por canal y editor/visor YAML) — `tabs_principal`.
+    asignación de sensores por canal, editor/visor YAML y bloque de calibración) — `tabs_principal`.
   - Columna derecha:
     - Tarjeta superior: Pestañas **Peaks por segmento** (`grafico_peaks`) /
       **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` resumen de
-      9 columnas: Specimen, Voltage, Sensor, $N_{PD}$ dist., Media $N_{PD}$, $d$, $\bar{V}_{\max}$, $\bar{V}_{\text{pp}}$, $\bar{t}_{\text{abs}}$,
-      con botones para calcular todos los sensores con sus respectivos triggers, limpiar y exportar a CSV) — `tabs_peaks`.
-    - Tarjeta inferior: Pestañas **Patrón TRPD** (`grafico_scatter` con selector radio para alternar entre $V_{\max}$ y $V_{\text{pp}}$) /
+      10 columnas: Specimen, Voltage, Sensor, $t_{\text{lag}}$ (ns), $N_{PD}$ dist., Media $N_{PD}$, $d$, $\bar{V}_{\max}$, $\bar{V}_{\text{pp}}$, $\bar{t}_{\text{abs}}$,
+      con botones para calcular todos los sensores con sus respectivos triggers y retardos, limpiar y exportar a CSV) — `tabs_peaks`.
+    - Tarjeta inferior: Pestañas **Patrón TRPD** (`grafico_scatter` en tiempo absoluto $t_{\text{abs}}$ sincronizado con selector radio para alternar entre $V_{\max}$ y $V_{\text{pp}}$, traza de CH1 alineada en $t=0$ y línea vertical de referencia) /
       **Vpp vs Energía** (`grafico_vpp_energia`) — `tabs_scatter`.
 - **Última fila (2 columnas):**
-  - Columna izquierda: **Ventanas** (`grafico_ventanas`), señales superpuestas alineadas en $t = 0$.
+  - Columna izquierda: **Ventanas** (`figura_ventanas`), señales superpuestas alineadas en $t = 0$.
   - Columna derecha: Pestañas **FFT** (`grafico_fft`) / **Transformada S**
     (`grafico_st_ventana`), ambas aplicadas sobre las señales seleccionadas de la ventana de 1 µs — `tabs_espectro`.
 
@@ -578,6 +697,10 @@ Dos escalas, compartiendo la misma función:
 - **Medición sin canal CH1:** La fila de CH1 muestra "no disponible".
 - **`t50` inexistente:** Impulso con cola larga que no llega a descender al 50 % de su valor máximo dentro de la ventana de recorte.
 - **Impulso con baseline alto:** Si no hay cruces de subida claros, `t0_lin` y `tmax_lin` quedan en `None`.
+- **Medición sin calibración previa:** Si `metadata.yaml` no contiene el bloque `calibracion_retardo`, el sistema asigna por defecto $t_{\text{lag}} = 0.0\text{ ns}$ para todos los canales y muestra la etiqueta "Sin calibrar". El patrón TRPD representa $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)}$ y la tabla de densidad refleja `0.0` en `t_lag (ns)`.
+- **Segmentos sin ruptura en calibración:** Si en una descarga el explosor no cebó o la señal de la antena no superó el umbral, la función `_t_arribo` retorna `None`. Ese segmento se excluye automáticamente del cómputo sin generar excepciones ni contaminar la mediana de los demás segmentos.
+- **Impulsos de CH1 ruidosos o anómalos:** Si un segmento de CH1 presenta perturbaciones que impidan detectar el cruce del 10 %, `t10_por_segmento` utiliza de forma segura el $t_{10}$ del impulso promedio de la medición como *fallback*, garantizando sincronización continua y trazabilidad (`n_fallback_t10`).
+- **Rendimiento desacoplado O(N):** La calibración y ajuste de $t_{\text{lag}}$ operan sobre los vectores numéricos `t_peak` y `t10_seg` en tiempo constante $O(N)$ ($\sim 1\text{ ms}$). Modificar el retardo no re-escanea los archivos HDF5, no invalida la caché de formas de onda $W$ en `_CAPTURA_CACHE`, no altera la selección activa en `seleccion` y conserva la perspectiva de zoom mediante `uirevision`.
 - **Peaks pegados al borde del segmento o de $t_{\text{mín}}$:** Si un peak detectado dista menos de $7\text{ ns}$ ($0.007\text{ µs}$) de $t_{\text{mín}}$ o menos de $63\text{ ns}$ ($0.063\text{ µs}$) del final del segmento ($T_{\text{MAX}} = 30 \text{ µs}$), su ventana de $70\text{ ns}$ queda incompleta. La aplicación **descarta completamente** estas descargas: no se dibujan en el osciloscopio, no se computan en las barras de peaks ni en la tabla de densidad de eventos, y quedan excluidas de los patrones TRPD, ventanas superpuestas, FFT y Transformada S. Todo evento visualizado o computado en la aplicación posee garantizada su ventana íntegra de $70\text{ ns}$.
 
 ---
