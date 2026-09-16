@@ -16,6 +16,8 @@ Crea `Mediciones/<experimento>/metadata.yaml` combinando:
 4. Configuración del trigger y asignación de sensores por canal:
    - CH1: Canal reservado para el divisor capacitivo de tensión de impulso / sincronismo.
    - CH2, CH3, CH4: Canales configurables según el sensor conectado (HFCT, antena Vivaldi, bioinspirada, etc.).
+   - Nota: plantilla_metadata() no incluye la sección 'calibracion_retardo';
+     su ausencia en metadata.yaml indica medición sin calibrar (retardo 0 ns).
 
 No sobrescribe un metadata.yaml existente salvo que se pase --forzar.
 
@@ -23,6 +25,7 @@ Ejecutar:
     python generate_metadata.py <experimento> [--forzar]
     (p. ej.: python generate_metadata.py 3V224/20260915_30kV_rep01)
 """
+import datetime
 import os
 import re
 import sys
@@ -250,6 +253,51 @@ def plantilla_metadata(experimento, carpeta_medicion):
         },
         "canales": ch_config,
     }
+
+
+def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None):
+    """Bloque 'calibracion_retardo' para metadata.yaml.
+
+    resultados: dict {ch: dict de calibrar_retardo o {'t_lag_us','sigma_us','n_valid','n_total','params'}}.
+    Unidades de tiempo en ns (3 decimales). fecha por defecto: hoy ISO.
+    """
+    if fecha is None:
+        fecha = datetime.date.today().isoformat()
+
+    default_sensores = {
+        "ch2": "HFCT",
+        "ch3": "Antena Vivaldi",
+        "ch4": "Antena Bioinspirada",
+    }
+    sensores = sensores or {}
+
+    bloque = {
+        "fecha": str(fecha),
+        "fuente_calibracion": fuente,
+        "criterio": "primer_cruce_umbral",
+        "referencia": "t10_CH1_por_segmento",
+    }
+
+    for ch in ["ch2", "ch3", "ch4"]:
+        if ch in resultados and resultados[ch] and resultados[ch].get("t_lag_us") is not None:
+            r = resultados[ch]
+            t_lag_us = r["t_lag_us"]
+            sigma_us = r.get("sigma_us")
+            params = r.get("params") or {}
+            sensor_name = sensores.get(ch) or default_sensores.get(ch, ch.upper())
+
+            bloque[ch] = {
+                "sensor": sensor_name,
+                "t_lag_ns": round(float(t_lag_us) * 1e3, 3),
+                "sigma_ns": round(float(sigma_us) * 1e3, 3) if sigma_us is not None else None,
+                "n_valid": r.get("n_valid"),
+                "n_total": r.get("n_total"),
+                "umbral_mv": round(float(params["umbral_mv"]), 4) if params.get("umbral_mv") is not None else None,
+                "distancia_us": round(float(params["distancia_us"]), 4) if params.get("distancia_us") is not None else None,
+                "tmin_us": round(float(params["tmin_us"]), 4) if params.get("tmin_us") is not None else None,
+            }
+
+    return bloque
 
 
 def generar(experimento, forzar=False):
