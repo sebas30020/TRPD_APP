@@ -10,6 +10,7 @@ maximo (|pico| = 1). Selector de segmento. Render con WebGL (Scattergl).
 
 Ejecutar:  python3 app.py   ->  abrir http://127.0.0.1:8050
 """
+import functools
 import os
 import re
 
@@ -177,17 +178,42 @@ def n_segmentos(carpeta):
     return min(m["nsegs"] for m in metas.values())
 
 
-def cargar_segmento(carpeta, canal, seg, ventana=(T_MIN, T_MAX)):
-    """Devuelve (t_us, v) para un canal y segmento, recortado a la ventana."""
+def _cargar_segmento_leer(carpeta, canal, seg, ventana=(T_MIN, T_MAX)):
+    """Devuelve (t_us, v) para un canal y segmento, recortado a la ventana.
+
+    Sólo se leen del HDF5 las muestras de la ventana (el segmento completo es ~6x
+    mayor que la ventana -5..30 us que usa la app).
+    """
     m = meta_medicion(carpeta)[canal]
     with h5py.File(_ruta(carpeta, canal), "r") as f:
-        raw = f[f"Waveforms/{m['chan']}/{m['chan']} Seg{seg}Data"][:]
+        dset = f[f"Waveforms/{m['chan']}/{m['chan']} Seg{seg}Data"]
+        n = dset.shape[0]
+        if ventana is None:
+            i0, i1 = 0, n
+        else:
+            # Mismos índices que daba la máscara (t >= v0) & (t <= v1).
+            i0 = int(np.ceil((ventana[0] * 1e-6 - m["xorg"]) / m["xinc"]))
+            i1 = int(np.floor((ventana[1] * 1e-6 - m["xorg"]) / m["xinc"])) + 1
+            i0, i1 = max(i0, 0), min(i1, n)
+            if i1 <= i0:
+                return np.array([]), np.array([])
+        raw = dset[i0:i1]
     v = (raw.astype(np.float64) * m["yinc"] + m["yorg"]) * 1e3  # milivoltios
-    t = (m["xorg"] + np.arange(raw.size) * m["xinc"]) * 1e6  # microsegundos
-    if ventana is not None:
-        mask = (t >= ventana[0]) & (t <= ventana[1])
-        t, v = t[mask], v[mask]
+    t = (m["xorg"] + np.arange(i0, i1) * m["xinc"]) * 1e6  # microsegundos
     return t, v
+
+
+@functools.lru_cache(maxsize=48)
+def _cargar_segmento_cache(carpeta, canal, seg, ventana):
+    t, v = _cargar_segmento_leer(carpeta, canal, seg, ventana)
+    t.flags.writeable = False   # evita que un consumidor mute la copia cacheada
+    v.flags.writeable = False
+    return t, v
+
+
+def cargar_segmento(carpeta, canal, seg, ventana=(T_MIN, T_MAX)):
+    """Devuelve (t_us, v) para un canal y segmento, recortado a la ventana."""
+    return _cargar_segmento_cache(carpeta, canal, seg, tuple(ventana) if ventana else None)
 
 
 _COLORES_CANALES = {
@@ -250,7 +276,8 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
             t_trig, v_trig = t, v
         fig.add_trace(
             go.Scattergl(
-                x=t, y=v, mode="lines", name=c, line=dict(width=0.7),
+                x=t.astype(np.float32), y=v.astype(np.float32),
+                mode="lines", name=c, line=dict(width=0.7),
                 hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>" + c + "</extra>",
             ),
             row=i, col=1,
@@ -564,12 +591,9 @@ def figura_fft(cap, sel, canal):
     if n and W.shape[1] > 1:
         fs = 1.0 / (cap["dt_us"] * 1e-6)  # Hz
         nperseg = min(W.shape[1], 256)
-        acc = None
-        for i in filas:
-            f, Pxx = welch(W[i], fs=fs, nperseg=nperseg, scaling="spectrum")
-            acc = Pxx if acc is None else acc + Pxx
+        f, Pxx = welch(W[filas], fs=fs, nperseg=nperseg, scaling="spectrum", axis=-1)
         fig.add_trace(go.Scattergl(
-            x=f / 1e6, y=acc / n, mode="lines", line=dict(color="#1f77b4", width=1),
+            x=f / 1e6, y=Pxx.mean(axis=0), mode="lines", line=dict(color="#1f77b4", width=1),
             hovertemplate="f=%{x:.1f} MHz<br>%{y:.3g} mV²<extra></extra>", showlegend=False,
         ))
     fig.update_layout(
@@ -1066,8 +1090,9 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
         hovertemplate="t=%{x:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<extra>" + canal.upper() + "</extra>",
     ))
     if t_ref is not None and not es_vpp:
+        paso_ref = max(1, t_ref.size // IMP_PUNTOS_PLOT)
         fig.add_trace(go.Scattergl(
-            x=t_ref, y=v_ref, mode="lines", name="CH1 promedio (ref.)",
+            x=t_ref[::paso_ref], y=v_ref[::paso_ref], mode="lines", name="CH1 promedio (ref.)",
             line=dict(color="#999", width=1), opacity=0.6,
             hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>CH1</extra>",
         ))
@@ -1866,4 +1891,4 @@ def seleccionar_segmento(click):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="127.0.0.1", port=8050)
+    app.run(debug=True, dev_tools_props_check=False, host="127.0.0.1", port=8050)
