@@ -10,9 +10,12 @@ PROJECT_DIR="$(cd "$AVO_DIR/.." && pwd)"
 source "$AVO_DIR/lib/common.sh"
 cd "$PROJECT_DIR" || exit 1
 
-PYTHON="$PROJECT_DIR/.venv/Scripts/python.exe"
+PYTHON="${TRPD_PYTHON:-$PROJECT_DIR/.venv/Scripts/python.exe}"
 if [[ ! -x "$PYTHON" ]]; then
-  PYTHON="python"
+  cat <<EOF
+{"pass":false,"metric_name":"entorno","metric_value":1,"signals":["python_env:fail"],"error_details":"No se encontro el interprete de Python en $PYTHON. No degradar al Python global."}
+EOF
+  exit 1
 fi
 
 SIGNALS=()

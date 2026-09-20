@@ -25,6 +25,10 @@ conocidas.
 15. **La curva 0 del scatter TRPD es la de peaks**: `_idx_scatter` filtra por `curveNumber == 0`; cualquier traza nueva (como la referencia de CH1) va después.
 16. **Convenciones de unidades y direcciones**: µs y mV en memoria, ns en disco (YAML) y en la GUI; segmentos 1-based; `carpeta` siempre relativa a `MEDICIONES` con `/`; los datos `.h5` viven fuera del repositorio en `../mediciones/Mediciones`.
 17. **Entorno Windows**: no hay `jq` ni `python3` en el PATH, y el `pytest` del PATH no es el del `.venv`. Todo comando de verificación usa `.venv/Scripts/python.exe` explícitamente.
+18. **Entorno virtual en Google Drive y latencia de E/S**: El `.venv` reside en `G:\Mi unidad\...\TRPD_APP\.venv` (~11.600 archivos, ~340 MB). Para que los tiempos de importación no escalen a minutos (~180 s en frío), la carpeta debe marcarse como "Disponible sin conexión" (acceso offline) en Google Drive. Cualquier comando o script que importe `scipy` o `dash` en frío puede tardar varios minutos; no interpretarlo como un cuelgue.
+19. **Intérprete de ejecución y aislamiento**: El ejecutable global `python` en el PATH carece de las dependencias del proyecto (`dash`, `scipy`, etc.). Jamás se debe invocar `python` a secas ni degradar a él. Se debe usar explícitamente `.venv\Scripts\python.exe` o respetar la variable de entorno `TRPD_PYTHON`. Si el ejecutable no existe, los scripts deben abortar con error explícito.
+20. **Recargador de Dash y tiempo de arranque**: `debug=True` en Dash activa por defecto el recargador de Werkzeug (`use_reloader=True`), que importa la aplicación dos veces (proceso padre y proceso hijo), duplicando el tiempo de arranque. En `app.py` se mantiene `use_reloader=False` para evitar pagar dos veces la carga de librerías.
+21. **Scripts de arranque autocontenidos**: Se proporcionan `run_app.cmd` (visor TRPD, puerto 8050) y `run_calibrar.cmd` (calibrador instrumental, puerto 8051). Ambos resuelven su ruta con `%~dp0`, verifican la existencia de Python antes de ejecutar, rechazan el intérprete global y dejan la ventana abierta con `pause` en caso de fallo.
 
 ## Decisiones de arquitectura congeladas
 

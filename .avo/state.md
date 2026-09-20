@@ -1,38 +1,39 @@
 # Estado del Proyecto TRPD_APP (Harness AVO)
-*Última actualización: 2026-09-20 | Intento activo: ninguno*
+*Última actualización: 2026-09-20 | Intento activo: arranque-entorno*
 
 ## 1. Objetivo Inmediato y Criterio de Éxito
-- **Meta:** Instaurar el ciclo AVO, implementar correcciones en `app.py`, construir la aplicación autónoma `calibrar_app` (puerto 8051) con diagnóstico IEC 60060-1 y convertir `app.py` en consumidor puro de retardos.
-- **Métrica objetivo:** `tests_fallidos = 0`, `ids_colgantes = 0`, 100% de paridad con el oráculo metrológico.
-- **Línea base actual:** 29 tests pasando exitosamente en la suite automatizada `pytest`.
+- **Meta:** Resolver la latencia de arranque de los servidores (`app.py` en 8050 y `calibrar_app` en 8051), eliminando el doble import del recargador de Dash, creando scripts de inicio robustos (`run_app.cmd` y `run_calibrar.cmd`), asegurando el aislamiento del intérprete en el harness AVO y documentando el acceso offline a `.venv` en Google Drive.
+- **Métrica objetivo:** `arranque_s < 10` (o reducción sustancial de los 178.7 s de línea base), `tests_fallidos = 0`, servidores 8050 y 8051 respondiendo HTTP 200.
+- **Línea base actual:** 178.7 s en frío con doble reloader de Werkzeug y acceso en la nube de Google Drive.
 
 ## 2. Enfoque Actual y Linaje
-- **Tag de enfoque:** `plan-completado`
+- **Tag de enfoque:** `arranque-entorno`
 - **ID Padre:** `b63a9f41`
-- **Hipótesis activa:** Todas las fases del plan ejecutadas y verificadas con éxito. Arquitectura desacoplada en producción operativa.
+- **Hipótesis activa:** El arranque excesivo se debe a que `site-packages` reside en el sistema de archivos de streaming de Google Drive (~11.600 archivos) y a que el recargador de Dash importa el árbol de módulos dos veces en `debug=True`. Desactivar el recargador (`use_reloader=False`), crear scripts de arranque con ruta absoluta `%~dp0` y comprobación estricta de Python, junto con el acceso offline ("Disponible sin conexión") a `.venv`, resuelve la lentitud y previene fallos silenciosos.
 
 ## 3. Estado de la Arquitectura / Hallazgos
-- **Parte 0 (Harness AVO):** Inicializado en Windows, hooks configurados, contrato de verificación `.avo/verify.sh` determinista.
-- **Paso P0 (Oráculo):** Generado oráculo metrológico (`scratch/oraculo_calibracion.json`) para `mediciones_filtros/cada_30s/7`.
-- **Parte 1 (UI `app.py`):**
-  - Solapamiento título/leyenda corregido con márgenes y anclaje superior.
-  - Pestaña "Vpp vs Energía" y funciones asociadas eliminadas.
-  - Curva CH1 normalizada añadida en modo Vpp (curva 0 sigue siendo peaks para no romper selección).
-  - Valores por defecto multi-trigger actualizados: $\Delta t = 0.035\text{ µs}$, $t_{\min} = 0.15\text{ µs}$, pasos finos 0.1 y 0.005.
-- **Núcleo y Calibrador `calibrar_app` (Puerto 8051):**
-  - `iec60060.py`: Filtro pasa-bajos vectorizado $k(f)$ de fase cero y regla de último cruce del frente (Anexos B y C de IEC 60060-1).
-  - `datos.py`: Acceso a HDF5 independiente con soporte de ventana completa (`ventana=None`) para IEC y recortada (`[-5, 30] µs`) para $t_{10}$.
-  - `impulso.py` y `referencia.py`: Selector dual $t_{10}$ vs $O_1$, cálculo de $t_{10} - O_1 \approx 258\text{ ns}$ y diagnóstico de conformidad de lote.
-  - `arribo.py`: Interpolación lineal sub-muestra y filtrado MAD ($k=5.0$) de atípicos.
-  - `figuras.py`: 4 gráficos interactivos con soporte de arrastre de umbral por `relayoutData`.
-  - `persistencia.py`: Serialización aditiva en `metadata.yaml` con clave `referencia_impulso` y sub-bloque `ancla`.
-  - `interfaz.py` y `main.py`: Servidor Dash en puerto 8051.
-- **Cirugía en `app.py` (Puerto 8050):**
-  - `app.py` transformado en consumidor puro de solo lectura.
-  - Eliminados callbacks de cálculo, sliders manuales, e IDs obsoletos (0 IDs colgantes).
-  - Callback `cargar_calibracion_store` recarga desde disco; normaliza automáticamente retardos $O_1$ al ancla $t_{10}$ usando `t10_menos_O1_ns`.
-- **Suite de Pruebas Automatizadas:** 29 tests en `tests/` cubriendo vectores analíticos normativos (V1-V3), equivalencia metrológica contra el oráculo (V4), consistencia de ancla (V5), round-trip de persistencia (V6), regresión TRPD (V7) y GUI (V8/V9).
+- **Parte 0 (Harness AVO):**
+  - `.avo/profiles/software.sh` corregido: ya no degrada al Python global en el PATH (que carece de librerías); ahora aborta con diagnóstico JSON explícito si falta el intérprete.
+  - `.avo/knowledge.md` enriquecido con invariantes 18 a 21 (Google Drive I/O, aislamiento de intérprete, recargador Dash y scripts de inicio).
+- **Scripts de Arranque Versionados:**
+  - `run_app.cmd`: Inicia el Visor TRPD (`app.py`) en `http://127.0.0.1:8050`.
+  - `run_calibrar.cmd`: Inicia el Calibrador Instrumental (`calibrar_app\main.py`) en `http://127.0.0.1:8051`.
+  - Ambos scripts validan la presencia de `.venv\Scripts\python.exe` (o `TRPD_PYTHON`), rechazan el Python global para prevenir falsos `ModuleNotFoundError`, y utilizan `pause` para inspección tras doble clic.
+- **Optimización de Dash (`app.py`):**
+  - Configurado `use_reloader=False` en `app.run(debug=True, use_reloader=False, dev_tools_props_check=False, host="127.0.0.1", port=8050)`. Elimina la duplicación de importación por Werkzeug (reducción directa del 50% en tiempo de arranque).
+- **Documentación:**
+  - `archivos_md/DOCUMENTACION.md` actualizado con guía de puesta en marcha, detalles de ejecución y advertencias sobre el acceso offline de Google Drive.
+- **Verificación de Servidores:**
+  - `app.py` en `http://127.0.0.1:8050/` verificado respondiendo HTTP 200.
+  - `calibrar_app/main.py` en `http://127.0.0.1:8051/` verificado respondiendo HTTP 200.
+- **Suite de Pruebas Automatizadas:** 29 tests en `tests/` verificados en verde.
 
 ## 4. Próxima Acción Inmediata
-- [x] Ejecutar suite de pruebas completa y verificar contrato `.avo/verify.sh` (100% aprobado).
+- [x] Crear scripts de inicio `run_app.cmd` y `run_calibrar.cmd`.
+- [x] Añadir `use_reloader=False` en `app.py`.
+- [x] Corregir fallback en `.avo/profiles/software.sh`.
+- [x] Actualizar `.avo/knowledge.md` y `archivos_md/DOCUMENTACION.md`.
+- [x] Verificar respuesta HTTP 200 en puertos 8050 y 8051.
+- [x] Completar ejecución de `.avo/verify.sh` (29/29 tests pasando).
+- [x] Registrar intento en `.avo/ledger.jsonl` (`#dbbc52f1`, commit, arranque_s=61.6 s vs 178.7 s base).
 - [x] Versionar cambios en Git.

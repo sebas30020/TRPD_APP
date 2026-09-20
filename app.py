@@ -2263,4 +2263,4 @@ def seleccionar_segmento(click):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, dev_tools_props_check=False, host="127.0.0.1", port=8050)
+    app.run(debug=True, use_reloader=False, dev_tools_props_check=False, host="127.0.0.1", port=8050)

@@ -7,6 +7,41 @@ añada o cambie una funcionalidad.
 
 ---
 
+## Puesta en marcha y ejecución de las aplicaciones
+
+El proyecto cuenta con dos aplicaciones Dash independientes que operan en puertos diferentes:
+
+1. **Visor TRPD Principal (`app.py`):**
+   - **URL:** `http://127.0.0.1:8050`
+   - **Propósito:** Exploración de mediciones HDF5, detección de descargas parciales, visualización TRPD y cálculo de métricas. Es consumidor de calibraciones (`metadata.yaml`).
+   - **Arranque recomendado:** Ejecutar el script versionado `run_app.cmd` (doble clic o desde consola) en la raíz del proyecto.
+   - **Arranque manual por terminal:**
+     ```cmd
+     .\.venv\Scripts\python.exe -u app.py
+     ```
+
+2. **Calibrador Instrumental (`calibrar_app/main.py`):**
+   - **URL:** `http://127.0.0.1:8051`
+   - **Propósito:** Detección de retardo instrumental ($t_{\text{lag}}$) sobre señales de calibración, ajuste de impulso IEC 60060-1 / Anexo B y guardado de resultados en `metadata.yaml`.
+   - **Arranque recomendado:** Ejecutar el script versionado `run_calibrar.cmd` (doble clic o desde consola) en la raíz del proyecto.
+   - **Arranque manual por terminal:**
+     ```cmd
+     .\.venv\Scripts\python.exe -u calibrar_app\main.py
+     ```
+
+### Scripts de arranque (`run_app.cmd` y `run_calibrar.cmd`)
+Ambos scripts garantizan una inicialización robusta:
+- **Ruta relativa autocontenida:** Resuelven el directorio base mediante `%~dp0`, funcionando desde cualquier ubicación.
+- **Aislamiento del intérprete:** Utilizan explícitamente `"%~dp0.venv\Scripts\python.exe"` (o la variable de entorno `TRPD_PYTHON` si está configurada).
+- **Protección contra fallos silenciosos:** Si el entorno virtual no está presente en la ruta esperada, muestran un mensaje de diagnóstico claro en español explicando el problema y abortan con código de error, evitando degradar al Python del sistema (el cual carece de dependencias y generaría falsos errores de importación).
+- **Inspección de errores:** Terminan con `pause` en caso de terminación anormal o fallo del intérprete para que las trazas sean legibles tras un doble clic.
+
+### Consideraciones de rendimiento y entorno (Google Drive)
+- **Acceso offline al `.venv`:** Debido a que el entorno virtual reside en una unidad de Google Drive (`G:\Mi unidad\...`), el sistema de archivos de streaming puede ralentizar sustancialmente la importación de librerías complejas (`scipy`, `dash`, `h5py`) si los archivos deben consultarse en la nube. Para un arranque casi instantáneo (< 10 s), la carpeta `.venv` debe marcarse como **Disponible sin conexión** (clic derecho → *Acceso offline* → *Disponible sin conexión* en Windows Explorer).
+- **Desactivación del recargador en desarrollo:** `app.py` ejecuta con `use_reloader=False`. Esto previene que Werkzeug importe dos veces todo el árbol de dependencias, reduciendo el tiempo de inicialización a la mitad.
+
+---
+
 ## 0. Ruta de los datos, de principio a fin
 
 Este recorrido describe cómo fluye la información desde los archivos HDF5 crudos
