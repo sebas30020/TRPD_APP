@@ -67,12 +67,11 @@ def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
         color = _COLORES_CANALES.get(c, "#2563eb")
 
         if v.size > 0:
-            paso = max(1, t.size // PUNTOS_PLOT)
             fig.add_trace(
                 go.Scattergl(
-                    x=t[::paso], y=v[::paso], mode="lines", name=c.upper(),
+                    x=t.astype(np.float32), y=v.astype(np.float32), mode="lines", name=c.upper(),
                     line=dict(color=color, width=1.2 if c == "ch1" or c == canal else 0.9),
-                    hovertemplate=f"t=%{{x:.4f}} µs<br>v=%{{y:.2f}} mV<extra>{c.upper()}</extra>",
+                    hovertemplate="t=%{x:.4f} µs<br>v=%{y:.2f} mV<extra>" + c.upper() + "</extra>",
                     showlegend=False,
                 ),
                 row=i, col=1,
@@ -134,9 +133,7 @@ def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
 
         tlag_str = "—"
         if ta is not None and v.size > 0:
-            dt = t[1] - t[0] if t.size > 1 else 0.0002
-            idx_cercano = int(np.clip(round((ta - t[0]) / dt), 0, v.size - 1))
-            v_arr = float(v[idx_cercano])
+            v_arr = float(np.interp(ta, t, v))
             fig.add_trace(
                 go.Scatter(
                     x=[ta], y=[v_arr], mode="markers", name=f"arribo {c}",
