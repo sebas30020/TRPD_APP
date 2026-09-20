@@ -1,0 +1,27 @@
+description = "Ejecuta un ciclo de variación (hipótesis, cambio, verify.sh, evaluación). Cierra siempre con /avo:record."
+prompt = """
+Ciclo de variación AVO. {{args}}
+
+Obligaciones del ciclo — no una secuencia rígida, decide tú qué inspeccionar, cambiar,
+probar y commitear:
+
+1. **Proponer** — define la hipótesis y el `approach_tag` si no vienen ya de
+   /avo:resume. Una hipótesis útil predice qué debería pasar con la métrica objetivo.
+2. **Modificar** — aplica el cambio mínimo necesario para probar la hipótesis. No
+   mezcles dos hipótesis distintas en un mismo intento.
+3. **Verificar** — ejecuta `.avo/verify.sh`. Este paso no es negociable: la señal
+   viene del entorno, no de tu propia lectura del cambio.
+   - Perfil software: ya corre tests/typecheck/lint del proyecto.
+   - Perfil research/contenido: además de las señales deterministas, exige
+     `.avo/critique.json` escrito por **otro agente, invocado con contexto fresco**
+     (sin el historial de esta sesión) que puntúe contra `.avo/rubric.md`. No lo
+     escribas tú mismo simulando ese rol — el punto es que no sea el autor quien se
+     autoevalúa.
+4. **Evaluar y, si hace falta, reparar** — si `verify.sh` falla, puedes intentar una
+   reparación localizada (máx. 2 iteraciones) antes de declarar el intento `reject`.
+   Una tercera falla en el mismo `approach_tag` es señal de que el enfoque, no la
+   implementación, es el problema — considera /avo:pivot en vez de seguir reparando.
+
+Cierra siempre con **/avo:record** — pase, falle, o quede bloqueado por algo externo.
+Ningún intento se queda sin registrar.
+"""

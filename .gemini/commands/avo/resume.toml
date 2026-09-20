@@ -1,0 +1,25 @@
+description = "Restaura el contexto del proyecto (memoria, ledger reciente, deadends) antes de tocar nada, y declara el siguiente movimiento."
+prompt = """
+Vas a reanudar trabajo en este proyecto usando el harness AVO (ver GEMINI.md).
+
+Estado actual (.avo/state.md):
+@{.avo/state.md}
+
+Últimos intentos registrados:
+!{.avo/bin/avo log 5}
+
+Callejones sin salida recientes (.avo/deadends.md):
+@{.avo/deadends.md}
+
+Antes de editar nada:
+1. Verifica el estado real de git (`git status`, `git log -n 3`) — la memoria puede
+   estar desincronizada de lo que hay en disco.
+2. Revisa `.avo/knowledge.md` por invariantes que no debas violar ni re-descubrir.
+3. Confirma que el enfoque que tienes en mente no está ya descartado en los deadends
+   de arriba (mismo `approach_tag` o misma causa raíz).
+4. Declara explícitamente: qué hipótesis vas a probar, con qué `approach_tag`, y por
+   qué crees que puede mover la métrica objetivo de `state.md`.
+
+No edites código ni contenido todavía en este comando — solo orienta y declara el
+siguiente movimiento. El cambio real ocurre en /avo:attempt.
+"""

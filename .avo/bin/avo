@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# Unified CLI for a project that has the AVO harness installed.
+# Self-contained by construction: avo-init copies this file (and lib/) to
+# <project>/.avo/bin/avo, and it resolves its own lib/ relative to itself
+# — so it works both as tool/bin/avo (dev use, against an explicit --dir)
+# and as <project>/.avo/bin/avo (installed use, against the project root).
+#
+# Usage: avo <init|status|check|record|log|help> [options]
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$SCRIPT_DIR/../lib"
+# shellcheck source=../lib/common.sh
+source "$LIB_DIR/common.sh"
+# shellcheck source=../lib/ledger.sh
+source "$LIB_DIR/ledger.sh"
+# shellcheck source=../lib/validator.sh
+source "$LIB_DIR/validator.sh"
+
+DIR="$(pwd)"
+SUBCOMMAND="${1:-help}"
+[[ $# -gt 0 ]] && shift
+
+usage() {
+  cat << 'USAGEEOF'
+avo <subcommand> [--dir PATH] [options]
+
+Subcommands:
+  init [DEST]              Install/refresh the harness into DEST (default: cwd)
+  status [--dir PATH]      Show state.md, ledger stats, recent entries and dead ends
+  check [--dir PATH]       Health check: hooks executable, verify.sh contract, memory files
+  record <verdict> [opts]  Append one ledger entry (verdict: commit|reject|park)
+  log [N] [--dir PATH]     Show the last N ledger entries (default 10)
+  help                     Show this message
+
+record options:
+  --dir PATH               Project root (default: cwd)
+  --tag TAG                approach_tag (required)
+  --hypothesis TEXT        hypothesis (required)
+  --kind software|research kind (default: read from .avo/config.json, else "software")
+  --parent ID               parent ledger id (default: id of the last entry)
+  --change TEXT             change_summary
+  --metric-name NAME
+  --metric-value NUM
+  --baseline NUM
+  --signals "a,b,c"          comma-separated signal strings
+  --notes TEXT
+  --commit-hash HASH
+USAGEEOF
+}
+
+resolve_dir() {
+  local out=() dest="$DIR"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dest="$2"; shift 2 ;;
+      *) out+=("$1"); shift ;;
+    esac
+  done
+  DIR="$(cd "$dest" && pwd)"
+  REMAINING=("${out[@]}")
+}
+
+cmd_init() {
+  resolve_dir "$@"
+  local dest="${REMAINING[0]:-$DIR}"
+  local initscript="$SCRIPT_DIR/avo-init"
+  if [[ ! -x "$initscript" ]]; then
+    echo "avo: bin/avo-init no está junto a este binario (esta es una copia instalada)." >&2
+    echo "avo: para reinstalar/actualizar el harness, ejecuta bin/avo-init desde el repo tool." >&2
+    return 1
+  fi
+  "$initscript" "$dest"
+}
+
+cmd_status() {
+  resolve_dir "$@"
+  export AVO_DIR="$DIR/.avo"
+  if [[ ! -d "$AVO_DIR" ]]; then
+    echo "avo: no hay .avo/ en $DIR — ejecuta 'avo init' primero." >&2
+    return 1
+  fi
+  echo "== .avo/state.md =="
+  cat "$AVO_DIR/state.md" 2>/dev/null || echo "(vacío)"
+  echo
+  echo "== estadísticas del ledger =="
+  avo_ledger_stats
+  echo
+  echo "== últimas 5 entradas =="
+  avo_ledger_last 5
+  echo
+  echo "== últimos deadends =="
+  tail -n 20 "$AVO_DIR/deadends.md" 2>/dev/null || echo "(ninguno)"
+}
+
+cmd_check() {
+  resolve_dir "$@"
+  export AVO_DIR="$DIR/.avo"
+  local ok=1
+
+  if [[ ! -d "$AVO_DIR" ]]; then
+    echo "FAIL: no existe .avo/ en $DIR"
+    return 1
+  fi
+
+  local f
+  for f in state.md knowledge.md deadends.md ledger.jsonl rubric.md verify.sh; do
+    if [[ -e "$AVO_DIR/$f" ]]; then
+      echo "OK: .avo/$f presente"
+    else
+      echo "FAIL: falta .avo/$f"; ok=0
+    fi
+  done
+
+  if [[ -x "$AVO_DIR/verify.sh" ]]; then
+    echo "OK: verify.sh es ejecutable"
+  else
+    echo "FAIL: verify.sh no es ejecutable"; ok=0
+  fi
+
+  local state_lines max_lines
+  state_lines="$(wc -l < "$AVO_DIR/state.md" 2>/dev/null || echo 0)"
+  max_lines="$(avo_json_get "$(cat "$AVO_DIR/config.json" 2>/dev/null || echo '{}')" "state_max_lines" "200")"
+  if [[ "$state_lines" -le "$max_lines" ]]; then
+    echo "OK: state.md tiene $state_lines líneas (límite $max_lines)"
+  else
+    echo "WARN: state.md tiene $state_lines líneas, supera el límite de $max_lines — reescríbelo más corto"
+  fi
+
+  local hooks_dir="$DIR/.claude/hooks"
+  local h
+  for h in "$hooks_dir"/*.sh; do
+    [[ -e "$h" ]] || continue
+    if [[ -x "$h" ]]; then
+      echo "OK: $(basename "$h") es ejecutable"
+    else
+      echo "FAIL: $(basename "$h") no es ejecutable"; ok=0
+    fi
+  done
+
+  echo "-- ejecutando verify.sh --"
+  local out status
+  out="$("$AVO_DIR/verify.sh" 2>/tmp/avo_check_stderr.$$)"
+  status=$?
+  if avo_validate_verify_output "$out"; then
+    echo "OK: verify.sh produjo JSON válido con 'pass' booleano (exit $status)"
+  else
+    echo "FAIL: verify.sh no cumple el contrato JSON"; ok=0
+  fi
+  rm -f "/tmp/avo_check_stderr.$$"
+
+  [[ "$ok" -eq 1 ]]
+}
+
+cmd_record() {
+  local verdict="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$verdict" in
+    commit|reject|park) ;;
+    *) echo "avo: verdict debe ser commit, reject o park (recibido: '$verdict')" >&2; return 1 ;;
+  esac
+
+  local dest="$DIR" tag="" hypothesis="" kind="" parent="" change="" \
+        metric_name="" metric_value="" baseline="" signals="" notes="" commit_hash=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dest="$2"; shift 2 ;;
+      --tag) tag="$2"; shift 2 ;;
+      --hypothesis) hypothesis="$2"; shift 2 ;;
+      --kind) kind="$2"; shift 2 ;;
+      --parent) parent="$2"; shift 2 ;;
+      --change) change="$2"; shift 2 ;;
+      --metric-name) metric_name="$2"; shift 2 ;;
+      --metric-value) metric_value="$2"; shift 2 ;;
+      --baseline) baseline="$2"; shift 2 ;;
+      --signals) signals="$2"; shift 2 ;;
+      --notes) notes="$2"; shift 2 ;;
+      --commit-hash) commit_hash="$2"; shift 2 ;;
+      *) echo "avo: opción desconocida: $1" >&2; return 1 ;;
+    esac
+  done
+
+  DIR="$(cd "$dest" && pwd)"
+  export AVO_DIR="$DIR/.avo"
+  [[ -d "$AVO_DIR" ]] || { echo "avo: no hay .avo/ en $DIR" >&2; return 1; }
+
+  if [[ -z "$tag" || -z "$hypothesis" ]]; then
+    echo "avo: --tag y --hypothesis son obligatorios" >&2
+    return 1
+  fi
+
+  [[ -z "$kind" ]] && kind="$(avo_json_get "$(cat "$AVO_DIR/config.json" 2>/dev/null || echo '{}')" "profile" "software")"
+  [[ -z "$parent" ]] && parent="$(avo_ledger_last_id)"
+
+  local id ts
+  id="$(avo_new_id)"
+  ts="$(avo_now)"
+
+  local signals_json="[]"
+  if [[ -n "$signals" ]]; then
+    signals_json="$(IFS=,; printf '%s\n' $signals | while IFS= read -r s; do avo_json_string "$s"; done | paste -sd, -)"
+    signals_json="[${signals_json}]"
+  fi
+
+  local parent_json="null"
+  [[ -n "$parent" ]] && parent_json="$(avo_json_string "$parent")"
+  local metric_name_json="null" metric_value_json="null" baseline_json="null" \
+        commit_hash_json="null" notes_json="null" change_json="null"
+  [[ -n "$metric_name" ]] && metric_name_json="$(avo_json_string "$metric_name")"
+  [[ -n "$metric_value" ]] && metric_value_json="$metric_value"
+  [[ -n "$baseline" ]] && baseline_json="$baseline"
+  [[ -n "$commit_hash" ]] && commit_hash_json="$(avo_json_string "$commit_hash")"
+  [[ -n "$notes" ]] && notes_json="$(avo_json_string "$notes")"
+  [[ -n "$change" ]] && change_json="$(avo_json_string "$change")"
+
+  local line
+  line="$(printf '{"id":%s,"ts":%s,"parent":%s,"kind":%s,"approach_tag":%s,"hypothesis":%s,"change_summary":%s,"verify":{"metric_name":%s,"metric_value":%s,"baseline_value":%s,"signals":%s},"verdict":%s,"commit_hash":%s,"notes":%s}' \
+    "$(avo_json_string "$id")" "$(avo_json_string "$ts")" "$parent_json" "$(avo_json_string "$kind")" \
+    "$(avo_json_string "$tag")" "$(avo_json_string "$hypothesis")" "$change_json" \
+    "$metric_name_json" "$metric_value_json" "$baseline_json" "$signals_json" \
+    "$(avo_json_string "$verdict")" "$commit_hash_json" "$notes_json")"
+
+  if ! avo_validate_ledger_entry "$line"; then
+    echo "avo: la entrada construida no pasó la validación, no se escribió" >&2
+    return 1
+  fi
+
+  avo_ledger_append "$line" || return 1
+  echo "avo: registrado #$id ($verdict, tag=$tag, parent=${parent:-none})"
+
+  if [[ "$verdict" == "reject" ]]; then
+    {
+      echo
+      echo "### $(date -u +%Y-%m-%d) Intento #$id: Tag \`$tag\`"
+      echo "- **Hipótesis:** $hypothesis"
+      echo "- **Causa de rechazo:** ${notes:-(sin notas — completar manualmente)}"
+    } >> "$AVO_DIR/deadends.md"
+    echo "avo: añadido a deadends.md"
+  fi
+}
+
+cmd_log() {
+  local n=10
+  if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
+    n="$1"; shift
+  fi
+  resolve_dir "$@"
+  export AVO_DIR="$DIR/.avo"
+  avo_ledger_last "$n"
+}
+
+case "$SUBCOMMAND" in
+  init) cmd_init "$@" ;;
+  status) cmd_status "$@" ;;
+  check) cmd_check "$@" ;;
+  record) cmd_record "$@" ;;
+  log) cmd_log "$@" ;;
+  help|-h|--help) usage ;;
+  *) echo "avo: subcomando desconocido: $SUBCOMMAND" >&2; usage >&2; exit 1 ;;
+esac

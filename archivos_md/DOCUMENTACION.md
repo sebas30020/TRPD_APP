@@ -108,10 +108,10 @@ _dibujar_impulso_ch1()     |                                     [t_peak, v_peak
    t_abs = t_peak - t10_seg - t_lag                                |       tabla_densidad() |
                    |                                               |       (barras y tabla) <
                    v                                               |       (cruces naranjas
-   figura_scatter() (Patrón TRPD) / tabla_densidad()               |        en figura())
-   (cruces negras en figura(); Scattergl)                          v
-                   |                                  figura_vpp_energia()
-                   +-----------------------+-----------------------+
+    figura_scatter() (Patrón TRPD) / tabla_densidad()               |
+    (cruces negras en figura(); Scattergl)                          |
+                    |                                               |
+                    +-----------------------+-----------------------+
                                            |
                                            | (clic/caja en scatters o
                                            |  clic en cruces negras)
@@ -820,3 +820,28 @@ Dos escalas, compartiendo la misma función:
   - `python3 cadencia.py --mover` → además mueve cada medición a
     `Mediciones/<clase>/<medición>/`. Es idempotente: si ya está en su
     carpeta no la toca, y si el destino ya existe no sobrescribe.
+
+---
+
+## 14. Calibración Instrumental y Aplicación `calibrar_app` (Puerto 8051)
+
+Para garantizar la precisión metrológica del tiempo absoluto de las descargas parciales sin sobrecargar la aplicación principal ni introducir riesgos de desincronización, el sistema desacopla el cálculo y el consumo en dos aplicaciones independientes:
+
+1. **`app.py` (Puerto 8050 — Consumidor TRPD):**
+   - Consume exclusivamente los retardos calibrados almacenados en `metadata.yaml` bajo el bloque `calibracion_retardo`.
+   - El panel desplegable de calibración es de **solo lectura**, mostrando la trazabilidad metrológica (fuente, fecha, criterio, referencia de impulso, umbrales y estadísticas $\bar{t}_{\text{lag}} \pm \sigma$, válidos / total).
+   - Incluye botón `"🔄 Recargar desde disco"` para actualizar el store de sesión inmediatamente tras guardar cambios en `calibrar_app`.
+   - Realiza la traslación exacta de las nubes TRPD: $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$.
+   - Si la medición fue calibrada contra el origen virtual $O_1$ de la norma IEC 60060-1, `app.py` normaliza automáticamente restando el ancla $\Delta = t_{10} - O_1 \approx 258\text{ ns}$ almacenada en el bloque `ancla`. De esta forma, el patrón TRPD es **invariante a la referencia elegida**.
+
+2. **`calibrar_app` (Puerto 8051 — Calibrador y Diagnóstico IEC):**
+   - Aplicación Dash autónoma ejecutada desde el subdirectorio `calibrar_app/` (`python calibrar_app/main.py`).
+   - Permite seleccionar interactivamente la medición, el canal sensor (`ch2`, `ch3`, `ch4`) y el segmento de prueba.
+   - Sincronización bidireccional entre la caja de texto del umbral $u_{\text{cal}}$ y una línea horizontal roja editable en el gráfico de señal, permitiendo ajustar umbrales visualmente arrastrando con el cursor.
+   - Detección precisa de arribo $t_{\text{ant}}$ mediante cruce de umbral por interpolación lineal sub-muestra con filtrado robusto de atípicos por desviación absoluta mediana (MAD, $k=5.0$).
+   - Soporta referencia dual de tiempo de impulso en CH1:
+     - **Referencia $t_{10}$:** Cruce del 10% del frente de onda en la ventana de observación $[-5, 30]\text{ µs}$.
+     - **Referencia $O_1$ (IEC 60060-1):** Ajuste de curva base biexponencial $U_m(t)$ y filtro pasa-bajos de fase cero $k(f)$ sobre el registro completo (Anexos B y C), deduciendo el origen virtual $O_1$ y evaluando parámetros normativos ($T_1$, $T_2$, $\beta'$, $U_t$).
+   - Visualización diagnóstica en 4 cuadrantes: señal con línea móvil, impulso CH1 con curvas y líneas normativas, dispersión de $t_{\text{lag}}$ con histograma, y evolución de marcas de ancla por disparo.
+   - Botón `"💾 Guardar YAML"` que actualiza atómicamente el bloque `calibracion_retardo` en `metadata.yaml`, preservando todas las secciones preexistentes (`experimento`, `circuito_impulso`, `probeta`, `osciloscopio`, `canales`).
+

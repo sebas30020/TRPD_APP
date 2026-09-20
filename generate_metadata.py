@@ -255,11 +255,14 @@ def plantilla_metadata(experimento, carpeta_medicion):
     }
 
 
-def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None):
+def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
+                               referencia_impulso="t10", info_ancla=None):
     """Bloque 'calibracion_retardo' para metadata.yaml.
 
     resultados: dict {ch: dict de calibrar_retardo o {'t_lag_us','sigma_us','n_valid','n_total','params'}}.
     Unidades de tiempo en ns (3 decimales). fecha por defecto: hoy ISO.
+    referencia_impulso: 't10' o 'origen_virtual_IEC60060'.
+    info_ancla: dict con métricas del ancla (requerido si referencia_impulso == 'origen_virtual_IEC60060').
     """
     if fecha is None:
         fecha = datetime.date.today().isoformat()
@@ -271,12 +274,22 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None):
     }
     sensores = sensores or {}
 
+    mapa_legado = {
+        "t10": "t10_CH1_por_segmento",
+        "origen_virtual_IEC60060": "origen_virtual_IEC60060_por_segmento",
+    }
+    ref_legado = mapa_legado.get(referencia_impulso, str(referencia_impulso))
+
     bloque = {
         "fecha": str(fecha),
         "fuente_calibracion": fuente,
         "criterio": "primer_cruce_umbral",
-        "referencia": "t10_CH1_por_segmento",
+        "referencia": ref_legado,
+        "referencia_impulso": referencia_impulso,
     }
+
+    if info_ancla is not None:
+        bloque["ancla"] = dict(info_ancla)
 
     for ch in ["ch2", "ch3", "ch4"]:
         if ch in resultados and resultados[ch] and resultados[ch].get("t_lag_us") is not None:

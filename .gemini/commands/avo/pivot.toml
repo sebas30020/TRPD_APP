@@ -1,0 +1,30 @@
+description = "Fuerza un cambio de dirección cuando un approach_tag se ha estancado — varios intentos seguidos sin mover la métrica."
+prompt = """
+Antes de otro /avo:attempt, evalúa estancamiento con datos reales del ledger, no con
+intuición:
+
+!{.avo/bin/avo log 15}
+
+Deadends completos:
+@{.avo/deadends.md}
+
+Señales de estancamiento:
+- 3 o más intentos seguidos con el mismo `approach_tag` y ningún `commit`.
+- `metric_value` sin movimiento apreciable entre intentos, o oscilando sin tendencia.
+- Un `reject` reciente cuya causa es esencialmente la misma que la de un `reject`
+  anterior con otro `approach_tag`.
+
+Si confirmas estancamiento:
+1. Cita los ids de los intentos que lo muestran.
+2. Si la causa raíz aún no está generalizada en `.avo/deadends.md` (más allá del
+   intento individual), añádela ahora como invariante aprendida.
+3. Elige un vector de exploración distinto — no una variación menor del mismo
+   `approach_tag`. Revisa si `.avo/knowledge.md` necesita actualizarse a la luz de
+   esto.
+4. Documenta el pivote en `.avo/state.md`: qué enfoque se abandona, por qué, y cuál es
+   el nuevo. La próxima sesión debe poder leer esto sin releer todo el ledger.
+5. Continúa con /avo:attempt sobre el nuevo enfoque.
+
+No pivotes tras un solo `reject` — eso es el ciclo normal de /avo:attempt, no
+estancamiento.
+"""

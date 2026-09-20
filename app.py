@@ -10,7 +10,6 @@ maximo (|pico| = 1). Selector de segmento. Render con WebGL (Scattergl).
 
 Ejecutar:  python3 app.py   ->  abrir http://127.0.0.1:8050
 """
-import datetime
 import functools
 import os
 import re
@@ -24,7 +23,7 @@ from plotly.subplots import make_subplots
 from scipy.signal import find_peaks, butter, sosfiltfilt, welch
 from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, ctx
 
-from generate_metadata import plantilla_metadata, inferir_parametros, inferir_diametros, bloque_calibracion_retardo
+from generate_metadata import plantilla_metadata, inferir_parametros, inferir_diametros
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 # Carpeta de datos: vive fuera del repo, en la carpeta hermana "mediciones/Mediciones"
@@ -229,9 +228,9 @@ def config_sensores_defecto(carpeta):
     """Genera la configuración de trigger (umbral, dist, tmin) para los canales
     trigger (ch2, ch3, ch4), leyendo de metadata.yaml si existen o calculando valores iniciales."""
     defaults = {
-        "ch2": {"umbral": None, "dist": 1.0, "tmin": 0.0},
-        "ch3": {"umbral": None, "dist": 0.5, "tmin": 0.0},
-        "ch4": {"umbral": None, "dist": 0.5, "tmin": 0.0},
+        "ch2": {"umbral": None, "dist": 0.035, "tmin": 0.15},
+        "ch3": {"umbral": None, "dist": 0.035, "tmin": 0.15},
+        "ch4": {"umbral": None, "dist": 0.035, "tmin": 0.15},
     }
     if not carpeta:
         return defaults
@@ -403,18 +402,6 @@ def umbrales_desde_relayout(relayout, canales):
             except (TypeError, ValueError, IndexError):
                 pass
     return cambios
-
-
-def umbral_desde_relayout(relayout, fallback):
-    """Extrae la posicion 'y' de la linea movible desde relayoutData."""
-    if relayout:
-        for k, val in relayout.items():
-            if k.startswith("shapes[") and k.endswith(".y0"):
-                try:
-                    return float(val)
-                except (TypeError, ValueError):
-                    pass
-    return fallback
 
 
 def contar_peaks(carpeta, canal, umbral, dist_us, tmin):
@@ -715,41 +702,6 @@ def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ):
     )
     return fig
 
-
-def _vpp_energia(cap):
-    """Vpp (mV) y Energía (mV²·µs) por señal capturada."""
-    W = cap["W"]
-    if not W.shape[0]:
-        return np.array([]), np.array([])
-    return np.ptp(W, axis=1), np.sum(W ** 2, axis=1) * cap["dt_us"]
-
-
-def figura_vpp_energia(cap, canal, highlight=None, uirev=None):
-    """Scatter Vpp vs Energía (una marca por señal capturada, curva 0 = 1:1 con
-    las ventanas). Los puntos de `highlight` se marcan en amarillo."""
-    vpp, energia = _vpp_energia(cap)
-    n = vpp.size
-    fig = go.Figure()
-    fig.add_trace(go.Scattergl(
-        x=vpp, y=energia, mode="markers",
-        marker=dict(color="#AB63FA", size=7, opacity=0.7),
-        hovertemplate="Vpp=%{x:.2f} mV<br>E=%{y:.3g} mV²·µs<extra></extra>",
-        showlegend=False,
-    ))
-    h = [i for i in (highlight or []) if 0 <= i < n]
-    if h:
-        fig.add_trace(go.Scattergl(
-            x=vpp[h], y=energia[h], mode="markers",
-            marker=dict(color="#FFD400", size=11, line=dict(color="black", width=1)),
-            hoverinfo="skip", showlegend=False,
-        ))
-    fig.update_layout(
-        title=f"Vpp vs Energía {canal.upper()}",
-        xaxis_title="Vpp [mV]", yaxis_title="Energía [mV²·µs]",
-        height=415, margin=dict(t=50, r=20), dragmode="select",
-        plot_bgcolor="white", paper_bgcolor="white", uirevision=uirev,
-    )
-    return fig
 
 
 def _dir_medicion(carpeta):
@@ -1072,121 +1024,6 @@ def n_fallback_t10(carpeta):
     return _T10_FALLBACK_COUNT.get(carpeta, 0)
 
 
-def _t_arribo(t, v, umbral, distancia, tmin):
-    """Instante t_ant (µs) por primer cruce del umbral en el frente de subida de |v|.
-
-    Aplica máscara t >= tmin. Busca peaks en |v| con distancia mínima para que
-    pequeños precursores EMI a menos de dist_us queden absorbidos en el peak mayor.
-    Luego retrocede desde el primer peak hasta la última muestra por debajo del
-    umbral e interpola linealmente el cruce sub-muestra. Devuelve None si no hay
-    cruce observable en la ventana.
-    """
-    if tmin is not None:
-        mask = t >= tmin
-        t, v = t[mask], v[mask]
-    if v.size < 2:
-        return None
-    a = np.abs(v)
-    idx, _ = find_peaks(a, height=umbral, distance=distancia)
-    if idx.size == 0:
-        return None
-    i_p = idx[0]
-    # Retroceder desde i_p hasta la última muestra j < i_p con a[j] < umbral
-    j_candidates = np.nonzero(a[:i_p] < umbral)[0]
-    if j_candidates.size == 0:
-        return None  # Señal ya superaba el umbral desde el inicio de la ventana
-    j = j_candidates[-1]
-    da = a[j + 1] - a[j]
-    if da <= 0:
-        return float(t[j])
-    return float(t[j] + (umbral - a[j]) * (t[j + 1] - t[j]) / da)
-
-
-_CALIB_CACHE = {}
-MAD_K = 5.0   # atípico si |t_lag - mediana| > MAD_K · 1.4826 · MAD
-
-
-def calibrar_retardo(carpeta, canal, umbral, dist_us, tmin):
-    """Calcula el retardo t_lag = t_ant - t10 para cada segmento de un canal.
-
-    Filtra atípicos con el criterio MAD (k=5.0) y promedia los válidos.
-    Cacheado por sesión. Retorna un diccionario serializable a JSON.
-    """
-    key = (carpeta, canal, round(float(umbral), 6) if umbral is not None else None,
-           dist_us, tmin)
-    if key in _CALIB_CACHE:
-        return _CALIB_CACHE[key]
-
-    nsegs = n_segmentos(carpeta) if canal in canales_presentes(carpeta) else 0
-    if nsegs == 0 or canal not in canales_presentes(carpeta):
-        res = {
-            "canal": canal,
-            "segs": [],
-            "t_ant": [],
-            "t_lag": [],
-            "valido": [],
-            "atipico": [],
-            "t_lag_us": None,
-            "sigma_us": None,
-            "n_valid": 0,
-            "n_total": 0,
-            "criterio": "primer_cruce_umbral",
-            "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin},
-        }
-        _CALIB_CACHE[key] = res
-        return res
-
-    distancia = _muestras(carpeta, canal, dist_us)
-    t10 = t10_por_segmento(carpeta)
-
-    t_ant_list = []
-    t_lag_arr = np.full(nsegs, np.nan, dtype=np.float64)
-
-    for s in range(1, nsegs + 1):
-        t, v = cargar_segmento(carpeta, canal, s)
-        ta = _t_arribo(t, v, umbral, distancia, tmin)
-        t_ant_list.append(ta)
-        if ta is not None:
-            t_lag_arr[s - 1] = ta - t10[s - 1]
-
-    valido = ~np.isnan(t_lag_arr)
-    atipico = np.zeros(nsegs, dtype=bool)
-    n_val_inicial = int(np.sum(valido))
-
-    if n_val_inicial >= 3:
-        med = float(np.median(t_lag_arr[valido]))
-        mad = float(np.median(np.abs(t_lag_arr[valido] - med)))
-        if mad > 0:
-            umbral_mad = MAD_K * 1.4826 * mad
-            atipico = valido & (np.abs(t_lag_arr - med) > umbral_mad)
-            valido = valido & ~atipico
-
-    n_valid = int(np.sum(valido))
-    if n_valid > 0:
-        t_lag_us = float(np.mean(t_lag_arr[valido]))
-        sigma_us = float(np.std(t_lag_arr[valido], ddof=1)) if n_valid >= 2 else None
-    else:
-        t_lag_us = None
-        sigma_us = None
-
-    res = {
-        "canal": canal,
-        "segs": list(range(1, nsegs + 1)),
-        "t_ant": [float(x) if x is not None else None for x in t_ant_list],
-        "t_lag": [float(x) if not np.isnan(x) else None for x in t_lag_arr],
-        "valido": [bool(x) for x in valido],
-        "atipico": [bool(x) for x in atipico],
-        "t_lag_us": t_lag_us,
-        "sigma_us": sigma_us,
-        "n_valid": n_valid,
-        "n_total": nsegs,
-        "criterio": "primer_cruce_umbral",
-        "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin},
-    }
-    _CALIB_CACHE[key] = res
-    return res
-
-
 def t_abs_captura(cap, t_lag_us=0.0):
     """t_abs (µs) = t_peak − t10 del segmento − t_lag del canal. Traslación O(N)."""
     if not cap or "t_peak" not in cap or not cap["t_peak"].size:
@@ -1201,10 +1038,12 @@ def calibracion_desde_metadata(carpeta):
     """Dict para calibracion_store a partir de metadata.yaml (ns -> µs).
 
     Sin bloque 'calibracion_retardo': calibrado=False y t_lag_us=0.0 por canal.
+    Normaliza retardos con referencia O1 al ancla t10 mediante delta_t10_menos_O1_ns.
     """
     if not carpeta:
         return {
             "carpeta": "", "calibrado": False, "fuente": None, "fecha": None,
+            "referencia_impulso": None, "delta_t10_O1_us": None, "aviso": None,
             "canales": {ch: {"t_lag_us": 0.0, "sigma_us": None, "n_valid": None, "n_total": None, "calibrado": False} for ch in TRIGGERS}
         }
     meta = obtener_metadata(carpeta)
@@ -1213,23 +1052,53 @@ def calibracion_desde_metadata(carpeta):
     calibrado_global = False
     fuente = None
     fecha = None
+    ref = None
+    delta_us = None
+    aviso = None
 
     if isinstance(bloque, dict):
         fuente = bloque.get("fuente_calibracion")
         fecha = bloque.get("fecha")
+        ref = bloque.get("referencia_impulso")
+        if ref is None:  # compatibilidad con bloques ya escritos
+            leg = str(bloque.get("referencia") or "")
+            ref = "origen_virtual_IEC60060" if "origen_virtual" in leg else "t10"
+
+        ancla_bloque = bloque.get("ancla") or {}
+        delta_ns = ancla_bloque.get("t10_menos_O1_ns")
+        if delta_ns is not None:
+            delta_us = float(delta_ns) * 1e-3
+
+        es_o1 = (ref == "origen_virtual_IEC60060")
+        if es_o1 and delta_us is None:
+            aviso = "Bloque de referencia O1 sin ancla (t10_menos_O1_ns no disponible). No se puede normalizar al ancla t10."
+
         for ch in TRIGGERS:
             b_ch = bloque.get(ch)
             if isinstance(b_ch, dict) and b_ch.get("t_lag_ns") is not None:
                 t_lag_ns = float(b_ch["t_lag_ns"])
                 sigma_ns = float(b_ch["sigma_ns"]) if b_ch.get("sigma_ns") is not None else None
+
+                if es_o1:
+                    if delta_us is not None:
+                        t_lag_us = (t_lag_ns * 1e-3) - delta_us
+                        canal_calibrado = True
+                    else:
+                        t_lag_us = 0.0
+                        canal_calibrado = False
+                else:
+                    t_lag_us = t_lag_ns * 1e-3
+                    canal_calibrado = True
+
                 canales_res[ch] = {
-                    "t_lag_us": t_lag_ns * 1e-3,
+                    "t_lag_us": t_lag_us,
                     "sigma_us": sigma_ns * 1e-3 if sigma_ns is not None else None,
                     "n_valid": b_ch.get("n_valid"),
                     "n_total": b_ch.get("n_total"),
-                    "calibrado": True,
+                    "calibrado": canal_calibrado,
                 }
-                calibrado_global = True
+                if canal_calibrado:
+                    calibrado_global = True
             else:
                 canales_res[ch] = {
                     "t_lag_us": 0.0,
@@ -1253,6 +1122,9 @@ def calibracion_desde_metadata(carpeta):
         "calibrado": calibrado_global,
         "fuente": fuente,
         "fecha": fecha,
+        "referencia_impulso": ref,
+        "delta_t10_O1_us": delta_us,
+        "aviso": aviso,
         "canales": canales_res,
     }
 
@@ -1263,122 +1135,6 @@ def lag_canal(cal, carpeta, canal):
         return 0.0
     ch_data = cal.get("canales", {}).get(canal, {})
     return float(ch_data.get("t_lag_us", 0.0) or 0.0)
-
-
-def guardar_calibracion_metadata(carpeta, bloque):
-    """Inserta/reemplaza 'calibracion_retardo' preservando el resto de metadata.yaml."""
-    meta = obtener_metadata(carpeta)
-    meta = {k: v for k, v in meta.items() if not k.startswith("_")}
-    meta["calibracion_retardo"] = bloque
-    return guardar_metadata_archivo(carpeta, yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
-
-
-def mediciones_con_calibracion():
-    """Mediciones cuyo metadata.yaml en disco contiene 'calibracion_retardo'."""
-    res = []
-    for m in listar_mediciones():
-        d = _dir_medicion(m)
-        meta_path = os.path.join(d, "metadata.yaml")
-        if os.path.isfile(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f)
-                    if isinstance(data, dict) and "calibracion_retardo" in data:
-                        res.append(m)
-            except Exception:
-                pass
-    return res
-
-
-def figura_calibracion(resultado):
-    """make_subplots(1, 2): izq. t_lag^(k) [ns] vs segmento por canal; der. histograma.
-
-    Válidos con marcador del canal, atípicos/inválidos con 'x' gris.
-    Líneas horizontales de media ± sigma.
-    """
-    if not resultado:
-        fig = go.Figure()
-        fig.update_layout(
-            height=300, margin=dict(t=40, b=20, l=40, r=20),
-            plot_bgcolor="white", paper_bgcolor="white",
-            annotations=[dict(
-                text="Pulsa '▶ Calcular desde set actual' para ver la dispersión de t_lag",
-                xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
-                font=dict(size=12, color="#888"),
-            )],
-            xaxis=dict(visible=False), yaxis=dict(visible=False),
-        )
-        return fig
-
-    fig = make_subplots(rows=1, cols=2, subplot_titles=["t_lag por segmento", "Distribución de t_lag válidos"],
-                        column_widths=[0.6, 0.4])
-
-    colores = {"ch2": "#2563eb", "ch3": "#059669", "ch4": "#d97706"}
-
-    for ch in TRIGGERS:
-        r = resultado.get(ch)
-        if not r or r.get("n_total", 0) == 0:
-            continue
-        segs = np.array(r["segs"])
-        t_lag = np.array([x if x is not None else np.nan for x in r["t_lag"]]) * 1e3  # ns
-        val = np.array(r["valido"], dtype=bool)
-        color = colores.get(ch, "#64748b")
-        nombre_ch = ch.upper()
-
-        # Válidos
-        if np.any(val):
-            fig.add_trace(
-                go.Scatter(
-                    x=segs[val], y=t_lag[val], mode="markers",
-                    name=f"{nombre_ch} ({r.get('n_valid')}/{r.get('n_total')})",
-                    marker=dict(color=color, size=6),
-                    hovertemplate=f"Seg %{{x}}<br>t_lag=%{{y:.2f}} ns<extra>{nombre_ch}</extra>",
-                ),
-                row=1, col=1,
-            )
-            # Línea horizontal media
-            t_mean = r.get("t_lag_us")
-            if t_mean is not None:
-                m_ns = t_mean * 1e3
-                fig.add_hline(y=m_ns, line=dict(color=color, width=1, dash="dash"),
-                              annotation_text=f"{nombre_ch}: {m_ns:.1f} ns",
-                              annotation_position="bottom right", row=1, col=1)
-
-            # Histograma en col 2
-            fig.add_trace(
-                go.Histogram(
-                    x=t_lag[val], name=f"Hist {nombre_ch}",
-                    marker=dict(color=color), opacity=0.6,
-                    showlegend=False,
-                ),
-                row=1, col=2,
-            )
-
-        # Inválidos / atípicos
-        inval = ~val & ~np.isnan(t_lag)
-        if np.any(inval):
-            fig.add_trace(
-                go.Scatter(
-                    x=segs[inval], y=t_lag[inval], mode="markers",
-                    name=f"{nombre_ch} atípico",
-                    marker=dict(color="#94a3b8", symbol="x", size=7),
-                    hovertemplate=f"Seg %{{x}}<br>t_lag=%{{y:.2f}} ns (atípico)<extra>{nombre_ch}</extra>",
-                    showlegend=False,
-                ),
-                row=1, col=1,
-            )
-
-    fig.update_layout(
-        height=300, margin=dict(t=40, b=30, l=40, r=20),
-        plot_bgcolor="white", paper_bgcolor="white",
-        barmode="overlay",
-        legend=dict(orientation="h", y=1.12, x=0),
-    )
-    fig.update_xaxes(title_text="Segmento", row=1, col=1)
-    fig.update_yaxes(title_text="t_lag [ns]", row=1, col=1)
-    fig.update_xaxes(title_text="t_lag [ns]", row=1, col=2)
-    fig.update_yaxes(title_text="Conteo", row=1, col=2)
-    return fig
 
 
 # Líneas verticales de tiempos: (clave, etiqueta, color).
@@ -1473,14 +1229,22 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
         marker=dict(color="#EF553B", size=6, opacity=0.6),
         hovertemplate="t_abs=%{x:.4f} µs (%{customdata[4]:.2f} ns)<br>t_osc=%{customdata[2]:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<br>Seg %{customdata[3]:.0f}<extra>" + canal.upper() + "</extra>",
     ))
-    if t_ref is not None and not es_vpp:
-        paso_ref = max(1, t_ref.size // IMP_PUNTOS_PLOT)
-        x_ref = t_ref[::paso_ref] - (t10_ref or 0.0)
-        fig.add_trace(go.Scattergl(
-            x=x_ref, y=v_ref[::paso_ref], mode="lines", name="CH1 promedio (ref.)",
-            line=dict(color="#999", width=1), opacity=0.6,
-            hovertemplate="t_abs=%{x:.4f} µs<br>%{y:.2f} mV<extra>CH1</extra>",
-        ))
+    if t_ref is not None and v_ref is not None and v_ref.size:
+        paso = max(1, t_ref.size // IMP_PUNTOS_PLOT)
+        x_ref = t_ref[::paso] - (t10_ref or 0.0)
+        v_r = v_ref[::paso]
+        frac = v_r / (float(np.max(np.abs(v_r))) or 1.0)  # adimensional, -1..1
+        if es_vpp:
+            esc = float(np.percentile(y_val, 95)) if y_val.size >= 20 else (float(np.max(y_val)) if y_val.size else 1.0)
+            y_r, cd_ref = frac * esc, frac
+            nombre = "CH1 promedio (forma normalizada)"
+            htmpl = "t_abs=%{x:.4f} µs<br>%{customdata:.1%} de la cresta CH1<extra>CH1</extra>"
+        else:
+            y_r, cd_ref = v_r, None
+            nombre, htmpl = "CH1 promedio (ref.)", "t_abs=%{x:.4f} µs<br>%{y:.2f} mV<extra>CH1</extra>"
+        fig.add_trace(go.Scattergl(x=x_ref, y=y_r, customdata=cd_ref, mode="lines",
+                                   name=nombre, line=dict(color="#999", width=1),
+                                   opacity=0.6, hovertemplate=htmpl))
         fig.add_vline(x=0, line=dict(color="#2ca02c", width=1, dash="dot"),
                       annotation_text="t10", annotation_position="top")
     h = [i for i in (highlight or []) if 0 <= i < n]
@@ -1496,8 +1260,8 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
     fig.update_layout(
         title=titulo_patron,
         xaxis_title="Tiempo relativo al impulso t_abs [µs] (t10 = 0)", yaxis_title=y_label,
-        height=415, margin=dict(t=50, r=20), showlegend=True, dragmode="select",
-        legend=dict(orientation="h", y=1.02, yanchor="bottom"),
+        height=415, margin=dict(t=75, r=20), showlegend=True, dragmode="select",
+        legend=dict(orientation="h", y=1.04, yanchor="bottom", x=0, xanchor="left"),
         plot_bgcolor="white", paper_bgcolor="white", uirevision=uirev,
     )
     return fig
@@ -1519,7 +1283,6 @@ app.layout = html.Div(
         dcc.Store(id="seleccion", data=[]),
         dcc.Store(id="densidad_store", data=[]),
         dcc.Store(id="calibracion_store"),
-        dcc.Store(id="calibracion_resultado"),
         html.Div(
             className="header",
             children=[
@@ -1576,11 +1339,11 @@ app.layout = html.Div(
                     children=[
                         html.Span("CH2 (HFCT):", style={"fontWeight": "bold", "color": "#1d4ed8"}),
                         html.Span("u (mV):"),
-                        dcc.Input(id="umbral_ch2", type="number", step="any", style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="umbral_ch2", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
-                        dcc.Input(id="dist_ch2", type="number", step="any", min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="dist_ch2", type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("t_mín (µs):"),
-                        dcc.Input(id="tmin_ch2", type="number", step="any", style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="tmin_ch2", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
                 # CH3: Vivaldi
@@ -1594,11 +1357,11 @@ app.layout = html.Div(
                     children=[
                         html.Span("CH3 (Vivaldi):", style={"fontWeight": "bold", "color": "#047857"}),
                         html.Span("u (mV):"),
-                        dcc.Input(id="umbral_ch3", type="number", step="any", style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="umbral_ch3", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
-                        dcc.Input(id="dist_ch3", type="number", step="any", min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="dist_ch3", type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("t_mín (µs):"),
-                        dcc.Input(id="tmin_ch3", type="number", step="any", style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="tmin_ch3", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
                 # CH4: Bioinspirada
@@ -1612,11 +1375,11 @@ app.layout = html.Div(
                     children=[
                         html.Span("CH4 (Bioinspirada):", style={"fontWeight": "bold", "color": "#b45309"}),
                         html.Span("u (mV):"),
-                        dcc.Input(id="umbral_ch4", type="number", step="any", style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="umbral_ch4", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
-                        dcc.Input(id="dist_ch4", type="number", step="any", min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="dist_ch4", type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("t_mín (µs):"),
-                        dcc.Input(id="tmin_ch4", type="number", step="any", style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="tmin_ch4", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
             ],
@@ -1656,13 +1419,15 @@ app.layout = html.Div(
                     "backgroundColor": "white", "border": "1px solid #fde68a",
                     "borderLeft": "4px solid #d97706", "borderRadius": "3px", "fontWeight": "600",
                 }, children="CH4: 0.00 ns"),
-                html.Button("⚙️ Calibrar Retardos", id="btn_toggle_calibracion", n_clicks=0,
+                html.Button("⏱ Detalle del retardo", id="btn_toggle_calibracion", n_clicks=0,
                             style={"marginLeft": "auto", "fontSize": "11px", "fontWeight": "600",
                                    "padding": "4px 10px", "backgroundColor": "#f1f5f9",
                                    "border": "1px solid #cbd5e1", "borderRadius": "4px", "cursor": "pointer"}),
+                html.A("⚡ Abrir calibrar_app (8051)", href="http://127.0.0.1:8051", target="_blank",
+                       style={"fontSize": "11px", "color": "#2563eb", "textDecoration": "none", "fontWeight": "600", "marginLeft": "4px"}),
             ],
         ),
-        # Panel desplegable de Calibración
+        # Panel desplegable de Calibración (solo lectura)
         html.Div(
             id="panel_calibracion",
             hidden=True,
@@ -1673,90 +1438,17 @@ app.layout = html.Div(
             },
             children=[
                 html.Div(
-                    style={"display": "flex", "alignItems": "center", "justifyContent": "space-between", "marginBottom": "10px"},
+                    style={"display": "flex", "alignItems": "center", "justifyContent": "space-between", "marginBottom": "6px"},
                     children=[
-                        html.Span("Herramienta de Calibración de Retardo Instrumental (t_lag = t_ant − t10)",
+                        html.Span("Retardo instrumental almacenado en metadata.yaml (solo lectura)",
                                   style={"fontSize": "13px", "fontWeight": "bold", "color": "#0f172a"}),
-                        html.Div(id="cal_msg_feedback", style={"fontSize": "12px", "fontWeight": "bold"}),
                     ],
                 ),
-                # Tarjetas de parámetros por canal
-                html.Div(
-                    style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "marginBottom": "10px"},
-                    children=[
-                        # CH2
-                        html.Div(
-                            style={"flex": "1", "minWidth": "220px", "padding": "8px", "border": "1px solid #bfdbfe",
-                                   "borderLeft": "4px solid #2563eb", "borderRadius": "4px", "backgroundColor": "#f8fafc"},
-                            children=[
-                                html.Div("CH2 (HFCT) - Trigger calibración", style={"fontWeight": "bold", "color": "#1d4ed8", "fontSize": "11px", "marginBottom": "4px"}),
-                                html.Div(style={"display": "flex", "gap": "6px", "fontSize": "11px", "alignItems": "center"}, children=[
-                                    html.Span("u (mV):"), dcc.Input(id="ucal_ch2", type="number", step="any", style={"width": "60px", "fontSize": "11px"}),
-                                    html.Span("Δt (µs):"), dcc.Input(id="dtcal_ch2", type="number", step="any", min=0, style={"width": "45px", "fontSize": "11px"}),
-                                    html.Span("t_mín:"), dcc.Input(id="tmincal_ch2", type="number", step="any", style={"width": "45px", "fontSize": "11px"}),
-                                ]),
-                            ],
-                        ),
-                        # CH3
-                        html.Div(
-                            style={"flex": "1", "minWidth": "220px", "padding": "8px", "border": "1px solid #a7f3d0",
-                                   "borderLeft": "4px solid #059669", "borderRadius": "4px", "backgroundColor": "#f8fafc"},
-                            children=[
-                                html.Div("CH3 (Vivaldi) - Trigger calibración", style={"fontWeight": "bold", "color": "#047857", "fontSize": "11px", "marginBottom": "4px"}),
-                                html.Div(style={"display": "flex", "gap": "6px", "fontSize": "11px", "alignItems": "center"}, children=[
-                                    html.Span("u (mV):"), dcc.Input(id="ucal_ch3", type="number", step="any", style={"width": "60px", "fontSize": "11px"}),
-                                    html.Span("Δt (µs):"), dcc.Input(id="dtcal_ch3", type="number", step="any", min=0, style={"width": "45px", "fontSize": "11px"}),
-                                    html.Span("t_mín:"), dcc.Input(id="tmincal_ch3", type="number", step="any", style={"width": "45px", "fontSize": "11px"}),
-                                ]),
-                            ],
-                        ),
-                        # CH4
-                        html.Div(
-                            style={"flex": "1", "minWidth": "220px", "padding": "8px", "border": "1px solid #fde68a",
-                                   "borderLeft": "4px solid #d97706", "borderRadius": "4px", "backgroundColor": "#f8fafc"},
-                            children=[
-                                html.Div("CH4 (Bioinspirada) - Trigger calibración", style={"fontWeight": "bold", "color": "#b45309", "fontSize": "11px", "marginBottom": "4px"}),
-                                html.Div(style={"display": "flex", "gap": "6px", "fontSize": "11px", "alignItems": "center"}, children=[
-                                    html.Span("u (mV):"), dcc.Input(id="ucal_ch4", type="number", step="any", style={"width": "60px", "fontSize": "11px"}),
-                                    html.Span("Δt (µs):"), dcc.Input(id="dtcal_ch4", type="number", step="any", min=0, style={"width": "45px", "fontSize": "11px"}),
-                                    html.Span("t_mín:"), dcc.Input(id="tmincal_ch4", type="number", step="any", style={"width": "45px", "fontSize": "11px"}),
-                                ]),
-                            ],
-                        ),
-                    ],
-                ),
-                # Botones de acción y retardo manual
-                html.Div(
-                    style={"display": "flex", "gap": "12px", "alignItems": "center", "flexWrap": "wrap", "marginBottom": "10px"},
-                    children=[
-                        html.Button("▶ Calcular desde set actual", id="btn_calcular_calibracion", n_clicks=0,
-                                    style={"backgroundColor": "#2563eb", "color": "white", "fontWeight": "bold", "fontSize": "11px", "padding": "5px 12px", "borderRadius": "4px", "cursor": "pointer"}),
-                        html.Button("✔ Aplicar (sesión)", id="btn_aplicar_calibracion", n_clicks=0,
-                                    style={"backgroundColor": "#059669", "color": "white", "fontWeight": "bold", "fontSize": "11px", "padding": "5px 12px", "borderRadius": "4px", "cursor": "pointer"}),
-                        html.Button("💾 Guardar en metadata.yaml", id="btn_guardar_calibracion", n_clicks=0,
-                                    style={"backgroundColor": "#0284c7", "color": "white", "fontWeight": "bold", "fontSize": "11px", "padding": "5px 12px", "borderRadius": "4px", "cursor": "pointer"}),
-                        html.Span("│", style={"color": "#cbd5e1"}),
-                        html.Span("Retardo manual (ns):", style={"fontSize": "11px", "fontWeight": "bold"}),
-                        html.Span("CH2:"), dcc.Input(id="tlag_manual_ch2", type="number", step="any", style={"width": "60px", "fontSize": "11px"}),
-                        html.Span("CH3:"), dcc.Input(id="tlag_manual_ch3", type="number", step="any", style={"width": "60px", "fontSize": "11px"}),
-                        html.Span("CH4:"), dcc.Input(id="tlag_manual_ch4", type="number", step="any", style={"width": "60px", "fontSize": "11px"}),
-                        html.Span("│", style={"color": "#cbd5e1"}),
-                        html.Span("Importar de:", style={"fontSize": "11px", "fontWeight": "bold"}),
-                        dcc.Dropdown(id="cal_import_carpeta", options=[], placeholder="Seleccionar medición...", style={"width": "200px", "fontSize": "11px"}),
-                        html.Button("📥 Importar", id="btn_importar_calibracion", n_clicks=0,
-                                    style={"fontSize": "11px", "fontWeight": "600", "padding": "4px 10px", "cursor": "pointer"}),
-                    ],
-                ),
-                # Gráfico y tabla resumen
-                html.Div(
-                    style={"display": "flex", "gap": "12px", "flexWrap": "wrap"},
-                    children=[
-                        html.Div(style={"flex": "2", "minWidth": "350px"}, children=[
-                            dcc.Loading(dcc.Graph(id="grafico_calibracion", config={"displaylogo": False})),
-                        ]),
-                        html.Div(id="cal_tabla_resumen", style={"flex": "1", "minWidth": "250px", "fontSize": "11px"}),
-                    ],
-                ),
+                html.Div(id="cal_detalle"),
+                html.Button("🔄 Recargar desde disco", id="btn_recargar_calibracion", n_clicks=0,
+                            style={"marginTop": "10px", "fontSize": "11px", "fontWeight": "600",
+                                   "padding": "4px 10px", "backgroundColor": "#f1f5f9",
+                                   "border": "1px solid #cbd5e1", "borderRadius": "4px", "cursor": "pointer"}),
             ],
         ),
         html.Div(
@@ -1913,8 +1605,6 @@ app.layout = html.Div(
                                             ),
                                             dcc.Graph(id="grafico_scatter"),
                                         ], **_TAB),
-                                dcc.Tab(label="Vpp vs Energía", value="vpp",
-                                        children=[dcc.Graph(id="grafico_vpp_energia")], **_TAB),
                             ]),
                         ]),
                     ],
@@ -2125,236 +1815,105 @@ def toggle_panel_calibracion(n):
 
 
 @app.callback(
-    Output("ucal_ch2", "value"),
-    Output("dtcal_ch2", "value"),
-    Output("tmincal_ch2", "value"),
-    Output("ucal_ch3", "value"),
-    Output("dtcal_ch3", "value"),
-    Output("tmincal_ch3", "value"),
-    Output("ucal_ch4", "value"),
-    Output("dtcal_ch4", "value"),
-    Output("tmincal_ch4", "value"),
-    Output("cal_import_carpeta", "options"),
+    Output("calibracion_store", "data"),
     Input("carpeta", "value"),
+    Input("btn_recargar_calibracion", "n_clicks"),
 )
-def init_params_calibracion(carpeta):
-    cfg = config_sensores_defecto(carpeta)
-    opts = [{"label": m, "value": m} for m in mediciones_con_calibracion() if m != carpeta]
-    return (
-        cfg["ch2"]["umbral"], cfg["ch2"]["dist"] or 0.5, cfg["ch2"]["tmin"] if cfg["ch2"]["tmin"] is not None else 0.0,
-        cfg["ch3"]["umbral"], cfg["ch3"]["dist"] or 0.5, cfg["ch3"]["tmin"] if cfg["ch3"]["tmin"] is not None else 0.0,
-        cfg["ch4"]["umbral"], cfg["ch4"]["dist"] or 0.5, cfg["ch4"]["tmin"] if cfg["ch4"]["tmin"] is not None else 0.0,
-        opts,
-    )
+def cargar_calibracion_store(carpeta, _n):
+    """Único poblador de `calibracion_store`: lee `calibracion_retardo` de
+    metadata.yaml (ns -> µs, normalizado al ancla t10)."""
+    if not carpeta:
+        return no_update
+    return calibracion_desde_metadata(carpeta)
 
 
 @app.callback(
-    Output("calibracion_resultado", "data"),
-    Output("tlag_manual_ch2", "value"),
-    Output("tlag_manual_ch3", "value"),
-    Output("tlag_manual_ch4", "value"),
-    Output("cal_msg_feedback", "children"),
-    Input("btn_calcular_calibracion", "n_clicks"),
-    State("carpeta", "value"),
-    State("ucal_ch2", "value"), State("dtcal_ch2", "value"), State("tmincal_ch2", "value"),
-    State("ucal_ch3", "value"), State("dtcal_ch3", "value"), State("tmincal_ch3", "value"),
-    State("ucal_ch4", "value"), State("dtcal_ch4", "value"), State("tmincal_ch4", "value"),
-    prevent_initial_call=True,
+    Output("cal_detalle", "children"),
+    Input("calibracion_store", "data"),
 )
-def ejecutar_calibracion(n, carpeta, u2, dt2, tm2, u3, dt3, tm3, u4, dt4, tm4):
-    if not n or not carpeta:
-        return no_update, no_update, no_update, no_update, no_update
-    params = {
-        "ch2": (u2, dt2, tm2),
-        "ch3": (u3, dt3, tm3),
-        "ch4": (u4, dt4, tm4),
+def mostrar_detalle_calibracion(cal):
+    """Renderiza el resumen de solo lectura de la calibración almacenada en metadata.yaml."""
+    if not cal or not cal.get("calibrado"):
+        carpeta = (cal or {}).get("carpeta", "")
+        aviso = (cal or {}).get("aviso")
+        msg_extra = f" ({aviso})" if aviso else ""
+        return html.Div(
+            f"Sin bloque calibracion_retardo en metadata.yaml para {carpeta}{msg_extra} — retardo 0 ns. "
+            f"Calcular en calibrar_app (puerto 8051).",
+            style={"color": "#64748b", "fontSize": "12px", "padding": "8px 0"}
+        )
+
+    fuente = cal.get("fuente") or "N/D"
+    fecha = cal.get("fecha") or "N/D"
+    ref = cal.get("referencia_impulso") or "t10"
+    delta_us = cal.get("delta_t10_O1_us")
+
+    meta_bloque = obtener_metadata(cal.get("carpeta", "")).get("calibracion_retardo", {})
+    criterio = meta_bloque.get("criterio", "primer_cruce_umbral")
+
+    cabecera_partes = [
+        f"Fuente: {fuente}",
+        f"Fecha: {fecha}",
+        f"Criterio: {criterio}",
+        f"Referencia: {ref}",
+    ]
+    if delta_us is not None:
+        cabecera_partes.append(f"Ancla t10 − O1 = {delta_us * 1e3:.2f} ns (restado a retardos O1)")
+
+    sensores_nombres = {
+        "ch2": "HFCT",
+        "ch3": "Antena Vivaldi",
+        "ch4": "Antena Bioinspirada",
     }
-    presentes = canales_presentes(carpeta)
-    res = {}
-    m_ch2, m_ch3, m_ch4 = no_update, no_update, no_update
-    msg_partes = []
-
-    for ch in TRIGGERS:
-        if ch not in presentes:
-            continue
-        u, dt, tm = params[ch]
-        if u is None:
-            continue
-        try:
-            r = calibrar_retardo(carpeta, ch, float(u), float(dt) if dt is not None else 0.5, float(tm) if tm is not None else 0.0)
-            res[ch] = r
-            val_ns = round(r["t_lag_us"] * 1e3, 3) if r.get("t_lag_us") is not None else None
-            if ch == "ch2" and val_ns is not None:
-                m_ch2 = val_ns
-            elif ch == "ch3" and val_ns is not None:
-                m_ch3 = val_ns
-            elif ch == "ch4" and val_ns is not None:
-                m_ch4 = val_ns
-            msg_partes.append(f"{ch.upper()}: {r['n_valid']}/{r['n_total']} válidos")
-        except Exception as e:
-            msg_partes.append(f"{ch.upper()}: Error ({e})")
-
-    feedback = html.Span("Calibrado: " + " · ".join(msg_partes) if msg_partes else "Sin canales seleccionados", style={"color": "#2563eb"})
-    return res, m_ch2, m_ch3, m_ch4, feedback
-
-
-@app.callback(
-    Output("grafico_calibracion", "figure"),
-    Output("cal_tabla_resumen", "children"),
-    Input("calibracion_resultado", "data"),
-)
-def mostrar_calibracion(resultado):
-    fig = figura_calibracion(resultado)
-    if not resultado:
-        return fig, html.Div()
 
     filas = []
+    chs = cal.get("canales", {})
     for ch in TRIGGERS:
-        r = resultado.get(ch)
-        if not r or r.get("n_total", 0) == 0:
-            continue
-        t_lag = r.get("t_lag_us")
-        sig = r.get("sigma_us")
-        t_str = f"{t_lag*1e3:.2f} ns" if t_lag is not None else "-"
-        sig_str = f"±{sig*1e3:.2f} ns" if sig is not None else "-"
-        nv, nt = r.get("n_valid", 0), r.get("n_total", 0)
-        pct = f"{(nv/nt*100):.1f} %" if nt > 0 else "-"
+        info = chs.get(ch, {})
+        b_ch = meta_bloque.get(ch, {}) if isinstance(meta_bloque, dict) else {}
+        t_lag_ns = f"{info.get('t_lag_us', 0.0) * 1e3:.2f}" if info.get("calibrado") else "0.00"
+        sigma_ns = f"{info.get('sigma_us', 0.0) * 1e3:.2f}" if (info.get("sigma_us") is not None) else "—"
+        nv = b_ch.get("n_valid", "—")
+        nt = b_ch.get("n_total", "—")
+        val_str = f"{nv}/{nt}" if nv != "—" else "—"
+        u_str = f"{b_ch.get('umbral_mv', '—')}"
+        dt_str = f"{b_ch.get('distancia_us', '—')}"
+        tm_str = f"{b_ch.get('tmin_us', '—')}"
+
         filas.append(html.Tr([
-            html.Td(ch.upper(), style={"fontWeight": "bold", "padding": "4px 8px"}),
-            html.Td(t_str, style={"padding": "4px 8px"}),
-            html.Td(sig_str, style={"padding": "4px 8px"}),
-            html.Td(f"{nv} / {nt}", style={"padding": "4px 8px"}),
-            html.Td(pct, style={"padding": "4px 8px"}),
+            html.Td(ch.upper(), style={"fontWeight": "600", "padding": "4px 8px"}),
+            html.Td(b_ch.get("sensor") or sensores_nombres.get(ch, ch.upper()), style={"padding": "4px 8px"}),
+            html.Td(t_lag_ns, style={"fontWeight": "700", "color": "#1d4ed8", "padding": "4px 8px"}),
+            html.Td(sigma_ns, style={"padding": "4px 8px"}),
+            html.Td(val_str, style={"padding": "4px 8px"}),
+            html.Td(u_str, style={"padding": "4px 8px"}),
+            html.Td(dt_str, style={"padding": "4px 8px"}),
+            html.Td(tm_str, style={"padding": "4px 8px"}),
         ]))
 
     tabla = html.Table(
-        style={"width": "100%", "borderCollapse": "collapse", "border": "1px solid #e2e8f0"},
+        style={"width": "100%", "fontSize": "11px", "borderCollapse": "collapse", "textAlign": "left", "marginTop": "8px"},
         children=[
             html.Thead(html.Tr([
-                html.Th("Canal", style={"textAlign": "left", "padding": "4px 8px", "backgroundColor": "#f8fafc"}),
-                html.Th("t̄_lag", style={"textAlign": "left", "padding": "4px 8px", "backgroundColor": "#f8fafc"}),
-                html.Th("σ", style={"textAlign": "left", "padding": "4px 8px", "backgroundColor": "#f8fafc"}),
-                html.Th("Válidos", style={"textAlign": "left", "padding": "4px 8px", "backgroundColor": "#f8fafc"}),
-                html.Th("%", style={"textAlign": "left", "padding": "4px 8px", "backgroundColor": "#f8fafc"}),
+                html.Th("Canal", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("Sensor", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("t̄_lag [ns]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("σ [ns]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("Válidos", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("u_cal [mV]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("Δt [µs]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("t_mín [µs]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
             ])),
             html.Tbody(filas),
         ],
     )
-    return fig, html.Div([
-        html.Div("Resumen estadístico:", style={"fontWeight": "bold", "marginBottom": "6px"}),
+
+    return html.Div([
+        html.Div(" · ".join(cabecera_partes), style={"fontSize": "11px", "color": "#475569", "fontWeight": "600", "marginBottom": "6px"}),
         tabla,
     ])
 
 
-@app.callback(
-    Output("calibracion_store", "data"),
-    Output("cal_msg_feedback", "children", allow_duplicate=True),
-    Input("carpeta", "value"),
-    Input("btn_aplicar_calibracion", "n_clicks"),
-    Input("btn_guardar_calibracion", "n_clicks"),
-    Input("btn_importar_calibracion", "n_clicks"),
-    State("tlag_manual_ch2", "value"),
-    State("tlag_manual_ch3", "value"),
-    State("tlag_manual_ch4", "value"),
-    State("calibracion_resultado", "data"),
-    State("cal_import_carpeta", "value"),
-    prevent_initial_call="initial_duplicate",
-)
-def gestionar_calibracion_store(carpeta, n_apl, n_guard, n_imp, m2, m3, m4, res_calc, carpeta_imp):
-    try:
-        trig = ctx.triggered_id
-    except Exception:
-        trig = None
-    if not carpeta:
-        return no_update, no_update
-
-    manuals = {"ch2": m2, "ch3": m3, "ch4": m4}
-
-    if trig == "btn_importar_calibracion" and carpeta_imp:
-        st = calibracion_desde_metadata(carpeta_imp)
-        st["carpeta"] = carpeta
-        st["fuente"] = f"importado de {carpeta_imp}"
-        fb = html.Span(f"Calibración importada desde {carpeta_imp}", style={"color": "#059669"})
-        return st, fb
-
-    if trig in ("btn_aplicar_calibracion", "btn_guardar_calibracion"):
-        canales_dict = {}
-        res_calc = res_calc or {}
-        algun_cal = False
-        es_manual = False
-
-        for ch in TRIGGERS:
-            val_ns = manuals.get(ch)
-            r = res_calc.get(ch)
-            if val_ns is not None:
-                algun_cal = True
-                calc_ns = (r["t_lag_us"] * 1e3) if (r and r.get("t_lag_us") is not None) else None
-                if calc_ns is not None and abs(float(val_ns) - calc_ns) < 1e-4:
-                    canales_dict[ch] = {
-                        "t_lag_us": r["t_lag_us"],
-                        "sigma_us": r.get("sigma_us"),
-                        "n_valid": r.get("n_valid"),
-                        "n_total": r.get("n_total"),
-                        "params": r.get("params"),
-                        "calibrado": True,
-                    }
-                else:
-                    es_manual = True
-                    canales_dict[ch] = {
-                        "t_lag_us": float(val_ns) * 1e-3,
-                        "sigma_us": None,
-                        "n_valid": None,
-                        "n_total": None,
-                        "params": None,
-                        "calibrado": True,
-                    }
-            else:
-                canales_dict[ch] = {
-                    "t_lag_us": 0.0, "sigma_us": None, "n_valid": None, "n_total": None, "calibrado": False,
-                }
-
-        fuente = "manual" if es_manual else (carpeta if algun_cal else None)
-        fecha = datetime.date.today().isoformat()
-        store_data = {
-            "carpeta": carpeta,
-            "calibrado": algun_cal,
-            "fuente": fuente,
-            "fecha": fecha,
-            "canales": canales_dict,
-        }
-
-        if trig == "btn_guardar_calibracion":
-            bloque = bloque_calibracion_retardo(canales_dict, fuente, fecha=fecha)
-            ok, msg = guardar_calibracion_metadata(carpeta, bloque)
-            fb_color = "#10b981" if ok else "#ef4444"
-            fb = html.Span(f"{msg}", style={"color": fb_color})
-            return store_data, fb
-        else:
-            fb = html.Span("Calibración aplicada a la sesión actual.", style={"color": "#059669"})
-            return store_data, fb
-
-    # Disparo por cambio de carpeta (o carga inicial)
-    store_data = calibracion_desde_metadata(carpeta)
-    return store_data, ""
-
-
-@app.callback(
-    Output("tlag_manual_ch2", "value", allow_duplicate=True),
-    Output("tlag_manual_ch3", "value", allow_duplicate=True),
-    Output("tlag_manual_ch4", "value", allow_duplicate=True),
-    Input("calibracion_store", "data"),
-    prevent_initial_call=True,
-)
-def rellenar_manual_desde_store(cal):
-    if not cal:
-        return None, None, None
-    chs = cal.get("canales", {})
-    def get_ns(ch):
-        c = chs.get(ch, {})
-        if c.get("calibrado") and c.get("t_lag_us") is not None:
-            return round(c["t_lag_us"] * 1e3, 3)
-        return None
-    return get_ns("ch2"), get_ns("ch3"), get_ns("ch4")
 
 
 @app.callback(
@@ -2607,14 +2166,12 @@ def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, cal_store, yaml
     Input("captura_params", "data"),
     Input("grafico_scatter", "selectedData"),
     Input("grafico_scatter", "clickData"),
-    Input("grafico_vpp_energia", "selectedData"),
-    Input("grafico_vpp_energia", "clickData"),
     Input("grafico", "clickData"),
     State("captura_params", "data"),
 )
-def set_seleccion(_cap_in, sel_pk, click_pk, sel_ve, click_ve, click_g, p):
+def set_seleccion(_cap_in, sel_pk, click_pk, click_g, p):
     """Fuente única de la selección (índices globales de ventana). La alimentan
-    los clics/cajas de los dos scatters y los clics en las cruces del canal
+    los clics/cajas del scatter TRPD y los clics en las cruces del canal
     trigger. Una nueva captura la limpia; los reset a None (por redibujo) se
     ignoran para no romper el ciclo."""
     trg = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
@@ -2629,10 +2186,6 @@ def set_seleccion(_cap_in, sel_pk, click_pk, sel_ve, click_ve, click_g, p):
         idx = _idx_scatter(sel_pk, n)
     elif trg == "grafico_scatter.clickData":
         idx = _idx_scatter(click_pk, n)
-    elif trg == "grafico_vpp_energia.selectedData":
-        idx = _idx_scatter(sel_ve, n)
-    elif trg == "grafico_vpp_energia.clickData":
-        idx = _idx_scatter(click_ve, n)
     else:
         idx = None
     # None = reset por redibujo o clic sin punto válido: no cambiar la selección.
@@ -2641,17 +2194,16 @@ def set_seleccion(_cap_in, sel_pk, click_pk, sel_ve, click_ve, click_g, p):
 
 @app.callback(
     Output("grafico_scatter", "figure"),
-    Output("grafico_vpp_energia", "figure"),
     Input("captura_params", "data"),
     Input("seleccion", "data"),
     Input("modo_magnitud_trpd", "value"),
     Input("calibracion_store", "data"),
 )
 def actualizar_scatter(p, sel, modo_trpd, cal):
-    """Scatters de Peaks y Vpp vs Energía, con los puntos seleccionados en
-    amarillo (venga la selección de los scatters o de las cruces del trigger)."""
+    """Scatter de Patrón TRPD, con los puntos seleccionados en
+    amarillo (venga la selección del scatter o de las cruces del trigger)."""
     if not p:
-        return no_update, no_update
+        return no_update
     cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
     t_ref, v_ref = promedio_impulso(p["carpeta"])
     modo = modo_trpd or "vmax"
@@ -2663,9 +2215,8 @@ def actualizar_scatter(p, sel, modo_trpd, cal):
     # uirevision estable dentro de una captura: al pintar el amarillo no se
     # pierde zoom ni la caja de selección; cambia al hacer una captura nueva o cambiar modo.
     rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}"
-    return (figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo,
-                           t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado),
-            figura_vpp_energia(cap, p["canal"], sel, rev))
+    return figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo,
+                          t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado)
 
 
 @app.callback(
