@@ -1,39 +1,40 @@
 # Estado del Proyecto TRPD_APP (Harness AVO)
-*Última actualización: 2026-09-20 | Intento activo: arranque-entorno*
+*Última actualización: 2026-09-20 | Intento activo: calibrar-multicanal-ui*
 
 ## 1. Objetivo Inmediato y Criterio de Éxito
-- **Meta:** Resolver la latencia de arranque de los servidores (`app.py` en 8050 y `calibrar_app` en 8051), eliminando el doble import del recargador de Dash, creando scripts de inicio robustos (`run_app.cmd` y `run_calibrar.cmd`), asegurando el aislamiento del intérprete en el harness AVO y documentando el acceso offline a `.venv` en Google Drive.
-- **Métrica objetivo:** `arranque_s < 10` (o reducción sustancial de los 178.7 s de línea base), `tests_fallidos = 0`, servidores 8050 y 8051 respondiendo HTTP 200.
-- **Línea base actual:** 178.7 s en frío con doble reloader de Werkzeug y acceso en la nube de Google Drive.
+- **Meta:** Implementar vista multicanal sincronizada (CH1..CH4 con eje temporal compartido) en `calibrar_app` (puerto 8051), hacer las líneas de umbral interactivamente arrastrables con el ratón sin reiniciar el zoom, resolver el error 500 en `calcular_retardo_canal` y eliminar el solapamiento visual en el gráfico de evaluación normativa IEC 60060-1.
+- **Métrica objetivo:** `tests_fallidos = 0`, 0 errores 500 en Dash, 100% de tests GUI aprobados.
+- **Línea base actual:** 33 tests pasando en la suite automatizada `pytest` (11 tests específicos de GUI en `test_calibrar_gui.py`).
 
 ## 2. Enfoque Actual y Linaje
-- **Tag de enfoque:** `arranque-entorno`
-- **ID Padre:** `b63a9f41`
-- **Hipótesis activa:** El arranque excesivo se debe a que `site-packages` reside en el sistema de archivos de streaming de Google Drive (~11.600 archivos) y a que el recargador de Dash importa el árbol de módulos dos veces en `debug=True`. Desactivar el recargador (`use_reloader=False`), crear scripts de arranque con ruta absoluta `%~dp0` y comprobación estricta de Python, junto con el acceso offline ("Disponible sin conexión") a `.venv`, resuelve la lentitud y previene fallos silenciosos.
+- **Tag de enfoque:** `calibrar-multicanal-ui`
+- **ID Padre:** `dbbc52f1`
+- **Hipótesis activa:** Proporcionar una vista multicanal de 4 subplots apilados con eje X compartido (`[-5, 30] µs`) análoga a la de `app.py` permite al usuario correlacionar de inmediato el frente del impulso de referencia CH1 con los frentes de subida de los sensores CH2, CH3 y CH4. Hacer el umbral arrastrable mediante `edits: {shapePosition: True}` y filtrar `relayoutData` para ignorar eventos de zoom/pan garantiza una experiencia fluida sin saltos ni reinicios de escala. La corrección de firma en `calibrar_retardo` y el rediseño tipográfico de `figura_impulso_iec` restauran la estabilidad y legibilidad completa.
 
 ## 3. Estado de la Arquitectura / Hallazgos
-- **Parte 0 (Harness AVO):**
-  - `.avo/profiles/software.sh` corregido: ya no degrada al Python global en el PATH (que carece de librerías); ahora aborta con diagnóstico JSON explícito si falta el intérprete.
-  - `.avo/knowledge.md` enriquecido con invariantes 18 a 21 (Google Drive I/O, aislamiento de intérprete, recargador Dash y scripts de inicio).
-- **Scripts de Arranque Versionados:**
-  - `run_app.cmd`: Inicia el Visor TRPD (`app.py`) en `http://127.0.0.1:8050`.
-  - `run_calibrar.cmd`: Inicia el Calibrador Instrumental (`calibrar_app\main.py`) en `http://127.0.0.1:8051`.
-  - Ambos scripts validan la presencia de `.venv\Scripts\python.exe` (o `TRPD_PYTHON`), rechazan el Python global para prevenir falsos `ModuleNotFoundError`, y utilizan `pause` para inspección tras doble clic.
-- **Optimización de Dash (`app.py`):**
-  - Configurado `use_reloader=False` en `app.run(debug=True, use_reloader=False, dev_tools_props_check=False, host="127.0.0.1", port=8050)`. Elimina la duplicación de importación por Werkzeug (reducción directa del 50% en tiempo de arranque).
-- **Documentación:**
-  - `archivos_md/DOCUMENTACION.md` actualizado con guía de puesta en marcha, detalles de ejecución y advertencias sobre el acceso offline de Google Drive.
-- **Verificación de Servidores:**
-  - `app.py` en `http://127.0.0.1:8050/` verificado respondiendo HTTP 200.
-  - `calibrar_app/main.py` en `http://127.0.0.1:8051/` verificado respondiendo HTTP 200.
-- **Suite de Pruebas Automatizadas:** 29 tests en `tests/` verificados en verde.
+- **Corrección de Error 500 en `calibrar_app`:**
+  - `calibrar_app/arribo.py:calibrar_retardo`: Ahora acepta indistintamente `dist_us` o `distancia_us` (alias).
+  - `calibrar_app/main.py:calcular_retardo_canal`: Invocación corregida a `dist_us=dt_us`. Admite la opción `"todos"` para calcular simultáneamente CH2, CH3 y CH4.
+- **Inspección Multicanal Sincronizada:**
+  - `calibrar_app/figuras.py:figura_canal`: Rediseñada con subplots apilados (CH1..CH4) y eje X compartido.
+  - Fila 1 (CH1): Muestra la señal del impulso con la línea vertical de ancla ($t_{10}$ u $O_1$) en verde esmeralda.
+  - Filas 2..4 (CH2, CH3, CH4): Señal del sensor, ancla vertical para comparación temporal directa, línea horizontal de trigger (roja arrastrable en el canal activo, punteada en los demás), y marcador "X" de arribo ($t_{\text{ant}}$).
+  - Ancho completo en `calibrar_app/interfaz.py` para máxima resolución temporal.
+- **Trigger Draggable e Inmunidad de Zoom:**
+  - `interfaz.py`: Configurado `config={"displayModeBar": True, "edits": {"shapePosition": True}}`.
+  - `main.py:sincronizar_umbral`: Filtra estrictamente eventos que contengan `shapes[...]`. Si el usuario hace zoom o paneo, retorna `no_update`, impidiendo que Dash resetee la vista.
+  - `figura_canal` y `figura_impulso_iec`: Incluyen `uirevision=f"{carpeta}|{seg}"`.
+- **Eliminación de Solapamiento IEC (`image.png`):**
+  - Reubicada la leyenda horizontal al margen inferior (`y=-0.22`).
+  - Alternadas las posiciones de anotación vertical ($O_1$, $t_{10}$, $t_{30}$, $t_{90}$, $t_{50}$) y agrupados los valores normativos exactos en una tarjeta informativa superior derecha sobre la cola decaída de la señal.
+- **Suite de Pruebas:** 33 tests pasando en verde (11 en `tests/test_calibrar_gui.py`).
 
 ## 4. Próxima Acción Inmediata
-- [x] Crear scripts de inicio `run_app.cmd` y `run_calibrar.cmd`.
-- [x] Añadir `use_reloader=False` en `app.py`.
-- [x] Corregir fallback en `.avo/profiles/software.sh`.
-- [x] Actualizar `.avo/knowledge.md` y `archivos_md/DOCUMENTACION.md`.
-- [x] Verificar respuesta HTTP 200 en puertos 8050 y 8051.
-- [x] Completar ejecución de `.avo/verify.sh` (29/29 tests pasando).
-- [x] Registrar intento en `.avo/ledger.jsonl` (`#dbbc52f1`, commit, arranque_s=61.6 s vs 178.7 s base).
+- [x] Corregir error 500 en `calibrar_app/main.py` y `calibrar_app/arribo.py`.
+- [x] Implementar figura multicanal con subplots apilados y eje compartido en `figuras.py`.
+- [x] Configurar trigger interactivo draggable y filtrar zoom en `main.py` e `interfaz.py`.
+- [x] Rediseñar gráfico de impulso IEC 60060-1 sin solapamiento de textos.
+- [x] Añadir 4 nuevos tests de integración en `tests/test_calibrar_gui.py`.
+- [x] Validar contrato con `.avo/verify.sh` (33/33 tests aprobados).
+- [x] Registrar intento `#9c93bde6` en `.avo/ledger.jsonl`.
 - [x] Versionar cambios en Git.

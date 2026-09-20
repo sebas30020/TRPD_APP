@@ -77,13 +77,29 @@ def actualizar_label_segmento(seg: int) -> str:
     prevent_initial_call=False,
 )
 def sincronizar_umbral(relayout: dict | None, carpeta: str, canal: str, u_actual: float | None):
-    """Sincroniza el arrastre visual de la línea de umbral con el input numérico."""
-    trig = ctx.triggered_id
-    if trig == "grafico_canal" and relayout is not None:
+    """Sincroniza el arrastre visual de la línea de umbral con el input numérico sin resetear zoom."""
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+
+    if trig == "grafico_canal" or (trig is None and relayout is not None):
+        if not relayout:
+            return no_update
+        # Solo actualizar si el relayout proviene explícitamente de arrastrar una forma (shape)
+        hay_shape = any("shapes" in str(k) and (".y0" in str(k) or ".y1" in str(k)) for k in relayout.keys())
+        if not hay_shape:
+            return no_update
         val = umbral_desde_relayout(relayout, fallback=u_actual or 10.0)
+        if u_actual is not None and abs(val - float(u_actual)) < 0.02:
+            return no_update
         return round(float(val), 2)
+
     # Cambio de carpeta o canal -> valor por defecto inteligente
-    return round(float(umbral_defecto(carpeta, canal, seg=1)), 2)
+    canal_target = "ch4" if canal == "todos" else canal
+    if not carpeta or not canal_target:
+        return no_update
+    return round(float(umbral_defecto(carpeta, canal_target, seg=1)), 2)
 
 
 @app.callback(
@@ -98,11 +114,12 @@ def sincronizar_umbral(relayout: dict | None, carpeta: str, canal: str, u_actual
 )
 def actualizar_grafico_canal(carpeta: str, canal: str, seg: int, ucal: float | None,
                              dtcal: float | None, tmincal: float | None, ref: str):
-    """Actualiza el gráfico de inspección del canal sensor con la línea de umbral y marca de arribo."""
-    if not carpeta or not canal:
+    """Actualiza el gráfico multicanal sincronizado con umbrales y marcas de arribo."""
+    if not carpeta:
         return no_update
 
-    u = float(ucal or 0.0)
+    canal_foco = "ch4" if canal == "todos" else canal
+    u = float(ucal or umbral_defecto(carpeta, canal_foco, seg=seg))
     dt_us = float(dtcal or 0.035)
     tmin = float(tmincal or 0.15)
 
@@ -110,20 +127,22 @@ def actualizar_grafico_canal(carpeta: str, canal: str, seg: int, ucal: float | N
     anclas = ancla_por_segmento(carpeta, referencia=ref)["ancla_us"]
     ancla_us = float(anclas[seg - 1]) if (anclas.size >= seg) else None
 
-    # Cálculo del arribo
-    t, v = cargar_segmento(carpeta, canal, seg, ventana=VENTANA_T10)
-    dist_m = _muestras(carpeta, canal, dt_us) or 1
-    t_arr = t_arribo(t, v, u, dist_m, tmin)
+    # Cálculo del arribo para el canal foco
+    t, v = cargar_segmento(carpeta, canal_foco, seg, ventana=VENTANA_T10)
+    dist_m = _muestras(carpeta, canal_foco, dt_us) or 1
+    t_arr = t_arribo(t, v, u, dist_m, tmin) if v.size > 0 else None
 
+    ref_nombre = "t10" if ref == "t10" else "O1"
     return figura_canal(
         carpeta=carpeta,
-        canal=canal,
+        canal=canal_foco,
         seg=seg,
         umbral=u,
         dist_us=dt_us,
         tmin=tmin,
         ancla_us=ancla_us,
         t_arr_us=t_arr,
+        referencia_nombre=ref_nombre,
     )
 
 
@@ -155,7 +174,7 @@ def actualizar_grafico_impulso(carpeta: str, seg: int):
 def calcular_retardo_canal(n_clicks: int, carpeta: str, canal: str, ucal: float | None,
                            dtcal: float | None, tmincal: float | None, ref: str,
                            store_actual: dict | None):
-    """Calcula el retardo para el canal seleccionado sobre todos los segmentos y acumula en el store."""
+    """Calcula el retardo para el canal seleccionado (o todos) sobre todos los segmentos y acumula en el store."""
     if not n_clicks or not carpeta or not canal:
         return no_update
 
@@ -164,19 +183,29 @@ def calcular_retardo_canal(n_clicks: int, carpeta: str, canal: str, ucal: float 
     if store.get("_carpeta") != carpeta:
         store = {"_carpeta": carpeta}
 
-    u = float(ucal or umbral_defecto(carpeta, canal, seg=1))
     dt_us = float(dtcal or 0.035)
     tmin = float(tmincal or 0.15)
 
-    res = calibrar_retardo(
-        carpeta=carpeta,
-        canal=canal,
-        umbral=u,
-        distancia_us=dt_us,
-        tmin=tmin,
-        referencia=ref,
-    )
-    store[canal] = res
+    if canal == "todos":
+        canales_calc = [c for c in ("ch2", "ch3", "ch4") if c in canales_presentes(carpeta)]
+    else:
+        canales_calc = [canal] if canal in canales_presentes(carpeta) else []
+
+    for c in canales_calc:
+        if c == canal and ucal is not None:
+            u = float(ucal)
+        else:
+            u = float(umbral_defecto(carpeta, c, seg=1))
+        res = calibrar_retardo(
+            carpeta=carpeta,
+            canal=c,
+            umbral=u,
+            dist_us=dt_us,
+            tmin=tmin,
+            referencia=ref,
+        )
+        store[c] = res
+
     store["_referencia"] = ref
     return store
 
@@ -204,10 +233,17 @@ def evaluar_conformidad_iec(n_clicks: int | None, carpeta: str):
     Input("canal", "value"),
 )
 def actualizar_grafico_dispersion(store: dict | None, canal: str):
-    """Muestra la dispersión e histograma del retardo del canal activo."""
-    if not store or canal not in store:
+    """Muestra la dispersión e histograma del retardo del canal activo o seleccionado."""
+    if not store:
         return figura_dispersion_lag({})
-    return figura_dispersion_lag(store[canal])
+    if canal == "todos":
+        calibrados = [c for c in ("ch4", "ch2", "ch3") if c in store and isinstance(store[c], dict)]
+        ch_target = calibrados[0] if calibrados else "ch4"
+    else:
+        ch_target = canal
+    if ch_target not in store or not isinstance(store[ch_target], dict):
+        return figura_dispersion_lag({})
+    return figura_dispersion_lag(store[ch_target])
 
 
 @app.callback(

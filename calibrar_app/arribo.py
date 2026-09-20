@@ -86,12 +86,15 @@ def filtrar_mad(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, float | None, 
     return valido, atipico, media, sigma
 
 
-def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float, tmin: float,
-                     referencia: str = "t10") -> dict:
+def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0.035, tmin: float = 0.15,
+                     referencia: str = "t10", distancia_us: float | None = None) -> dict:
     """Calcula el retardo instrumental t_lag = t_ant - ancla para cada segmento.
 
     Filtra atípicos por MAD y promedia los válidos. Cacheado por sesión.
+    Acepta tanto dist_us como distancia_us para compatibilidad total de llamadas.
     """
+    if distancia_us is not None:
+        dist_us = distancia_us
     key = (carpeta, canal, round(float(umbral), 6) if umbral is not None else None,
            dist_us, tmin, referencia)
     if key in _ARRIBO_CACHE:

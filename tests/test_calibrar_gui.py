@@ -21,6 +21,8 @@ from main import (
     actualizar_tabla_resumen,
     actualizar_panel_iec,
     guardar_en_metadata,
+    sincronizar_umbral,
+    calcular_retardo_canal,
 )
 import datos
 
@@ -122,3 +124,42 @@ def test_callback_panel_iec():
     }
     panel = actualizar_panel_iec(store_iec)
     assert panel is not None
+
+
+def test_sincronizar_umbral_zoom_no_resetea():
+    """Al recibir relayoutData de zoom (sin shapes), debe retornar no_update para no reiniciar la vista."""
+    relayout_zoom = {"xaxis.range[0]": 2.5, "xaxis.range[1]": 8.0}
+    res = sincronizar_umbral(relayout_zoom, CARPETA_TEST, "ch4", 25.0)
+    assert res == no_update
+
+
+def test_sincronizar_umbral_arrastre_shape():
+    """Al arrastrar una forma (shape.y0/y1), debe actualizar el valor de ucal."""
+    relayout_drag = {"shapes[0].y0": 42.8, "shapes[0].y1": 42.8}
+    res = sincronizar_umbral(relayout_drag, CARPETA_TEST, "ch4", 25.0)
+    assert res == 42.8
+
+
+def test_calcular_retardo_todos_canales():
+    """Al seleccionar canal='todos', calcula el retardo de CH2, CH3 y CH4 simultáneamente."""
+    if not os.path.isdir(datos.MEDICIONES):
+        pytest.skip("MEDICIONES no montado")
+
+    res = calcular_retardo_canal(1, CARPETA_TEST, "todos", None, 0.035, 0.15, "t10", {})
+    assert "ch2" in res
+    assert "ch3" in res
+    assert "ch4" in res
+    assert res["_referencia"] == "t10"
+
+
+def test_multicanal_figura_canal_layout():
+    """Verifica que figura_canal configure uirevision y trazas para todos los canales presentes."""
+    if not os.path.isdir(datos.MEDICIONES):
+        pytest.skip("MEDICIONES no montado")
+
+    fig = actualizar_grafico_canal(CARPETA_TEST, "ch4", 1, 30.0, 0.035, 0.15, "t10")
+    assert isinstance(fig, go.Figure)
+    assert fig.layout.uirevision == f"{CARPETA_TEST}|1"
+    # Debe contener subplots con trazas de CH1 y sensores
+    assert len(fig.data) >= 4
+

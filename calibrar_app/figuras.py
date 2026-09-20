@@ -4,7 +4,14 @@ from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datos import cargar_segmento, VENTANA_T10
+from datos import (
+    cargar_segmento,
+    VENTANA_T10,
+    canales_presentes,
+    umbral_defecto,
+    _muestras,
+)
+from arribo import t_arribo
 
 _COLORES_CANALES = {
     "ch1": "#1f77b4",
@@ -17,10 +24,10 @@ PUNTOS_PLOT = 5000
 
 
 def umbral_desde_relayout(relayout: dict | None, fallback: float) -> float:
-    """Extrae la posición 'y' de la línea movible (shapes[0]) desde relayoutData."""
+    """Extrae la posición 'y' de la línea movible desde relayoutData."""
     if relayout:
         for k, val in relayout.items():
-            if k.startswith("shapes[") and k.endswith(".y0"):
+            if "shapes" in k and (".y0" in k or ".y1" in k):
                 try:
                     return float(val)
                 except (TypeError, ValueError):
@@ -30,85 +37,155 @@ def umbral_desde_relayout(relayout: dict | None, fallback: float) -> float:
 
 def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
                  dist_us: float, tmin: float, ancla_us: float | None,
-                 t_arr_us: float | None) -> go.Figure:
-    """Gráfico interactivo de la señal del sensor con línea de umbral editable y marcas."""
-    fig = go.Figure()
-    color = _COLORES_CANALES.get(canal, "#2563eb")
+                 t_arr_us: float | None, referencia_nombre: str = "t10") -> go.Figure:
+    """Gráfico multicanal sincronizado (CH1..CH4) con eje X compartido, línea de umbral editable y marcas."""
+    canales_todos = ["ch1", "ch2", "ch3", "ch4"]
+    disponibles = canales_presentes(carpeta) if carpeta else canales_todos
+    canales = [c for c in canales_todos if c in disponibles]
+    if not canales:
+        canales = [canal]
 
-    t, v = cargar_segmento(carpeta, canal, seg, ventana=VENTANA_T10)
-    if v.size > 0:
-        paso = max(1, t.size // PUNTOS_PLOT)
-        fig.add_trace(go.Scattergl(
-            x=t[::paso], y=v[::paso], mode="lines", name=canal.upper(),
-            line=dict(color=color, width=1.0),
-            hovertemplate="t=%{x:.4f} µs<br>v=%{y:.2f} mV<extra>" + canal.upper() + "</extra>",
-        ))
+    titles = []
+    for c in canales:
+        if c == "ch1":
+            ancla_txt = f" (Ancla {referencia_nombre} = {ancla_us:.3f} µs)" if ancla_us is not None else ""
+            titles.append(f"CH1 — Impulso de Referencia{ancla_txt}")
+        else:
+            foco_txt = " ★ CANAL ACTIVO" if c == canal else ""
+            titles.append(f"{c.upper()} — Sensor{foco_txt}")
 
-    # Línea vertical de t_mínimo
-    if tmin is not None:
-        fig.add_vline(x=tmin, line=dict(color="#94a3b8", width=1, dash="dash"),
-                      annotation_text="t_mín", annotation_position="bottom right")
-
-    # Línea vertical de ancla de impulso (t10 u O1)
-    if ancla_us is not None:
-        fig.add_vline(x=ancla_us, line=dict(color="#10b981", width=1.5, dash="dot"),
-                      annotation_text=f"Ancla ({ancla_us:.3f} µs)", annotation_position="top left")
-
-    # Línea horizontal de umbral móvil (shapes[0] editable)
-    fig.add_hline(
-        y=umbral,
-        line=dict(color="#dc2626", width=2.0, dash="dash"),
-        annotation_text=f"u = {umbral:.2f} mV",
-        annotation_position="top left",
+    fig = make_subplots(
+        rows=len(canales), cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.045,
+        subplot_titles=titles,
     )
 
-    # Marca del tiempo de arribo
-    tlag_str = "—"
-    if t_arr_us is not None and v.size > 0:
-        dt = t[1] - t[0] if t.size > 1 else 0.0002
-        idx_cercano = int(np.clip(round((t_arr_us - t[0]) / dt), 0, v.size - 1))
-        v_arr = float(v[idx_cercano])
-        fig.add_trace(go.Scatter(
-            x=[t_arr_us], y=[v_arr], mode="markers", name="t_arribo",
-            marker=dict(symbol="x", color="black", size=11, line=dict(width=2)),
-            hovertemplate=f"t_ant={t_arr_us:.4f} µs<br>v={v_arr:.2f} mV<extra>arribo</extra>",
-            showlegend=False,
-        ))
+    for i, c in enumerate(canales, start=1):
+        fig.update_yaxes(title_text="mV", row=i, col=1)
+        t, v = cargar_segmento(carpeta, c, seg, ventana=VENTANA_T10)
+        color = _COLORES_CANALES.get(c, "#2563eb")
+
+        if v.size > 0:
+            paso = max(1, t.size // PUNTOS_PLOT)
+            fig.add_trace(
+                go.Scattergl(
+                    x=t[::paso], y=v[::paso], mode="lines", name=c.upper(),
+                    line=dict(color=color, width=1.2 if c == "ch1" or c == canal else 0.9),
+                    hovertemplate=f"t=%{{x:.4f}} µs<br>v=%{{y:.2f}} mV<extra>{c.upper()}</extra>",
+                    showlegend=False,
+                ),
+                row=i, col=1,
+            )
+
+        # Línea vertical de ancla de impulso (t10 u O1) visible en todos los subplots
         if ancla_us is not None:
-            tlag_ns = (t_arr_us - ancla_us) * 1e3
-            tlag_str = f"{tlag_ns:.2f} ns"
+            fig.add_vline(
+                x=ancla_us, row=i, col=1,
+                line=dict(color="#10b981", width=1.5 if c == "ch1" else 1.0, dash="dot"),
+            )
 
-    anotacion_texto = (
-        f"<b>Segmento {seg}</b><br>"
-        f"t_ant = {t_arr_us:.4f} µs<br>" if t_arr_us is not None else f"<b>Segmento {seg}</b><br>t_ant = Sin cruce<br>"
-    )
-    if ancla_us is not None:
-        anotacion_texto += f"t_ancla = {ancla_us:.4f} µs<br><b>t_lag = {tlag_str}</b>"
+        if c == "ch1":
+            if ancla_us is not None:
+                fig.add_annotation(
+                    xref=f"x{i} domain" if i > 1 else "x domain",
+                    yref=f"y{i} domain" if i > 1 else "y domain",
+                    x=0.98, y=0.92,
+                    text=f"<b>Ancla {referencia_nombre}</b> = {ancla_us:.4f} µs",
+                    showarrow=False, align="right",
+                    font=dict(size=10, color="#065f46"), bgcolor="rgba(236,253,245,0.85)",
+                    bordercolor="#a7f3d0", borderwidth=1, borderpad=4
+                )
+            continue
 
-    fig.add_annotation(
-        xref="paper", yref="paper", x=0.98, y=0.95,
-        text=anotacion_texto, showarrow=False, align="right",
-        font=dict(size=11, color="#1e293b"), bgcolor="rgba(255,255,255,0.85)",
-        bordercolor="#cbd5e1", borderwidth=1, borderpad=6
-    )
+        # Canales sensores (CH2, CH3, CH4)
+        if tmin is not None:
+            fig.add_vline(x=tmin, row=i, col=1, line=dict(color="#94a3b8", width=1, dash="dash"))
 
+        es_foco = (c == canal)
+        if es_foco:
+            u_c = float(umbral)
+            color_u = "#dc2626"
+            ancho_u = 2.0
+            dash_u = "dash"
+            label_u = f"u_{c} = {u_c:.2f} mV"
+        else:
+            u_c = float(umbral_defecto(carpeta, c, seg=seg))
+            color_u = color
+            ancho_u = 1.2
+            dash_u = "dot"
+            label_u = f"u_{c} = {u_c:.2f} mV"
+
+        # Línea de umbral horizontal
+        fig.add_hline(
+            y=u_c, row=i, col=1,
+            line=dict(color=color_u, width=ancho_u, dash=dash_u),
+            annotation_text=label_u,
+            annotation_position="top left",
+            editable=es_foco,
+        )
+
+        # Arribo detectado
+        if es_foco:
+            ta = t_arr_us
+        else:
+            dist_m = _muestras(carpeta, c, dist_us) or 1
+            ta = t_arribo(t, v, u_c, dist_m, tmin) if v.size > 0 else None
+
+        tlag_str = "—"
+        if ta is not None and v.size > 0:
+            dt = t[1] - t[0] if t.size > 1 else 0.0002
+            idx_cercano = int(np.clip(round((ta - t[0]) / dt), 0, v.size - 1))
+            v_arr = float(v[idx_cercano])
+            fig.add_trace(
+                go.Scatter(
+                    x=[ta], y=[v_arr], mode="markers", name=f"arribo {c}",
+                    marker=dict(symbol="x", color="black", size=9, line=dict(width=2)),
+                    hovertemplate=f"t_ant={ta:.4f} µs<br>v={v_arr:.2f} mV<extra>{c.upper()}</extra>",
+                    showlegend=False,
+                ),
+                row=i, col=1,
+            )
+            if ancla_us is not None:
+                tlag_ns = (ta - ancla_us) * 1e3
+                tlag_str = f"{tlag_ns:.2f} ns"
+
+            anotacion_texto = f"<b>{c.upper()}</b> · t_ant = {ta:.4f} µs · <b>t_lag = {tlag_str}</b>"
+            badge_bg = "rgba(255,255,255,0.9)"
+            badge_border = "#cbd5e1"
+        else:
+            anotacion_texto = f"<b>{c.upper()}</b> · Sin cruce de umbral"
+            badge_bg = "rgba(254,242,242,0.85)"
+            badge_border = "#fecaca"
+
+        fig.add_annotation(
+            xref=f"x{i} domain" if i > 1 else "x domain",
+            yref=f"y{i} domain" if i > 1 else "y domain",
+            x=0.98, y=0.92,
+            text=anotacion_texto, showarrow=False, align="right",
+            font=dict(size=10, color="#1e293b"), bgcolor=badge_bg,
+            bordercolor=badge_border, borderwidth=1, borderpad=4
+        )
+
+    fig.update_xaxes(title_text="Tiempo [µs]", row=len(canales), col=1)
     fig.update_layout(
-        title=f"Inspección de Arribo — Canal {canal.upper()} · Segmento {seg}",
-        xaxis_title="Tiempo [µs]", yaxis_title="Tensión [mV]",
-        height=380, margin=dict(t=50, b=40, l=50, r=20),
+        height=680,
+        margin=dict(t=50, b=40, l=55, r=25),
         plot_bgcolor="white", paper_bgcolor="white",
-        uirevision=f"{carpeta}|{canal}",
+        showlegend=False,
+        uirevision=f"{carpeta}|{seg}",
     )
     return fig
 
 
 def figura_impulso_iec(carpeta: str, seg: int, res_iec: dict) -> go.Figure:
-    """Gráfico del impulso CH1 con el ajuste IEC 60060-1, curva base y residual."""
+    """Gráfico del impulso CH1 con el ajuste IEC 60060-1, curva base y residual sin solapamiento."""
     fig = go.Figure()
     if not res_iec.get("exito"):
         fig.update_layout(
             title=f"Evaluación IEC CH1 — Segmento {seg} (No disponible)",
             height=380, margin=dict(t=50, b=40, l=50, r=20),
+            plot_bgcolor="white", paper_bgcolor="white",
         )
         return fig
 
@@ -134,31 +211,52 @@ def figura_impulso_iec(carpeta: str, seg: int, res_iec: dict) -> go.Figure:
                 line=dict(color="#2563eb", width=1.5),
             ))
 
-    # Líneas verticales normativas
+    # Líneas verticales normativas con posiciones alternadas
     vlines = [
-        ("O1", res_iec.get("O1"), "#dc2626", "solid", "O1 (origen virtual)"),
-        ("t10", res_iec.get("t10"), "#10b981", "dot", "t10 (10%)"),
-        ("t30", res_iec.get("t30"), "#059669", "dash", "t30 (30%)"),
-        ("t90", res_iec.get("t90"), "#059669", "dash", "t90 (90%)"),
-        ("t50", res_iec.get("t50"), "#7c3aed", "dot", "t50 (50% cola)"),
+        ("O1", res_iec.get("O1"), "#dc2626", "solid", "O1", "top left"),
+        ("t10", res_iec.get("t10"), "#10b981", "dot", "t10", "bottom left"),
+        ("t30", res_iec.get("t30"), "#059669", "dash", "t30", "top right"),
+        ("t90", res_iec.get("t90"), "#059669", "dash", "t90", "bottom right"),
+        ("t50", res_iec.get("t50"), "#7c3aed", "dot", "t50", "top right"),
     ]
-    for tag, val, col, dash, label in vlines:
+    for tag, val, col, dash, label, pos in vlines:
         if val is not None:
             fig.add_vline(x=val, line=dict(color=col, width=1.2, dash=dash),
-                          annotation_text=label, annotation_position="top left")
+                          annotation_text=label, annotation_position=pos)
 
     T1_str = f"{res_iec.get('T1', 0):.3f}" if res_iec.get("T1") is not None else "—"
     T2_str = f"{res_iec.get('T2', 0):.2f}" if res_iec.get("T2") is not None else "—"
     beta_str = f"{res_iec.get('beta_pct', 0):.2f}" if res_iec.get("beta_pct") is not None else "—"
     O1_str = f"{res_iec.get('O1', 0):.4f}" if res_iec.get("O1") is not None else "—"
+    t10_str = f"{res_iec.get('t10', 0):.4f}" if res_iec.get("t10") is not None else "—"
+    t30_str = f"{res_iec.get('t30', 0):.4f}" if res_iec.get("t30") is not None else "—"
+    t90_str = f"{res_iec.get('t90', 0):.4f}" if res_iec.get("t90") is not None else "—"
+    t50_str = f"{res_iec.get('t50', 0):.2f}" if res_iec.get("t50") is not None else "—"
+
+    # Tarjeta resumen en la esquina superior derecha (donde la señal ya cayó)
+    anotacion_tiempos = (
+        f"<b>Parámetros de Impulso (CH1)</b><br>"
+        f"<span style='color:#dc2626'>■</span> O1 = {O1_str} µs<br>"
+        f"<span style='color:#10b981'>■</span> t10 = {t10_str} µs<br>"
+        f"<span style='color:#059669'>■</span> t30 = {t30_str} µs<br>"
+        f"<span style='color:#059669'>■</span> t90 = {t90_str} µs<br>"
+        f"<span style='color:#7c3aed'>■</span> t50 = {t50_str} µs"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.98, y=0.95,
+        text=anotacion_tiempos, showarrow=False, align="right",
+        font=dict(size=10, color="#1e293b"), bgcolor="rgba(255,255,255,0.9)",
+        bordercolor="#cbd5e1", borderwidth=1, borderpad=6
+    )
 
     subtitulo = f"T1 = {T1_str} µs · T2 = {T2_str} µs · β' = {beta_str} % · O1 = {O1_str} µs"
     fig.update_layout(
         title=f"Evaluación Normativa IEC 60060-1 (CH1 Seg {seg})<br><sub>{subtitulo}</sub>",
         xaxis_title="Tiempo [µs]", yaxis_title="Tensión [mV]",
-        height=380, margin=dict(t=65, b=40, l=50, r=20),
+        height=380, margin=dict(t=75, b=60, l=55, r=20),
         plot_bgcolor="white", paper_bgcolor="white",
-        legend=dict(orientation="h", y=1.05, x=0),
+        legend=dict(orientation="h", y=-0.22, x=0.5, xanchor="center"),
+        uirevision=f"{carpeta}|{seg}",
     )
     return fig
 
@@ -171,7 +269,7 @@ def figura_dispersion_lag(resultados: dict) -> go.Figure:
         subplot_titles=["Retardo instrumental t_lag por disparo", "Distribución"]
     )
     if not resultados:
-        fig.update_layout(height=300, plot_bgcolor="white", paper_bgcolor="white")
+        fig.update_layout(height=320, plot_bgcolor="white", paper_bgcolor="white")
         return fig
 
     ch = resultados.get("canal", "ch")

@@ -150,6 +150,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                         {"label": " CH2 (HFCT)", "value": "ch2"},
                                         {"label": " CH3 (Vivaldi)", "value": "ch3"},
                                         {"label": " CH4 (Bioinspirada)", "value": "ch4"},
+                                        {"label": " Todos los Canales", "value": "todos"},
                                     ],
                                     value="ch4",
                                     inline=True,
@@ -257,39 +258,48 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
             # Mensajes de feedback
             html.Div(id="msg_feedback", style={"marginBottom": "12px"}),
 
-            # Fila de Gráficos Superiores
+            # Sección 1: Inspección Multicanal Sincronizada (CH1..CH4)
             html.Div(
-                style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px", "marginBottom": "16px"},
+                style=ESTILO_CARD,
+                children=[
+                    html.Div(
+                        style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "6px"},
+                        children=[
+                            html.H3("📊 Inspección Multicanal Sincronizada (CH1 Impulso vs CH2–CH4 Sensores)",
+                                    style={"fontSize": "15px", "margin": "0", "color": "#0f172a"}),
+                            html.Span("💡 Tip: Arrastra la línea roja punteada del canal activo con el ratón para ajustar u_cal en tiempo real.",
+                                      style={"fontSize": "12px", "color": "#2563eb", "fontWeight": "500"}),
+                        ],
+                    ),
+                    dcc.Loading(dcc.Graph(id="grafico_canal", config={"displayModeBar": True, "edits": {"shapePosition": True}})),
+                ],
+            ),
+
+            # Sección 2: Fila de Evaluación Normativa y Dispersión
+            html.Div(
+                style={"display": "grid", "gridTemplateColumns": "1.1fr 0.9fr", "gap": "16px", "marginBottom": "16px"},
                 children=[
                     html.Div(
                         style=ESTILO_CARD,
                         children=[
-                            html.Div(
-                                style={"fontSize": "12px", "color": "#64748b", "marginBottom": "4px"},
-                                children="💡 Tip: Arrastra verticalmente la línea roja punteada para ajustar u_cal en tiempo real."
-                            ),
-                            dcc.Loading(dcc.Graph(id="grafico_canal", config={"displayModeBar": True})),
+                            html.H3("📐 Evaluación Normativa IEC 60060-1 (CH1 Impulso)", style={"fontSize": "15px", "margin": "0 0 10px 0"}),
+                            dcc.Loading(dcc.Graph(id="grafico_impulso", config={"displayModeBar": True})),
                         ],
                     ),
                     html.Div(
                         style=ESTILO_CARD,
                         children=[
-                            dcc.Loading(dcc.Graph(id="grafico_impulso", config={"displayModeBar": True})),
+                            html.H3("⏱️ Dispersión del Retardo (t_lag)", style={"fontSize": "15px", "margin": "0 0 10px 0"}),
+                            dcc.Loading(dcc.Graph(id="grafico_dispersion", config={"displayModeBar": True})),
                         ],
                     ),
                 ],
             ),
 
-            # Fila de Gráficos Inferiores
+            # Sección 3: Estabilidad de Ancla por Disparo
             html.Div(
-                style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px", "marginBottom": "16px"},
+                style={"marginBottom": "16px"},
                 children=[
-                    html.Div(
-                        style=ESTILO_CARD,
-                        children=[
-                            dcc.Loading(dcc.Graph(id="grafico_dispersion", config={"displayModeBar": True})),
-                        ],
-                    ),
                     html.Div(
                         style=ESTILO_CARD,
                         children=[
