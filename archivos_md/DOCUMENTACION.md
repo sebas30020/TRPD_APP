@@ -65,22 +65,19 @@ hasta cada gráfico y tabla de la interfaz:
    No se evalúa prominencia ni ancho.
 4. **Clasificación: peak con ventana completa o "sin ventana" (`capturar`):**
    Para cada peak detectado en el índice $i$, se evalúa si se dispone de margen
-   suficiente para extraer una ventana de $1 \text{ µs}$ ($0.2 \text{ µs}$ antes y
-   $0.8 \text{ µs}$ después del peak).
+   suficiente para extraer una ventana de $70 \text{ ns}$ ($7 \text{ ns}$ / $10\%$ antes y
+   $63 \text{ ns}$ / $90\%$ después del peak).
    Si la ventana se sale del segmento recortado ($i - n_{\text{antes}} < 0$ o
-   $i + n_{\text{desp}} + 1 > v.\text{size}$), el evento se clasifica como
-   **peak sin ventana** (`t_peak_borde`, `v_peak_borde`, `seg_borde`).
-   Estos peaks cuentan en las estadísticas de conteo y densidad, pero no poseen
-   señal capturada (regla **R-P3**).
-5. **Captura de ventanas de 1 µs (`capturar`):**
-   Para los peaks completos se extrae el recorte temporal $[-0.2, +0.8] \text{ µs}$
+   $i + n_{\text{desp}} + 1 > v.\text{size}$), el evento no cumple la ventana completa y se descarta (regla **R-C2**).
+5. **Captura de ventanas de 70 ns (`capturar`):**
+   Para los peaks completos se extrae el recorte temporal $[-7, +63] \text{ ns}$ ($-0.007$ a $+0.063\text{ µs}$)
    alineado al peak en $t = 0$. Esta matriz $W$ y sus vectores asociados
    (`t_peak`, `v_peak`, `seg`) conforman el **conjunto único y ordenado** que
-   comparten de forma 1:1 el scatter de Peaks, el scatter de Vpp vs Energía, las
-   ventanas temporales superpuestas, la FFT y la Transformada S de la ventana (regla **R-C2**).
+   comparten de forma 1:1 el scatter de Peaks, las
+   ventanas temporales superpuestas, la FFT y la Transformada S de la ventana (regla **R-C3**).
 6. **Selección de eventos por el usuario (store `seleccion`):**
    El usuario selecciona eventos individuales o grupos mediante clics o cajas de
-   selección en cualquiera de los dos scatters (Peaks o Vpp vs Energía) o haciendo
+   selección en el scatter de Peaks o haciendo
    clic directo sobre las cruces negras del canal trigger en el gráfico principal.
    El store central `seleccion` almacena la lista de índices de ventana elegidos.
 7. **Análisis derivados de la selección:**
@@ -89,7 +86,7 @@ hasta cada gráfico y tabla de la interfaz:
    - **FFT Welch (`figura_fft`):** calcula el espectro de potencia de cada ventana
      seleccionada y grafica el promedio entre ellas.
    - **Transformada S de la ventana (`figura_st_ventana`):** calcula la distribución
-     tiempo-frecuencia de cada ventana de $1 \text{ µs}$ y promedia su magnitud $|S|$.
+     tiempo-frecuencia de cada ventana de $70 \text{ ns}$ y promedia su magnitud $|S|$.
 8. **Rama paralela independiente: Transformada S del segmento completo (`st_segmento`):**
    No depende de la detección de peaks ni de la captura o selección. Toma la señal
    cruda completa de cada canal ($[-5, 30] \text{ µs}$, incluido CH1 crudo sin filtrar)
@@ -573,7 +570,7 @@ Dos escalas, compartiendo la misma función:
     - Con $f_{\text{máx}} = 500 \text{ MHz}$: $\Delta f \approx 2 \text{ MHz}$ por fila.
   - **Resolución natural de la FFT de fondo vs. grilla visual:**
     La resolución física elemental de la FFT de fondo es $\Delta f_{\text{FFT}} = 1 / (N \cdot dt)$:
-    $\sim 1 \text{ MHz}$ en la ventana de $1 \text{ µs}$ ($N = 5001$) y
+    $\sim 14.3 \text{ MHz}$ en la ventana de $70 \text{ ns}$ ($N = 351$) y
     $\sim 0.0286 \text{ MHz} \approx 29 \text{ kHz}$ en el segmento de $35 \text{ µs}$ ($N = 175\,001$).
     Esta resolución fina **no se mapea por completo** en el gráfico: solo se evalúan
     hasta 250 frecuencias seleccionadas, de modo que con $f_{\text{máx}}$ alto el
@@ -586,10 +583,8 @@ Dos escalas, compartiendo la misma función:
     alta resolución temporal y baja resolución en frecuencia.
 - **Límite inferior de frecuencia:**
   La primera fila distinta de continua corresponde a $j = 1$, es decir
-  $f_1 = 1 / (N \cdot dt)$: $\approx 1 \text{ MHz}$ en la ventana de $1 \text{ µs}$ y
-  $\approx 0.029 \text{ MHz}$ en el segmento completo. Una ventana de $1 \text{ µs}$ no
-  puede representar fenómenos de frecuencia inferior a $1 \text{ MHz}$ (su duración
-  no cubre un ciclo completo). La fila $f = 0$ almacena el valor constante
+  $f_1 = 1 / (N \cdot dt)$: $\approx 14.3 \text{ MHz}$ en la ventana de $70 \text{ ns}$ y
+  $\approx 0.029 \text{ MHz}$ en el segmento completo. La fila $f = 0$ almacena el valor constante
   $|\text{media}(x)|$ repetido en todas las columnas de tiempo; no representa resolución temporal.
 - **Límite superior y recorte a Nyquist:**
   `f máx` se recorta estrictamente a Nyquist ($N // 2$ bins = $2500 \text{ MHz}$ a $5 \text{ GSa/s}$),
