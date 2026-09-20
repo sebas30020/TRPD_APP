@@ -52,7 +52,7 @@ IMP_ORDEN = 4       # orden del Butterworth (fase cero, sosfiltfilt)
 ST_NFREQ = 250
 ST_NT_VENTANA = 350     # ventana de 70 ns (captura punto a punto)
 ST_NT_SEGMENTO = 1000   # segmento completo (-5..30 µs)
-ST_FMAX_MHZ = 2500      # por defecto, Nyquist a Fs = 5 GSa/s
+ST_FMAX_MHZ = 1000      # por defecto a Fs = 1 GSa/s
 
 
 _CHAN_RE = re.compile(r"^(.*?)(ch[1-4])(.*?)\.h5$", re.IGNORECASE)
