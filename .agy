@@ -1,0 +1,26 @@
+# Configuración y Directivas Globales del Agente (.agy)
+
+## Directiva Obligatoria para la Generación y Gestión de Planes
+
+Cada vez que el usuario solicite la elaboración o actualización de un **plan** (plan de trabajo, desarrollo, refactorización, optimización, pruebas o arquitectura):
+
+1. **Persistencia Física Obligatoria en `.md`**:
+   - El plan **NUNCA** debe quedar únicamente como texto efímero en la respuesta del chat.
+   - Debe ser siempre escrito y guardado en un archivo Markdown (`.md`) dentro de la carpeta `archivos_md`:
+     `g:\Mi unidad\yo\usm\investigacion\proyectos\inv_pd_vac\TRPD_APP\archivos_md` (o `./archivos_md` relativo a la raíz del proyecto).
+   - **Creación de directorio**: Si la carpeta `archivos_md` no existe en el proyecto, debe ser creada automáticamente antes de generar el archivo.
+
+2. **Diseñado para Ejecución por Otro Agente**:
+   - El plan debe redactarse **siempre en función de que otro agente leerá el documento y lo ejecutará autónamente**.
+   - Debe ser completamente autocontenido, estructurado y sin ambigüedades:
+     - Indicar claramente el destinatario al inicio (`> **Destinatario:** Agente ejecutor / implementador`).
+     - Detallar el diagnóstico, contexto e hipótesis de partida.
+     - Especificar los archivos exactos a crear o modificar (rutas, funciones y firmas).
+     - Desglosar los pasos de forma secuencial, atómica y priorizada.
+     - Proveer comandos exactos de terminal y entorno (ej. uso explícito del intérprete de entorno virtual).
+     - Definir criterios objetivos de verificación y pruebas deterministas para dar por completada cada fase.
+
+3. **Nomenclatura del Archivo `.md`**:
+   - Siempre se debe acordar o definir el nombre del archivo `.md`:
+     - El agente debe consultar al usuario por el nombre deseado o proponer un nombre descriptivo siguiendo la convención del proyecto (ejemplo: `PLAN_<TemaDescriptivo>.md`).
+   - Todos los planes deben quedar centralizados dentro de `archivos_md/`.
