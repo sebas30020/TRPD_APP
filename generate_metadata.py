@@ -100,24 +100,60 @@ def inferir_parametros(experimento):
     tension_dc = None
     tipo_geometria = None
     nro_vacuolas = None
+    diametros = None
 
-    patron_probeta = re.compile(r"([1-4]V[2-4]+[H]?)(?:[_\-\s]|\b|$)", re.IGNORECASE)
+    # Patrón nuevo: 1-4 vacuolas, 'mo' (monodiametro) o 'mi' (mixto), sufijo opcional 'H' (asimetrica)
+    patron_nuevo = re.compile(r"([1-4]V(?:mo|mi)[H]?)(?:[_\-\s/]|\b|$)", re.IGNORECASE)
+    # Patrón legado de respaldo: dígitos de diámetros en el código (ej. 3V224, 3V444H)
+    patron_legado = re.compile(r"([1-4]V[2-4]+[H]?)(?:[_\-\s/]|\b|$)", re.IGNORECASE)
+
     for p in partes:
-        m = patron_probeta.search(p)
+        m = patron_nuevo.search(p)
         if m:
-            codigo_probeta = m.group(1).upper()
+            raw = m.group(1)
+            # Normalizar convención: ej. 2Vmo, 2Vmi, 2VmoH, 2VmiH
+            n = raw[0]
+            v = "V"
+            tipo_tag = raw[2:4].lower()
+            h_tag = "H" if len(raw) > 4 and raw[4].upper() == "H" else ""
+            codigo_probeta = f"{n}{v}{tipo_tag}{h_tag}"
             break
 
+    if not codigo_probeta:
+        for p in partes:
+            m = patron_legado.search(p)
+            if m:
+                codigo_probeta = m.group(1).upper()
+                break
+
     if codigo_probeta:
-        if "H" in codigo_probeta:
-            tipo_geometria = "asimetrica"
-        else:
-            match_v = re.search(r"^[1-4]V([2-4]+)", codigo_probeta)
-            if match_v:
-                digitos = match_v.group(1)
-                tipo_geometria = "monodiametro" if len(set(digitos)) == 1 else "mixta"
         if codigo_probeta[0].isdigit():
             nro_vacuolas = int(codigo_probeta[0])
+
+        # Caso 1: Nuevo formato (mo / mi / H)
+        match_nuevo = re.search(r"^[1-4]V(mo|mi)(H)?$", codigo_probeta, re.IGNORECASE)
+        if match_nuevo:
+            distrib = match_nuevo.group(1).lower()
+            tiene_h = bool(match_nuevo.group(2))
+            if tiene_h:
+                tipo_geometria = "asimetrica"
+            elif distrib == "mo":
+                tipo_geometria = "monodiametro"
+            else:
+                tipo_geometria = "mixta"
+        else:
+            # Caso 2: Formato legado con dígitos (ej. 3V224, 3V444H)
+            if "H" in codigo_probeta.upper():
+                tipo_geometria = "asimetrica"
+            else:
+                match_v = re.search(r"^[1-4]V([2-4]+)", codigo_probeta, re.IGNORECASE)
+                if match_v:
+                    digitos = match_v.group(1)
+                    tipo_geometria = "monodiametro" if len(set(digitos)) == 1 else "mixta"
+            match_v = re.search(r"^[1-4]V([2-4]+)", codigo_probeta, re.IGNORECASE)
+            if match_v:
+                digitos = match_v.group(1)
+                diametros = "-".join([f"{d}mm" for d in digitos])
 
     for p in partes:
         m = re.search(r"(\d+(?:\.\d+)?)kV", p, re.IGNORECASE)
@@ -130,29 +166,45 @@ def inferir_parametros(experimento):
         "tipo_geometria": tipo_geometria,
         "nro_vacuolas": nro_vacuolas,
         "tension_dc": tension_dc,
+        "diametros": diametros,
     }
 
 
 def inferir_diametros(probeta_data=None, codigo_probeta=None):
-    """Extrae o infiere los diámetros de las cavidades (mm) como string legible (ej. 'D1=3 mm, D2=3 mm')."""
+    """Extrae o formatea los diámetros de las cavidades en formato estándar (ej. '2mm-2mm-3mm')."""
     if isinstance(probeta_data, dict):
+        # 1. Campo explícito 'diametros'
+        d_val = probeta_data.get("diametros")
+        if d_val and str(d_val).strip():
+            return str(d_val).strip()
+
+        # 2. Lista de diccionarios 'vacuolas'
         vacs = probeta_data.get("vacuolas") or []
         if vacs:
             partes = []
-            for i, v in enumerate(vacs, start=1):
-                d = v.get("diametro_mm") or v.get("d_mm")
-                if d is not None:
-                    partes.append(f"D{i}={d} mm")
+            for v in vacs:
+                if isinstance(v, dict):
+                    d = v.get("diametro_mm") or v.get("d_mm") or v.get("diametro")
+                    if d is not None:
+                        partes.append(f"{d}mm")
+                elif isinstance(v, (int, float, str)):
+                    s = str(v).strip()
+                    if not s.lower().endswith("mm"):
+                        s = f"{s}mm"
+                    partes.append(s)
             if partes:
-                return ", ".join(partes)
+                return "-".join(partes)
+
         if not codigo_probeta:
             codigo_probeta = probeta_data.get("codigo")
 
+    # 3. Formato numérico legado en codigo_probeta (ej. 3V224 -> 2mm-2mm-4mm)
     if codigo_probeta:
         m = re.search(r"^[1-4]V([2-4]+)", str(codigo_probeta), re.IGNORECASE)
         if m:
             digitos = m.group(1)
-            return ", ".join([f"D{i+1}={d} mm" for i, d in enumerate(digitos)])
+            return "-".join([f"{d}mm" for d in digitos])
+
     return "N/D"
 
 
@@ -230,6 +282,7 @@ def plantilla_metadata(experimento, carpeta_medicion):
             "nro_capas_total": 4,
             "espesor_capa_mm": 0.48,
             "nro_vacuolas": inf["nro_vacuolas"],
+            "diametros": inf.get("diametros") or "",
             "vacuolas": [],
             "distancias_entre_vacuolas_mm": [],
             "fotos": [],
