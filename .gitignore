@@ -16,3 +16,7 @@ archivos_md/PLAN_*.md
 
 # Configuracion de editor
 .vscode/
+
+# Screenshots temporales de interfaz
+image*.png
+

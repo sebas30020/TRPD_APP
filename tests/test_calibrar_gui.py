@@ -22,7 +22,9 @@ from main import (
     actualizar_panel_iec,
     guardar_en_metadata,
     sincronizar_umbral,
+    sincronizar_triggers,
     calcular_retardo_canal,
+    actualizar_grafico_dispersion,
 )
 import datos
 
@@ -159,7 +161,141 @@ def test_multicanal_figura_canal_layout():
 
     fig = actualizar_grafico_canal(CARPETA_TEST, "ch4", 1, 30.0, 0.035, 0.15, "t10")
     assert isinstance(fig, go.Figure)
-    assert fig.layout.uirevision == f"{CARPETA_TEST}|1"
+    assert fig.layout.uirevision == CARPETA_TEST
     # Debe contener subplots con trazas de CH1 y sensores
     assert len(fig.data) >= 4
+
+
+def test_multicanal_figura_canal_lineas_umbral_editables():
+    """Verifica que figura_canal dibuje las líneas horizontales de umbral como shapes editables."""
+    if not os.path.isdir(datos.MEDICIONES):
+        pytest.skip("MEDICIONES no montado")
+
+    fig = actualizar_grafico_canal(
+        CARPETA_TEST, "todos", 1, None, 0.035, 0.15, "t10",
+        u2=150.0, tmin2=0.15, u3=120.0, tmin3=0.15, u4=90.0, tmin4=0.15
+    )
+    # Debe haber al menos 3 shapes de umbral (CH2, CH3, CH4)
+    assert len(fig.layout.shapes) >= 3
+    # Los primeros 3 shapes deben ser las líneas horizontales de trigger de CH2, CH3, CH4
+    s0, s1, s2 = fig.layout.shapes[0], fig.layout.shapes[1], fig.layout.shapes[2]
+    assert s0.y0 == 150.0 and s0.y1 == 150.0 and getattr(s0, "editable", False) is True
+    assert s1.y0 == 120.0 and s1.y1 == 120.0 and getattr(s1, "editable", False) is True
+    assert s2.y0 == 90.0 and s2.y1 == 90.0 and getattr(s2, "editable", False) is True
+
+
+def test_sincronizar_triggers_cambio_canal_no_resetea():
+    """Al alternar entre canales, ningún trigger establecido debe ser sobrescrito."""
+    # Simular que el usuario ya tenía configurado CH2 a 120 mV y CH3 a 85 mV
+    # y ahora cambia el selector de canal a 'ch3'
+    # No hay relayoutData de gráfico
+    res = sincronizar_triggers(
+        relayout=None,
+        carpeta=CARPETA_TEST,
+        canal="ch3",
+        u2=120.0,
+        tmin2=0.18,
+        u3=85.0,
+        tmin3=0.15,
+        u4=45.0,
+        tmin4=0.12,
+        ucal_act=120.0,
+    )
+    # Debe retornar no_update para los valores de u2, tmin2, u3, tmin3, u4, tmin4
+    # garantizando que ninguno se pierda al seleccionar otro canal
+    u2_out, t2_out, u3_out, t3_out, u4_out, t4_out, ucal_out = res
+    assert u2_out == no_update
+    assert t2_out == no_update
+    assert u3_out == no_update
+    assert t3_out == no_update
+    assert u4_out == no_update
+    assert t4_out == no_update
+
+
+def test_sincronizar_triggers_arrastre_shape_especifico():
+    """Al mover la línea de umbral de un canal específico (ej. CH3), solo ese canal se actualiza."""
+    # shapes[0] = ch2, shapes[1] = ch3, shapes[2] = ch4
+    relayout_ch3 = {"shapes[1].y0": 92.5, "shapes[1].y1": 92.5}
+    res = sincronizar_triggers(
+        relayout=relayout_ch3,
+        carpeta=CARPETA_TEST,
+        canal="ch3",
+        u2=120.0,
+        tmin2=0.18,
+        u3=85.0,
+        tmin3=0.15,
+        u4=45.0,
+        tmin4=0.12,
+        ucal_act=85.0,
+    )
+    u2_out, t2_out, u3_out, t3_out, u4_out, t4_out, ucal_out = res
+    assert u2_out == no_update  # CH2 intacto
+    assert u3_out == 92.5       # CH3 actualizado al nuevo valor arrastrado
+    assert u4_out == no_update  # CH4 intacto
+
+
+def test_calcular_retardo_multi_trigger_independiente():
+    """Al calcular retardo en modo 'todos', cada canal procesa su propio umbral y t_min."""
+    if not os.path.isdir(datos.MEDICIONES):
+        pytest.skip("MEDICIONES no montado")
+
+    res = calcular_retardo_canal(
+        n_clicks=1,
+        carpeta=CARPETA_TEST,
+        canal="todos",
+        ucal=None,
+        dtcal=0.035,
+        tmincal=0.15,
+        ref="t10",
+        store_actual={},
+        u2=500.0,
+        tmin2=0.14,
+        u3=400.0,
+        tmin3=0.15,
+        u4=300.0,
+        tmin4=0.16,
+    )
+    assert res["ch2"]["params"]["umbral_mv"] == 500.0
+    assert res["ch2"]["params"]["tmin_us"] == 0.14
+    assert res["ch3"]["params"]["umbral_mv"] == 400.0
+    assert res["ch3"]["params"]["tmin_us"] == 0.15
+    assert res["ch4"]["params"]["umbral_mv"] == 300.0
+    assert res["ch4"]["params"]["tmin_us"] == 0.16
+
+
+def test_callback_grafico_dispersion_selector_canal():
+    """Verifica que el gráfico de dispersión responda al selector de canal mostrando su sensor correspondiente."""
+    store_ejemplo = {
+        "ch2": {
+            "canal": "ch2",
+            "segs": [1, 2],
+            "t_lag": [0.010, 0.011],
+            "valido": [True, True],
+            "atipico": [False, False],
+            "t_lag_us": 0.0105,
+            "sigma_us": 0.0005,
+            "n_valid": 2,
+            "n_total": 2,
+        },
+        "ch3": {
+            "canal": "ch3",
+            "segs": [1, 2],
+            "t_lag": [0.020, 0.021],
+            "valido": [True, True],
+            "atipico": [False, False],
+            "t_lag_us": 0.0205,
+            "sigma_us": 0.0005,
+            "n_valid": 2,
+            "n_total": 2,
+        },
+    }
+    fig2 = actualizar_grafico_dispersion(store_ejemplo, canal="ch2")
+    assert isinstance(fig2, go.Figure)
+    assert "CH2" in fig2.layout.annotations[0].text or "HFCT" in fig2.layout.annotations[0].text
+
+    fig3 = actualizar_grafico_dispersion(store_ejemplo, canal="ch3")
+    assert isinstance(fig3, go.Figure)
+    assert "CH3" in fig3.layout.annotations[0].text or "Vivaldi" in fig3.layout.annotations[0].text
+
+
 

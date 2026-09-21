@@ -1,29 +1,29 @@
 # Estado del Proyecto TRPD_APP (Harness AVO)
-*Última actualización: 2026-09-20 | Intento activo: fix-marker-curve-alignment*
+*Última actualización: 2026-09-21 | Intento activo: fix-missing-horizontal-trigger-lines*
 
 ## 1. Objetivo Inmediato y Criterio de Éxito
-- **Meta:** Resolver la desalineación visual donde la marca "X" de tiempo de arribo no coincidía con la traza de la señal en `figura_canal`.
-- **Métrica objetivo:** `tests_fallidos = 0`, concordancia visual y física exacta entre la traza y el marcador de cruce.
-- **Línea base actual:** 33 tests pasando en la suite automatizada `pytest`.
+- **Meta:** Restaurar la visibilidad y capacidad interactiva de arrastre de las líneas horizontales de umbral de trigger en los subplots de los canales sensores (CH2, CH3, CH4) en `calibrar_app`.
+- **Métrica objetivo:** `tests_fallidos = 0`, líneas de umbral horizontales renderizadas (`shapes[0..2]`) con `editable=True`.
+- **Línea base actual:** 38 tests pasando en la suite automatizada `pytest`.
 
 ## 2. Enfoque Actual y Linaje
-- **Tag de enfoque:** `fix-marker-curve-alignment`
-- **ID Padre:** `9c93bde6`
-- **Hipótesis activa:** La desalineación entre la marca "X" y la curva observada en `image copy.png` se debía a un doble factor: (1) `figura_canal` aplicaba un submuestreo ingenuo `x=t[::paso], y=v[::paso]` con `paso = 35` (~7 ns por muestra a 5 GHz), el cual saltaba los pulsos transitorios ultrarrápidos de descarga parcial (~2-4 ns de duración) trazando una cuerda recta por el valle de la señal que omitía la cresta donde realmente se producía el cruce de umbral; y (2) la coordenada $y$ de la marca se extraía con `v[idx_cercano]` mediante redondeo entero en vez de interpolación lineal continua a la sub-muestra $t_{\text{ant}}$. Al trazar la señal en resolución completa nativa (`np.float32` vía WebGL `Scattergl`, idéntico a `app.py`) e interpolar $v(t_{\text{ant}})$ con `np.interp`, la marca queda con precisión matemática y visual exacta sobre la curva.
+- **Tag de enfoque:** `fix-missing-horizontal-trigger-lines`
+- **ID Padre:** `e319b48c`
+- **Hipótesis activa:** Al construir una figura con `make_subplots` en Plotly, llamar a `fig.add_hline(..., row=i, col=1)` antes de que dicho subplot contenga al menos una traza provoca que Plotly descarte silenciosamente la figura al no poder resolver el sistema de coordenadas de los ejes. Al cargar y trazar primero las señales de los canales y随后 agregar `fig.add_hline` con `editable=True`, las líneas horizontales se dibujan fielmente en la posición exacta y vuelven a ser arrastrables por el usuario.
 
 ## 3. Estado de la Arquitectura / Hallazgos
-- **Resolución nativa en `calibrar_app/figuras.py`:**
-  - Removido el diezmado `[::paso]` en `figura_canal`. La traza pasa directamente `x=t.astype(np.float32), y=v.astype(np.float32)` a `go.Scattergl`.
-  - WebGL renderiza las 175.000 muestras en milisegundos sin sobrecarga y garantiza que al hacer zoom se preserven todos los puntos a 0.2 ns.
-- **Interpolación exacta de la marca:**
-  - Sustituido `idx_cercano = int(round(...))` y `v_arr = float(v[idx_cercano])` por `v_arr = float(np.interp(ta, t, v))`.
-  - La marca $(t_{\text{ant}}, v_{\text{arr}})$ se sitúa exactamente sobre el segmento de recta interpolado que traza Plotly.
-- **Suite de Pruebas y Verificador:** 33/33 tests aprobados con éxito (`.avo/verify.sh` retorna `pass: true`).
+- **Reordenamiento de Renderizado en `calibrar_app/figuras.py`:**
+  1. **Trazas de señal primero:** Cada canal agrega su `Scattergl(x=t, y=v)`.
+  2. **Líneas de umbral horizontales:** `fig.add_hline` para cada sensor de `trigs_presentes` (CH2, CH3, CH4) con `editable=True`, `dash="dash"`, ancho 1.8 px y etiqueta `u_{ch} = ... mV`.
+  3. **Líneas verticales y marcas:** Se agregan `ancla_us` y `tmin` vlines, así como la marca de arribo interpolada `X` y las anotaciones tipo badge.
+- **Tip interactivo actualizado:** En `interfaz.py` ahora se indica formalmente que cualquier línea de umbral puede ser arrastrada para calibrar su trigger.
+- **Suite de Pruebas:** Agregado `test_multicanal_figura_canal_lineas_umbral_editables` en `tests/test_calibrar_gui.py`. 38 tests aprobados al 100%.
+- **Servidor Activo:** Proceso en puerto 8051 (PID en ejecución) respondiendo `HTTP 200 OK`.
 
 ## 4. Próxima Acción Inmediata
-- [x] Diagnosticar causa raíz de la desalineación en `image copy.png`.
-- [x] Reemplazar submuestreo por traza nativa `np.float32` e interpolar $v_{\text{arr}}$ con `np.interp`.
-- [x] Correr y aprobar suite de pruebas completa (33 tests).
-- [x] Ejecutar `.avo/verify.sh` (pass: true).
-- [x] Registrar intento `#6d51315e` en `.avo/ledger.jsonl`.
-
+- [x] Corregir orden de construcción en `figura_canal` (`figuras.py`).
+- [x] Asegurar `editable=True` en `add_hline`.
+- [x] Actualizar tip en `interfaz.py`.
+- [x] Añadir prueba de regresión unitaria en `test_calibrar_gui.py` (38 tests).
+- [x] Ejecutar `.avo/verify.sh` y registrar commit `#7b82e14a` en `.avo/ledger.jsonl`.
+- [x] Reiniciar servidor en puerto 8051 y verificar respuesta HTTP 200.

@@ -21,10 +21,30 @@ _COLORES_CANALES = {
 }
 
 PUNTOS_PLOT = 5000
+TRIGGERS = ("ch2", "ch3", "ch4")
+
+
+def umbrales_desde_relayout(relayout: dict | None, canales: list[str]) -> dict[str, float]:
+    """Extrae las posiciones 'y' de las líneas de umbral movibles (shapes) desde relayoutData."""
+    if not relayout:
+        return {}
+    trigs_presentes = [c for c in TRIGGERS if c in canales]
+    cambios = {}
+    for k, val in relayout.items():
+        if k.startswith("shapes[") and (k.endswith(".y0") or k.endswith(".y1")):
+            try:
+                idx_str = k.split("[")[1].split("]")[0]
+                idx = int(idx_str)
+                if 0 <= idx < len(trigs_presentes):
+                    ch = trigs_presentes[idx]
+                    cambios[ch] = round(abs(float(val)), 2)
+            except (TypeError, ValueError, IndexError):
+                pass
+    return cambios
 
 
 def umbral_desde_relayout(relayout: dict | None, fallback: float) -> float:
-    """Extrae la posición 'y' de la línea movible desde relayoutData."""
+    """Extrae la posición 'y' de la línea movible desde relayoutData (retrocompatibilidad)."""
     if relayout:
         for k, val in relayout.items():
             if "shapes" in k and (".y0" in k or ".y1" in k):
@@ -35,24 +55,34 @@ def umbral_desde_relayout(relayout: dict | None, fallback: float) -> float:
     return fallback
 
 
-def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
-                 dist_us: float, tmin: float, ancla_us: float | None,
-                 t_arr_us: float | None, referencia_nombre: str = "t10") -> go.Figure:
-    """Gráfico multicanal sincronizado (CH1..CH4) con eje X compartido, línea de umbral editable y marcas."""
+def figura_canal(carpeta: str, canal: str, seg: int,
+                 umbral: float | None = None,
+                 dist_us: float = 0.035,
+                 tmin: float | None = None,
+                 ancla_us: float | None = None,
+                 t_arr_us: float | None = None,
+                 referencia_nombre: str = "t10",
+                 cfg_sensores: dict | None = None) -> go.Figure:
+    """Gráfico multicanal sincronizado (CH1..CH4) con eje X compartido, triggers independientes por canal y marcas."""
     canales_todos = ["ch1", "ch2", "ch3", "ch4"]
     disponibles = canales_presentes(carpeta) if carpeta else canales_todos
     canales = [c for c in canales_todos if c in disponibles]
     if not canales:
         canales = [canal]
 
+    trigs_presentes = [c for c in TRIGGERS if c in canales]
+    cfg = dict(cfg_sensores or {})
+
     titles = []
+    sensores_nombres = {"ch2": "HFCT", "ch3": "Vivaldi", "ch4": "Bioinspirada"}
     for c in canales:
         if c == "ch1":
             ancla_txt = f" (Ancla {referencia_nombre} = {ancla_us:.3f} µs)" if ancla_us is not None else ""
             titles.append(f"CH1 — Impulso de Referencia{ancla_txt}")
         else:
-            foco_txt = " ★ CANAL ACTIVO" if c == canal else ""
-            titles.append(f"{c.upper()} — Sensor{foco_txt}")
+            s_nom = sensores_nombres.get(c, "Sensor")
+            foco_txt = " ★ CANAL ACTIVO" if c == canal and canal != "todos" else ""
+            titles.append(f"{c.upper()} — {s_nom}{foco_txt}")
 
     fig = make_subplots(
         rows=len(canales), cols=1,
@@ -61,9 +91,12 @@ def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
         subplot_titles=titles,
     )
 
+    # 1. Cargar señales y agregar PRIMERO las trazas Scattergl para inicializar los subplots
+    datos_canales = {}
     for i, c in enumerate(canales, start=1):
         fig.update_yaxes(title_text="mV", row=i, col=1)
         t, v = cargar_segmento(carpeta, c, seg, ventana=VENTANA_T10)
+        datos_canales[c] = (t, v)
         color = _COLORES_CANALES.get(c, "#2563eb")
 
         if v.size > 0:
@@ -76,6 +109,38 @@ def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
                 ),
                 row=i, col=1,
             )
+
+    # 2. Agregar líneas de umbral horizontales EDITABLES (+u) para trigs_presentes.
+    # Al estar ya inicializados los subplots por las trazas, Plotly crea shapes[0], shapes[1], shapes[2]
+    # garantizando el orden exacto para umbrales_desde_relayout.
+    u_canales = {}
+    for ch in trigs_presentes:
+        fila = canales.index(ch) + 1
+        cfg_ch = cfg.get(ch, {})
+        if cfg_ch.get("umbral") is not None:
+            u_c = float(cfg_ch["umbral"])
+        elif ch == canal and umbral is not None:
+            u_c = float(umbral)
+        else:
+            u_c = float(umbral_defecto(carpeta, ch, seg=seg))
+        u_canales[ch] = u_c
+
+        color_u = _COLORES_CANALES.get(ch, "#dc2626")
+        ancho_u = 1.8
+        dash_u = "dash"
+        label_u = f"u_{ch} = {u_c:.2f} mV"
+
+        fig.add_hline(
+            y=u_c, row=fila, col=1,
+            line=dict(color=color_u, width=ancho_u, dash=dash_u),
+            annotation_text=label_u,
+            annotation_position="top left",
+            editable=True,
+        )
+
+    # 3. Agregar líneas verticales (ancla y t_min), marcas de arribo y anotaciones
+    for i, c in enumerate(canales, start=1):
+        t, v = datos_canales.get(c, (np.array([]), np.array([])))
 
         # Línea vertical de ancla de impulso (t10 u O1) visible en todos los subplots
         if ancla_us is not None:
@@ -98,38 +163,16 @@ def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
             continue
 
         # Canales sensores (CH2, CH3, CH4)
-        if tmin is not None:
-            fig.add_vline(x=tmin, row=i, col=1, line=dict(color="#94a3b8", width=1, dash="dash"))
+        cfg_c = cfg.get(c, {})
+        tmin_c = float(cfg_c.get("tmin", tmin if tmin is not None else 0.15))
+        u_c = u_canales.get(c, float(umbral_defecto(carpeta, c, seg=seg)))
 
-        es_foco = (c == canal)
-        if es_foco:
-            u_c = float(umbral)
-            color_u = "#dc2626"
-            ancho_u = 2.0
-            dash_u = "dash"
-            label_u = f"u_{c} = {u_c:.2f} mV"
-        else:
-            u_c = float(umbral_defecto(carpeta, c, seg=seg))
-            color_u = color
-            ancho_u = 1.2
-            dash_u = "dot"
-            label_u = f"u_{c} = {u_c:.2f} mV"
+        # Línea vertical de t_mín independiente por canal
+        fig.add_vline(x=tmin_c, row=i, col=1, line=dict(color="#94a3b8", width=1, dash="dash"))
 
-        # Línea de umbral horizontal
-        fig.add_hline(
-            y=u_c, row=i, col=1,
-            line=dict(color=color_u, width=ancho_u, dash=dash_u),
-            annotation_text=label_u,
-            annotation_position="top left",
-            editable=es_foco,
-        )
-
-        # Arribo detectado
-        if es_foco:
-            ta = t_arr_us
-        else:
-            dist_m = _muestras(carpeta, c, dist_us) or 1
-            ta = t_arribo(t, v, u_c, dist_m, tmin) if v.size > 0 else None
+        # Detección de arribo independiente
+        dist_m = _muestras(carpeta, c, dist_us) or 1
+        ta = t_arribo(t, v, u_c, dist_m, tmin_c) if v.size > 0 else None
 
         tlag_str = "—"
         if ta is not None and v.size > 0:
@@ -170,7 +213,7 @@ def figura_canal(carpeta: str, canal: str, seg: int, umbral: float,
         margin=dict(t=50, b=40, l=55, r=25),
         plot_bgcolor="white", paper_bgcolor="white",
         showlegend=False,
-        uirevision=f"{carpeta}|{seg}",
+        uirevision=f"{carpeta}",
     )
     return fig
 
@@ -258,18 +301,28 @@ def figura_impulso_iec(carpeta: str, seg: int, res_iec: dict) -> go.Figure:
     return fig
 
 
-def figura_dispersion_lag(resultados: dict) -> go.Figure:
+def figura_dispersion_lag(resultados: dict, canal: str = "") -> go.Figure:
     """Subplots (1x2): Dispersión de t_lag por segmento e Histograma de frecuencias."""
+    ch = (canal or resultados.get("canal", "ch4")).lower()
+    sensores_map = {"ch2": "HFCT", "ch3": "Vivaldi", "ch4": "Bioinspirada"}
+    sensor_nom = sensores_map.get(ch, ch.upper())
+
     fig = make_subplots(
         rows=1, cols=2, shared_yaxes=True,
         column_widths=[0.7, 0.3], horizontal_spacing=0.03,
-        subplot_titles=["Retardo instrumental t_lag por disparo", "Distribución"]
+        subplot_titles=[f"Retardo t_lag por disparo — {ch.upper()} ({sensor_nom})", "Distribución"]
     )
     if not resultados:
-        fig.update_layout(height=320, plot_bgcolor="white", paper_bgcolor="white")
+        fig.update_layout(
+            height=330, plot_bgcolor="white", paper_bgcolor="white",
+            annotations=[dict(
+                text=f"Sin calibración para {ch.upper()} ({sensor_nom}). Pulsa ▶ Calcular Retardo.",
+                xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+                font=dict(size=12, color="#64748b")
+            )]
+        )
         return fig
 
-    ch = resultados.get("canal", "ch")
     color = _COLORES_CANALES.get(ch, "#2563eb")
     segs = np.asarray(resultados.get("segs", []))
     t_lag_us = np.asarray(resultados.get("t_lag", []), dtype=np.float64)
@@ -326,9 +379,9 @@ def figura_dispersion_lag(resultados: dict) -> go.Figure:
     fig.update_xaxes(title_text="Conteo", row=1, col=2)
 
     fig.update_layout(
-        height=320, margin=dict(t=40, b=40, l=50, r=20),
+        height=330, margin=dict(t=45, b=55, l=50, r=20),
         plot_bgcolor="white", paper_bgcolor="white",
-        legend=dict(orientation="h", y=1.12, x=0),
+        legend=dict(orientation="h", y=-0.22, x=0.5, xanchor="center"),
     )
     return fig
 

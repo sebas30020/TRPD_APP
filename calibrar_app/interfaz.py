@@ -126,7 +126,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                     html.Div(
                         style={
                             "display": "grid",
-                            "gridTemplateColumns": "2fr 1fr 1.5fr 1fr",
+                            "gridTemplateColumns": "2.2fr 1.8fr 1fr",
                             "gap": "16px",
                             "alignItems": "center",
                             "marginBottom": "12px",
@@ -140,22 +140,6 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                     value=carpeta_inicial or (mediciones[0] if mediciones else ""),
                                     clearable=False,
                                     style={"marginTop": "4px", "fontSize": "13px"},
-                                ),
-                            ]),
-                            html.Div([
-                                html.Label("Canal Sensor:", style={"fontWeight": "600", "fontSize": "13px"}),
-                                dcc.RadioItems(
-                                    id="canal",
-                                    options=[
-                                        {"label": " CH2 (HFCT)", "value": "ch2"},
-                                        {"label": " CH3 (Vivaldi)", "value": "ch3"},
-                                        {"label": " CH4 (Bioinspirada)", "value": "ch4"},
-                                        {"label": " Todos los Canales", "value": "todos"},
-                                    ],
-                                    value="ch4",
-                                    inline=True,
-                                    inputStyle={"marginRight": "4px", "marginLeft": "8px"},
-                                    style={"marginTop": "8px", "fontSize": "13px"},
                                 ),
                             ]),
                             html.Div([
@@ -184,12 +168,81 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                         ],
                     ),
 
-                    # Subfila de Parámetros y Segmento
+                    # Fila Multi-Trigger: Controles independientes por canal (CH2, CH3, CH4)
+                    html.Div(
+                        style={
+                            "display": "flex", "gap": "10px", "alignItems": "center",
+                            "padding": "8px 12px", "backgroundColor": "#f8fafc",
+                            "border": "1px solid #e2e8f0", "borderRadius": "6px",
+                            "marginBottom": "12px", "flexWrap": "wrap",
+                        },
+                        children=[
+                            html.Span("🎯 Triggers por Canal:",
+                                      style={"fontSize": "12px", "fontWeight": "bold", "color": "#1e293b", "marginRight": "4px"}),
+                            # CH2: HFCT
+                            html.Div(
+                                style={
+                                    "display": "flex", "alignItems": "center", "gap": "6px",
+                                    "padding": "4px 10px", "backgroundColor": "white",
+                                    "border": "1px solid #bfdbfe", "borderLeft": "4px solid #2563eb",
+                                    "borderRadius": "4px", "fontSize": "12px",
+                                },
+                                children=[
+                                    html.Span("CH2 (HFCT):", style={"fontWeight": "bold", "color": "#1d4ed8"}),
+                                    html.Span("u [mV]:"),
+                                    dcc.Input(id="umbral_ch2", type="number", step=0.1, style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
+                                    html.Span("t_mín [µs]:"),
+                                    dcc.Input(id="tmin_ch2", type="number", step=0.005, value=0.15, style={"width": "65px", "fontSize": "12px", "padding": "2px 4px"}),
+                                ],
+                            ),
+                            # CH3: Vivaldi
+                            html.Div(
+                                style={
+                                    "display": "flex", "alignItems": "center", "gap": "6px",
+                                    "padding": "4px 10px", "backgroundColor": "white",
+                                    "border": "1px solid #a7f3d0", "borderLeft": "4px solid #059669",
+                                    "borderRadius": "4px", "fontSize": "12px",
+                                },
+                                children=[
+                                    html.Span("CH3 (Vivaldi):", style={"fontWeight": "bold", "color": "#047857"}),
+                                    html.Span("u [mV]:"),
+                                    dcc.Input(id="umbral_ch3", type="number", step=0.1, style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
+                                    html.Span("t_mín [µs]:"),
+                                    dcc.Input(id="tmin_ch3", type="number", step=0.005, value=0.15, style={"width": "65px", "fontSize": "12px", "padding": "2px 4px"}),
+                                ],
+                            ),
+                            # CH4: Bioinspirada
+                            html.Div(
+                                style={
+                                    "display": "flex", "alignItems": "center", "gap": "6px",
+                                    "padding": "4px 10px", "backgroundColor": "white",
+                                    "border": "1px solid #fde68a", "borderLeft": "4px solid #d97706",
+                                    "borderRadius": "4px", "fontSize": "12px",
+                                },
+                                children=[
+                                    html.Span("CH4 (Bioinspirada):", style={"fontWeight": "bold", "color": "#d97706"}),
+                                    html.Span("u [mV]:"),
+                                    dcc.Input(id="umbral_ch4", type="number", step=0.1, style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
+                                    html.Span("t_mín [µs]:"),
+                                    dcc.Input(id="tmin_ch4", type="number", step=0.005, value=0.15, style={"width": "65px", "fontSize": "12px", "padding": "2px 4px"}),
+                                ],
+                            ),
+                            # Inputs ocultos para retrocompatibilidad con tests existentes
+                            html.Div(style={"display": "none"}, children=[
+                                dcc.Input(id="canal", value="todos"),
+                                dcc.Input(id="ucal", type="number"),
+                                dcc.Input(id="dtcal", type="number", value=0.035),
+                                dcc.Input(id="tmincal", type="number", value=0.15),
+                            ]),
+                        ],
+                    ),
+
+                    # Subfila de Segmento y Botones de Acción
                     html.Div(
                         style={
                             "display": "grid",
-                            "gridTemplateColumns": "2.5fr 1fr 1fr 1fr 2.5fr",
-                            "gap": "12px",
+                            "gridTemplateColumns": "2fr 3fr",
+                            "gap": "16px",
                             "alignItems": "center",
                             "backgroundColor": "#f1f5f9",
                             "padding": "10px 14px",
@@ -211,35 +264,6 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                     step=1,
                                     value=1,
                                     marks={1: "1", 10: "10", 25: "25", 50: "50"},
-                                ),
-                            ]),
-                            html.Div([
-                                html.Label("Umbral u_cal [mV]:", style={"fontWeight": "600", "fontSize": "12px"}),
-                                dcc.Input(
-                                    id="ucal",
-                                    type="number",
-                                    step=0.1,
-                                    style={"width": "100%", "padding": "4px", "borderRadius": "4px", "border": "1px solid #cbd5e1"},
-                                ),
-                            ]),
-                            html.Div([
-                                html.Label("Δt [µs]:", style={"fontWeight": "600", "fontSize": "12px"}),
-                                dcc.Input(
-                                    id="dtcal",
-                                    type="number",
-                                    value=0.035,
-                                    step=0.005,
-                                    style={"width": "100%", "padding": "4px", "borderRadius": "4px", "border": "1px solid #cbd5e1"},
-                                ),
-                            ]),
-                            html.Div([
-                                html.Label("t_mín [µs]:", style={"fontWeight": "600", "fontSize": "12px"}),
-                                dcc.Input(
-                                    id="tmincal",
-                                    type="number",
-                                    value=0.15,
-                                    step=0.005,
-                                    style={"width": "100%", "padding": "4px", "borderRadius": "4px", "border": "1px solid #cbd5e1"},
                                 ),
                             ]),
                             html.Div(
@@ -267,7 +291,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                         children=[
                             html.H3("📊 Inspección Multicanal Sincronizada (CH1 Impulso vs CH2–CH4 Sensores)",
                                     style={"fontSize": "15px", "margin": "0", "color": "#0f172a"}),
-                            html.Span("💡 Tip: Arrastra la línea roja punteada del canal activo con el ratón para ajustar u_cal en tiempo real.",
+                            html.Span("💡 Tip: Arrastra la línea horizontal de umbral con el ratón en cualquier canal (CH2–CH4) para ajustar su trigger en tiempo real.",
                                       style={"fontSize": "12px", "color": "#2563eb", "fontWeight": "500"}),
                         ],
                     ),
@@ -289,7 +313,24 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                     html.Div(
                         style=ESTILO_CARD,
                         children=[
-                            html.H3("⏱️ Dispersión del Retardo (t_lag)", style={"fontSize": "15px", "margin": "0 0 10px 0"}),
+                            html.Div(
+                                style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "8px"},
+                                children=[
+                                    html.H3("⏱️ Dispersión del Retardo (t_lag)", style={"fontSize": "15px", "margin": "0", "color": "#0f172a"}),
+                                    dcc.RadioItems(
+                                        id="canal_dispersion",
+                                        options=[
+                                            {"label": " CH2 (HFCT)", "value": "ch2"},
+                                            {"label": " CH3 (Vivaldi)", "value": "ch3"},
+                                            {"label": " CH4 (Bioinspirada)", "value": "ch4"},
+                                        ],
+                                        value="ch4",
+                                        inline=True,
+                                        inputStyle={"marginRight": "3px", "marginLeft": "8px"},
+                                        style={"fontSize": "12px", "fontWeight": "600"},
+                                    ),
+                                ],
+                            ),
                             dcc.Loading(dcc.Graph(id="grafico_dispersion", config={"displayModeBar": True})),
                         ],
                     ),
