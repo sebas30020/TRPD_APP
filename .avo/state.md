@@ -1,29 +1,31 @@
 # Estado del Proyecto TRPD_APP (Harness AVO)
-*Última actualización: 2026-09-21 | Intento activo: fix-missing-horizontal-trigger-lines*
+*Última actualización: 2026-09-21 | Intento completado: explorador-archivos-gui (e0ba7bea)*
 
 ## 1. Objetivo Inmediato y Criterio de Éxito
-- **Meta:** Restaurar la visibilidad y capacidad interactiva de arrastre de las líneas horizontales de umbral de trigger en los subplots de los canales sensores (CH2, CH3, CH4) en `calibrar_app`.
-- **Métrica objetivo:** `tests_fallidos = 0`, líneas de umbral horizontales renderizadas (`shapes[0..2]`) con `editable=True`.
-- **Línea base actual:** 38 tests pasando en la suite automatizada `pytest`.
+- **Meta:** Implementar un explorador interactivo de archivos/carpetas en servidor dentro de `app.py` y `calibrar_app` para permitir la selección de directorios arbitrarios de medición en disco.
+- **Métrica objetivo:** `tests_fallidos = 0`, navegación fluida en frontend Dash y preservación completa de la compatibilidad hacia atrás.
+- **Línea base actual:** 45 tests pasando en la suite automatizada `pytest` (0 fallos).
 
 ## 2. Enfoque Actual y Linaje
-- **Tag de enfoque:** `fix-missing-horizontal-trigger-lines`
-- **ID Padre:** `e319b48c`
-- **Hipótesis activa:** Al construir una figura con `make_subplots` en Plotly, llamar a `fig.add_hline(..., row=i, col=1)` antes de que dicho subplot contenga al menos una traza provoca que Plotly descarte silenciosamente la figura al no poder resolver el sistema de coordenadas de los ejes. Al cargar y trazar primero las señales de los canales y随后 agregar `fig.add_hline` con `editable=True`, las líneas horizontales se dibujan fielmente en la posición exacta y vuelven a ser arrastrables por el usuario.
+- **Tag de enfoque:** `explorador-archivos-gui`
+- **ID Padre:** `7b82e14a` -> **ID Actual:** `e0ba7bea`
+- **Hipótesis verificada:** Un panel colapsable interactivo en Dash que liste subcarpetas del servidor mediante `os.listdir` permite seleccionar directorios de medición tanto relativos a `MEDICIONES/` como externos/absolutos, sin requerir diálogos nativos del SO ni alterar las funciones de lectura de señales.
 
 ## 3. Estado de la Arquitectura / Hallazgos
-- **Reordenamiento de Renderizado en `calibrar_app/figuras.py`:**
-  1. **Trazas de señal primero:** Cada canal agrega su `Scattergl(x=t, y=v)`.
-  2. **Líneas de umbral horizontales:** `fig.add_hline` para cada sensor de `trigs_presentes` (CH2, CH3, CH4) con `editable=True`, `dash="dash"`, ancho 1.8 px y etiqueta `u_{ch} = ... mV`.
-  3. **Líneas verticales y marcas:** Se agregan `ancla_us` y `tmin` vlines, así como la marca de arribo interpolada `X` y las anotaciones tipo badge.
-- **Tip interactivo actualizado:** En `interfaz.py` ahora se indica formalmente que cualquier línea de umbral puede ser arrastrada para calibrar su trigger.
-- **Suite de Pruebas:** Agregado `test_multicanal_figura_canal_lineas_umbral_editables` en `tests/test_calibrar_gui.py`. 38 tests aprobados al 100%.
-- **Servidor Activo:** Proceso en puerto 8051 (PID en ejecución) respondiendo `HTTP 200 OK`.
+- **`app.py` (Puerto 8050):**
+  1. `listar_subcarpetas(ruta)`: función con ordenamiento natural que detecta si un directorio contiene mediciones (`.mat`/`_CHAN_RE`).
+  2. Componentes UI: `dcc.Store(id="explorador_ruta_actual")`, botón `📂 Examinar…` (`btn_examinar`) y panel colapsable `explorador_panel` con botones de navegación, listado de subcarpetas y botones de confirmar/cancelar.
+  3. Callbacks: `toggle_explorador`, `navegar_explorador` y `renderizar_explorador`.
+- **`calibrar_app` (Puerto 8051):**
+  1. `calibrar_app/datos.py`: `listar_subcarpetas` exportada y compartida.
+  2. `calibrar_app/interfaz.py`: Integración de `btn_examinar`, `explorador_ruta_actual` y `explorador_panel`.
+  3. `calibrar_app/main.py`: Callbacks equivalentes con soporte multi-carpeta.
+- **Suite de Pruebas:**
+  - `tests/test_explorador_archivos.py` (4 tests cubriendo listado, navegación y callbacks de ambas aplicaciones).
+  - Suite completa: 45 tests aprobados al 100%. Verificador `.avo/verify.sh` retornando `pass: true`.
 
 ## 4. Próxima Acción Inmediata
-- [x] Corregir orden de construcción en `figura_canal` (`figuras.py`).
-- [x] Asegurar `editable=True` en `add_hline`.
-- [x] Actualizar tip en `interfaz.py`.
-- [x] Añadir prueba de regresión unitaria en `test_calibrar_gui.py` (38 tests).
-- [x] Ejecutar `.avo/verify.sh` y registrar commit `#7b82e14a` en `.avo/ledger.jsonl`.
-- [x] Reiniciar servidor en puerto 8051 y verificar respuesta HTTP 200.
+- [x] Ejecutar e implementar plan `archivos_md/plan_explorador_archivos.md`.
+- [x] Crear suite de pruebas de regresión `tests/test_explorador_archivos.py`.
+- [x] Ejecutar `.avo/verify.sh` con salida exitosa (`pass: true`).
+- [x] Registrar entrada en `.avo/ledger.jsonl`.

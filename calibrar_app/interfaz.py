@@ -57,6 +57,17 @@ ESTILO_BOTON_SUCCESS = {
     "cursor": "pointer",
 }
 
+ESTILO_BOTON_STEPPER = {
+    "backgroundColor": "#475569",
+    "color": "white",
+    "border": "none",
+    "borderRadius": "6px",
+    "padding": "4px 10px",
+    "fontWeight": "600",
+    "fontSize": "13px",
+    "cursor": "pointer",
+}
+
 
 def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
     """Construye el árbol de componentes del layout de calibrar_app."""
@@ -68,6 +79,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
             # Stores
             dcc.Store(id="resultado_store", data={}),
             dcc.Store(id="iec_store", data={}),
+            dcc.Store(id="explorador_ruta_actual"),
 
             # Cabecera
             html.Div(
@@ -133,7 +145,16 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                         },
                         children=[
                             html.Div([
-                                html.Label("Medición:", style={"fontWeight": "600", "fontSize": "13px"}),
+                                html.Div(
+                                    style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"},
+                                    children=[
+                                        html.Label("Medición:", style={"fontWeight": "600", "fontSize": "13px"}),
+                                        html.Button("📂 Examinar…", id="btn_examinar", n_clicks=0,
+                                                    style={"backgroundColor": "#475569", "color": "white", "border": "none",
+                                                           "borderRadius": "4px", "padding": "2px 8px", "cursor": "pointer",
+                                                           "fontSize": "12px"}),
+                                    ],
+                                ),
                                 dcc.Dropdown(
                                     id="carpeta",
                                     options=med_options,
@@ -251,19 +272,22 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                         children=[
                             html.Div([
                                 html.Div(
-                                    style={"display": "flex", "justifyContent": "space-between"},
+                                    style={"display": "flex", "justifyContent": "space-between", "marginBottom": "4px"},
                                     children=[
                                         html.Label("Inspeccionar Disparo / Segmento:", style={"fontWeight": "600", "fontSize": "12px"}),
                                         html.Span(id="label_segmento", style={"fontWeight": "700", "fontSize": "12px", "color": "#2563eb"}),
                                     ]
                                 ),
-                                dcc.Slider(
-                                    id="segmento",
-                                    min=1,
-                                    max=50,
-                                    step=1,
-                                    value=1,
-                                    marks={1: "1", 10: "10", 25: "25", 50: "50"},
+                                html.Div(
+                                    style={"display": "flex", "alignItems": "center", "gap": "6px"},
+                                    children=[
+                                        html.Button("◀", id="segmento_prev", n_clicks=0, style=ESTILO_BOTON_STEPPER),
+                                        dcc.Input(id="segmento", type="number", min=1, max=50, step=1, value=1,
+                                                  debounce=True, style={"width": "64px", "textAlign": "center"}),
+                                        html.Span(id="segmento_total", children="/ 50",
+                                                  style={"fontSize": "12px", "color": "#64748b"}),
+                                        html.Button("▶", id="segmento_next", n_clicks=0, style=ESTILO_BOTON_STEPPER),
+                                    ],
                                 ),
                             ]),
                             html.Div(
@@ -274,6 +298,53 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                     html.Button("💾 Guardar YAML", id="btn_guardar", style=ESTILO_BOTON_SUCCESS, n_clicks=0),
                                 ],
                             ),
+                        ],
+                    ),
+                ],
+            ),
+
+            # Panel Explorador de Carpetas
+            html.Div(
+                id="explorador_panel",
+                hidden=True,
+                style={
+                    **ESTILO_CARD,
+                    "backgroundColor": "#f8fafc",
+                    "border": "1px solid #cbd5e1",
+                    "marginBottom": "16px",
+                },
+                children=[
+                    html.Div(
+                        style={"display": "flex", "alignItems": "center", "gap": "10px", "marginBottom": "10px"},
+                        children=[
+                            html.Button("⬆ Subir", id="explorador_subir", n_clicks=0,
+                                        style={"backgroundColor": "#64748b", "color": "white", "border": "none",
+                                               "borderRadius": "4px", "padding": "4px 10px", "cursor": "pointer"}),
+                            html.Span(id="explorador_ruta_label", style={"fontWeight": "bold", "fontSize": "13px",
+                                                                         "color": "#1e293b", "wordBreak": "break-all"}),
+                        ],
+                    ),
+                    html.Div(
+                        id="explorador_listado",
+                        style={
+                            "maxHeight": "240px",
+                            "overflowY": "auto",
+                            "border": "1px solid #e2e8f0",
+                            "borderRadius": "4px",
+                            "backgroundColor": "#ffffff",
+                            "padding": "6px",
+                            "marginBottom": "10px",
+                        },
+                    ),
+                    html.Div(
+                        style={"display": "flex", "gap": "10px"},
+                        children=[
+                            html.Button("Seleccionar esta carpeta", id="explorador_confirmar", disabled=True, n_clicks=0,
+                                        style={"backgroundColor": "#2563eb", "color": "white", "fontWeight": "600",
+                                               "border": "none", "borderRadius": "4px", "padding": "6px 14px", "cursor": "pointer"}),
+                            html.Button("Cancelar", id="explorador_cancelar", n_clicks=0,
+                                        style={"backgroundColor": "#94a3b8", "color": "white",
+                                               "border": "none", "borderRadius": "4px", "padding": "6px 14px", "cursor": "pointer"}),
                         ],
                     ),
                 ],

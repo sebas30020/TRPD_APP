@@ -118,6 +118,30 @@ def listar_mediciones() -> list[str]:
     return sorted(mediciones, key=_orden_natural)
 
 
+def listar_subcarpetas(ruta: str) -> list[tuple[str, str, bool]]:
+    """(nombre, ruta_absoluta, tiene_h5) de las subcarpetas directas de `ruta`."""
+    if not ruta or not os.path.isdir(ruta):
+        return []
+    items = []
+    try:
+        nombres = sorted(os.listdir(ruta), key=_orden_natural)
+    except Exception:
+        return []
+    for nombre in nombres:
+        p = os.path.join(ruta, nombre)
+        if os.path.isdir(p):
+            try:
+                archivos = os.listdir(p)
+                tiene_h5 = any(
+                    _CHAN_RE.match(f) for f in archivos
+                    if os.path.isfile(os.path.join(p, f))
+                )
+            except Exception:
+                tiene_h5 = False
+            items.append((nombre, p, tiene_h5))
+    return items
+
+
 def _meta(carpeta: str, canal: str) -> dict:
     """Lee metadatos de escala y número de segmentos del archivo HDF5."""
     with h5py.File(_ruta(carpeta, canal), "r") as f:

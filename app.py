@@ -21,7 +21,7 @@ import scipy.fft as sfft
 import yaml
 from plotly.subplots import make_subplots
 from scipy.signal import find_peaks, butter, sosfiltfilt, welch
-from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, ctx
+from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, ctx, ALL
 
 from generate_metadata import plantilla_metadata, inferir_parametros, inferir_diametros
 
@@ -146,6 +146,29 @@ def listar_mediciones():
                 else:
                     mediciones.add(stem)
     return sorted(mediciones, key=_orden_natural)
+
+
+def listar_subcarpetas(ruta):
+    """(nombre, ruta_absoluta, tiene_h5) de las subcarpetas directas de `ruta`."""
+    if not ruta or not os.path.isdir(ruta):
+        return []
+    items = []
+    try:
+        nombres = sorted(os.listdir(ruta), key=_orden_natural)
+    except Exception:
+        return []
+    for nombre in nombres:
+        p = os.path.join(ruta, nombre)
+        if os.path.isdir(p):
+            try:
+                tiene_h5 = any(
+                    _CHAN_RE.match(f) for f in os.listdir(p)
+                    if os.path.isfile(os.path.join(p, f))
+                )
+            except Exception:
+                tiene_h5 = False
+            items.append((nombre, p, tiene_h5))
+    return items
 
 
 def _meta(carpeta, canal):
@@ -1234,14 +1257,10 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
         x_ref = t_ref[::paso] - (t10_ref or 0.0)
         v_r = v_ref[::paso]
         frac = v_r / (float(np.max(np.abs(v_r))) or 1.0)  # adimensional, -1..1
-        if es_vpp:
-            esc = float(np.percentile(y_val, 95)) if y_val.size >= 20 else (float(np.max(y_val)) if y_val.size else 1.0)
-            y_r, cd_ref = frac * esc, frac
-            nombre = "CH1 promedio (forma normalizada)"
-            htmpl = "t_abs=%{x:.4f} µs<br>%{customdata:.1%} de la cresta CH1<extra>CH1</extra>"
-        else:
-            y_r, cd_ref = v_r, None
-            nombre, htmpl = "CH1 promedio (ref.)", "t_abs=%{x:.4f} µs<br>%{y:.2f} mV<extra>CH1</extra>"
+        esc = float(np.percentile(y_val, 95)) if y_val.size >= 20 else (float(np.max(y_val)) if y_val.size else 1.0)
+        y_r, cd_ref = frac * esc, frac
+        nombre = "CH1 promedio (forma normalizada)"
+        htmpl = "t_abs=%{x:.4f} µs<br>%{customdata:.1%} de la cresta CH1<extra>CH1</extra>"
         fig.add_trace(go.Scattergl(x=x_ref, y=y_r, customdata=cd_ref, mode="lines",
                                    name=nombre, line=dict(color="#999", width=1),
                                    opacity=0.6, hovertemplate=htmpl))
@@ -1283,6 +1302,7 @@ app.layout = html.Div(
         dcc.Store(id="seleccion", data=[]),
         dcc.Store(id="densidad_store", data=[]),
         dcc.Store(id="calibracion_store"),
+        dcc.Store(id="explorador_ruta_actual"),
         html.Div(
             className="header",
             children=[
@@ -1299,8 +1319,21 @@ app.layout = html.Div(
                     options=[{"label": c, "value": c} for c in MEDICIONES_INICIAL],
                     value=CARPETA_INICIAL, clearable=False, style={"width": "260px"},
                 ),
+                html.Button("📂 Examinar…", id="btn_examinar", n_clicks=0,
+                            style={"backgroundColor": "#475569", "color": "white", "border": "none",
+                                   "borderRadius": "4px", "padding": "5px 10px", "cursor": "pointer",
+                                   "fontSize": "13px"}),
                 html.Label("Segmento:"),
-                dcc.Dropdown(id="segmento", value=1, clearable=False, style={"width": "110px"}),
+                html.Button("◀", id="segmento_prev", n_clicks=0,
+                            style={"backgroundColor": "#64748b", "color": "white", "border": "none",
+                                   "borderRadius": "4px", "padding": "2px 10px", "cursor": "pointer"}),
+                dcc.Input(id="segmento", type="number", min=1, max=1, step=1, value=1,
+                          debounce=True, style={"width": "64px", "textAlign": "center"}),
+                html.Span(id="segmento_total", children="/ 1",
+                          style={"fontSize": "12px", "color": "#64748b"}),
+                html.Button("▶", id="segmento_next", n_clicks=0,
+                            style={"backgroundColor": "#64748b", "color": "white", "border": "none",
+                                   "borderRadius": "4px", "padding": "2px 10px", "cursor": "pointer"}),
                 html.Label("Trigger activo:"),
                 dcc.Dropdown(
                     id="canal",
@@ -1316,6 +1349,52 @@ app.layout = html.Div(
                 html.Label("f máx ST (MHz):"),
                 dcc.Input(id="st_fmax", type="number", value=ST_FMAX_MHZ, min=1,
                           step="any", debounce=True, style={"width": "80px"}),
+            ],
+        ),
+        html.Div(
+            id="explorador_panel",
+            hidden=True,
+            style={
+                "margin": "0 12px 10px 12px",
+                "padding": "12px",
+                "backgroundColor": "#f8fafc",
+                "border": "1px solid #cbd5e1",
+                "borderRadius": "6px",
+            },
+            children=[
+                html.Div(
+                    style={"display": "flex", "alignItems": "center", "gap": "10px", "marginBottom": "10px"},
+                    children=[
+                        html.Button("⬆ Subir", id="explorador_subir", n_clicks=0,
+                                    style={"backgroundColor": "#64748b", "color": "white", "border": "none",
+                                           "borderRadius": "4px", "padding": "4px 10px", "cursor": "pointer"}),
+                        html.Span(id="explorador_ruta_label", style={"fontWeight": "bold", "fontSize": "13px",
+                                                                     "color": "#1e293b", "wordBreak": "break-all"}),
+                    ],
+                ),
+                html.Div(
+                    id="explorador_listado",
+                    style={
+                        "maxHeight": "240px",
+                        "overflowY": "auto",
+                        "border": "1px solid #e2e8f0",
+                        "borderRadius": "4px",
+                        "backgroundColor": "#ffffff",
+                        "padding": "6px",
+                        "marginBottom": "10px",
+                    },
+                ),
+                html.Div(
+                    style={"display": "flex", "gap": "10px"},
+                    children=[
+                        html.Button("Seleccionar esta carpeta", id="explorador_confirmar", disabled=True, n_clicks=0,
+                                    style={"backgroundColor": "#2563eb", "color": "white", "fontWeight": "600",
+                                           "border": "none", "borderRadius": "4px", "padding": "6px 14px", "cursor": "pointer"}),
+                        html.Button("Cancelar", id="explorador_cancelar", n_clicks=0,
+                                    style={"backgroundColor": "#94a3b8", "color": "white",
+                                           "border": "none", "borderRadius": "4px", "padding": "6px 14px", "cursor": "pointer"}),
+                    ],
+                ),
             ],
         ),
         html.Div(
@@ -1630,15 +1709,137 @@ app.layout = html.Div(
 
 
 @app.callback(
-    Output("segmento", "options"),
+    Output("explorador_panel", "hidden"),
+    Output("explorador_ruta_actual", "data"),
+    Output("carpeta", "value"),
+    Output("carpeta", "options"),
+    Input("btn_examinar", "n_clicks"),
+    Input("explorador_cancelar", "n_clicks"),
+    Input("explorador_confirmar", "n_clicks"),
+    State("explorador_ruta_actual", "data"),
+    State("carpeta", "value"),
+    State("carpeta", "options"),
+    prevent_initial_call=True,
+)
+def toggle_explorador(n_abrir, n_cancelar, n_confirmar, ruta_actual, carpeta_val, opciones):
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if trig == "btn_examinar":
+        inicio = _dir_medicion(carpeta_val) if carpeta_val else None
+        if not inicio or not os.path.isdir(inicio):
+            inicio = os.path.dirname(MEDICIONES)
+        return False, inicio, no_update, no_update
+    if trig == "explorador_cancelar":
+        return True, no_update, no_update, no_update
+    if trig == "explorador_confirmar":
+        if not ruta_actual:
+            return no_update, no_update, no_update, no_update
+        opts = list(opciones or [])
+        if not any(o.get("value") == ruta_actual for o in opts):
+            opts = opts + [{"label": ruta_actual, "value": ruta_actual}]
+        return True, no_update, ruta_actual, opts
+    return no_update, no_update, no_update, no_update
+
+
+@app.callback(
+    Output("explorador_ruta_actual", "data", allow_duplicate=True),
+    Input("explorador_subir", "n_clicks"),
+    Input({"type": "explorador_ir", "ruta": ALL}, "n_clicks"),
+    State("explorador_ruta_actual", "data"),
+    prevent_initial_call=True,
+)
+def navegar_explorador(n_subir, n_subcarpetas, ruta_actual):
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if trig == "explorador_subir":
+        if ruta_actual:
+            padre = os.path.dirname(os.path.normpath(ruta_actual))
+            return padre if os.path.isdir(padre) else no_update
+        return no_update
+    if isinstance(trig, dict) and trig.get("type") == "explorador_ir":
+        return trig["ruta"]
+    return no_update
+
+
+@app.callback(
+    Output("explorador_listado", "children"),
+    Output("explorador_ruta_label", "children"),
+    Output("explorador_confirmar", "disabled"),
+    Input("explorador_ruta_actual", "data"),
+)
+def renderizar_explorador(ruta_actual):
+    if not ruta_actual or not os.path.isdir(ruta_actual):
+        return [], "", True
+    filas = []
+    for nombre, p, tiene_h5 in listar_subcarpetas(ruta_actual):
+        filas.append(html.Button(
+            f"{'📁✅ ' if tiene_h5 else '📁 '}{nombre}",
+            id={"type": "explorador_ir", "ruta": p},
+            n_clicks=0,
+            style={
+                "display": "block",
+                "width": "100%",
+                "textAlign": "left",
+                "backgroundColor": "transparent",
+                "border": "none",
+                "borderBottom": "1px solid #f1f5f9",
+                "padding": "6px 8px",
+                "cursor": "pointer",
+                "fontSize": "13px",
+                "color": "#1e293b",
+            },
+        ))
+    if not filas:
+        filas = [html.Div("(No hay subcarpetas)", style={"color": "#94a3b8", "fontStyle": "italic", "padding": "6px 8px"})]
+    try:
+        tiene_h5_aqui = any(
+            _CHAN_RE.match(f) for f in os.listdir(ruta_actual)
+            if os.path.isfile(os.path.join(ruta_actual, f))
+        )
+    except Exception:
+        tiene_h5_aqui = False
+    return filas, ruta_actual, not tiene_h5_aqui
+
+
+@app.callback(
     Output("segmento", "value"),
+    Output("segmento", "max"),
+    Output("segmento_total", "children"),
     Input("carpeta", "value"),
 )
 def actualizar_segmentos(carpeta):
     if not carpeta:
-        return [], None
-    n = n_segmentos(carpeta)
-    return [{"label": str(s), "value": s} for s in range(1, n + 1)], 1
+        return 1, 1, "/ 0"
+    n = max(1, n_segmentos(carpeta))
+    return 1, n, f"/ {n}"
+
+
+@app.callback(
+    Output("segmento", "value", allow_duplicate=True),
+    Input("segmento_prev", "n_clicks"),
+    Input("segmento_next", "n_clicks"),
+    Input("segmento", "value"),
+    State("segmento", "max"),
+    prevent_initial_call=True,
+)
+def mover_segmento(n_prev, n_next, valor, seg_max):
+    """Flechas anterior/siguiente y saneo del número tecleado, acotado a [1, max]."""
+    n_max = int(seg_max) if seg_max else 1
+    try:
+        actual = int(valor)
+    except (TypeError, ValueError):
+        actual = 1
+    trig = ctx.triggered_id
+    if trig == "segmento_prev":
+        return max(1, actual - 1)
+    if trig == "segmento_next":
+        return min(n_max, actual + 1)
+    nuevo = max(1, min(n_max, actual))
+    return nuevo if nuevo != valor else no_update
 
 
 @app.callback(

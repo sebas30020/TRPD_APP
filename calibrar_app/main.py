@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import numpy as np
-from dash import Dash, html, dcc, Input, Output, State, ctx, no_update
+from dash import Dash, html, dcc, Input, Output, State, ctx, no_update, ALL
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 RAIZ = os.path.abspath(os.path.join(AQUI, os.pardir))
@@ -21,8 +21,14 @@ from datos import (
     canales_presentes,
     cargar_segmento,
     umbral_defecto,
+    n_segmentos,
     _muestras,
     VENTANA_T10,
+    listar_subcarpetas,
+    _CHAN_RE,
+    _orden_natural,
+    _dir_medicion,
+    MEDICIONES,
 )
 from arribo import t_arribo, calibrar_retardo
 from referencia import (
@@ -62,11 +68,145 @@ app.layout = layout(mediciones_disponibles, carpeta_defecto)
 
 
 @app.callback(
+    Output("explorador_panel", "hidden"),
+    Output("explorador_ruta_actual", "data"),
+    Output("carpeta", "value"),
+    Output("carpeta", "options"),
+    Input("btn_examinar", "n_clicks"),
+    Input("explorador_cancelar", "n_clicks"),
+    Input("explorador_confirmar", "n_clicks"),
+    State("explorador_ruta_actual", "data"),
+    State("carpeta", "value"),
+    State("carpeta", "options"),
+    prevent_initial_call=True,
+)
+def toggle_explorador(n_abrir, n_cancelar, n_confirmar, ruta_actual, carpeta_val, opciones):
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if trig == "btn_examinar":
+        inicio = _dir_medicion(carpeta_val) if carpeta_val else None
+        if not inicio or not os.path.isdir(inicio):
+            inicio = os.path.dirname(MEDICIONES)
+        return False, inicio, no_update, no_update
+    if trig == "explorador_cancelar":
+        return True, no_update, no_update, no_update
+    if trig == "explorador_confirmar":
+        if not ruta_actual:
+            return no_update, no_update, no_update, no_update
+        opts = list(opciones or [])
+        if not any(o.get("value") == ruta_actual for o in opts):
+            opts = opts + [{"label": ruta_actual, "value": ruta_actual}]
+        return True, no_update, ruta_actual, opts
+    return no_update, no_update, no_update, no_update
+
+
+@app.callback(
+    Output("explorador_ruta_actual", "data", allow_duplicate=True),
+    Input("explorador_subir", "n_clicks"),
+    Input({"type": "explorador_ir", "ruta": ALL}, "n_clicks"),
+    State("explorador_ruta_actual", "data"),
+    prevent_initial_call=True,
+)
+def navegar_explorador(n_subir, n_subcarpetas, ruta_actual):
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if trig == "explorador_subir":
+        if ruta_actual:
+            padre = os.path.dirname(os.path.normpath(ruta_actual))
+            return padre if os.path.isdir(padre) else no_update
+        return no_update
+    if isinstance(trig, dict) and trig.get("type") == "explorador_ir":
+        return trig["ruta"]
+    return no_update
+
+
+@app.callback(
+    Output("explorador_listado", "children"),
+    Output("explorador_ruta_label", "children"),
+    Output("explorador_confirmar", "disabled"),
+    Input("explorador_ruta_actual", "data"),
+)
+def renderizar_explorador(ruta_actual):
+    if not ruta_actual or not os.path.isdir(ruta_actual):
+        return [], "", True
+    filas = []
+    for nombre, p, tiene_h5 in listar_subcarpetas(ruta_actual):
+        filas.append(html.Button(
+            f"{'📁✅ ' if tiene_h5 else '📁 '}{nombre}",
+            id={"type": "explorador_ir", "ruta": p},
+            n_clicks=0,
+            style={
+                "display": "block",
+                "width": "100%",
+                "textAlign": "left",
+                "backgroundColor": "transparent",
+                "border": "none",
+                "borderBottom": "1px solid #f1f5f9",
+                "padding": "6px 8px",
+                "cursor": "pointer",
+                "fontSize": "13px",
+                "color": "#1e293b",
+            },
+        ))
+    if not filas:
+        filas = [html.Div("(No hay subcarpetas)", style={"color": "#94a3b8", "fontStyle": "italic", "padding": "6px 8px"})]
+    try:
+        tiene_h5_aqui = any(
+            _CHAN_RE.match(f) for f in os.listdir(ruta_actual)
+            if os.path.isfile(os.path.join(ruta_actual, f))
+        )
+    except Exception:
+        tiene_h5_aqui = False
+    return filas, ruta_actual, not tiene_h5_aqui
+
+
+@app.callback(
     Output("label_segmento", "children"),
     Input("segmento", "value"),
 )
 def actualizar_label_segmento(seg: int) -> str:
-    return f"Disparo {seg}"
+    return f"Disparo {seg}" if seg else "—"
+
+
+@app.callback(
+    Output("segmento", "value"),
+    Output("segmento", "max"),
+    Output("segmento_total", "children"),
+    Input("carpeta", "value"),
+)
+def actualizar_rango_segmento(carpeta: str):
+    if not carpeta:
+        return 1, 1, "/ 0"
+    n = max(1, n_segmentos(carpeta))
+    return 1, n, f"/ {n}"
+
+
+@app.callback(
+    Output("segmento", "value", allow_duplicate=True),
+    Input("segmento_prev", "n_clicks"),
+    Input("segmento_next", "n_clicks"),
+    Input("segmento", "value"),
+    State("segmento", "max"),
+    prevent_initial_call=True,
+)
+def mover_segmento(n_prev, n_next, valor, seg_max):
+    """Flechas anterior/siguiente y saneo del número tecleado, acotado a [1, max]."""
+    n_max = int(seg_max) if seg_max else 1
+    try:
+        actual = int(valor)
+    except (TypeError, ValueError):
+        actual = 1
+    trig = ctx.triggered_id
+    if trig == "segmento_prev":
+        return max(1, actual - 1)
+    if trig == "segmento_next":
+        return min(n_max, actual + 1)
+    nuevo = max(1, min(n_max, actual))
+    return nuevo if nuevo != valor else no_update
 
 
 def sincronizar_umbral(relayout: dict | None, carpeta: str, canal: str, u_actual: float | None):
@@ -207,7 +347,7 @@ def actualizar_grafico_canal(
     tmin4: float | None = None,
 ):
     """Actualiza el gráfico multicanal sincronizado con umbrales independientes y marcas de arribo."""
-    if not carpeta:
+    if not carpeta or not seg:
         return no_update
 
     canal_foco = "ch4" if canal == "todos" else canal
@@ -258,7 +398,7 @@ def actualizar_grafico_canal(
 )
 def actualizar_grafico_impulso(carpeta: str, seg: int):
     """Actualiza la visualización del impulso CH1 con el ajuste IEC 60060-1."""
-    if not carpeta:
+    if not carpeta or not seg:
         return no_update
     res_iec = evaluar_segmento_iec(carpeta, seg, con_curva=True, diezmado_ajuste=10)
     return figura_impulso_iec(carpeta, seg, res_iec)
