@@ -427,13 +427,65 @@ def umbrales_desde_relayout(relayout, canales):
     return cambios
 
 
-def contar_peaks(carpeta, canal, umbral, dist_us, tmin):
-    """Nº de peaks válidos (con ventana completa de 70 ns) del canal trigger por segmento."""
+def _obtener_excluidos(excl_dict, key):
+    """Obtiene la lista de índices excluidos para una clave 'carpeta|canal'."""
+    val = (excl_dict or {}).get(key, [])
+    if isinstance(val, dict):
+        return val.get("excluidos", [])
+    if isinstance(val, (list, set)):
+        return list(val)
+    return []
+
+
+def _obtener_historial(excl_dict, key):
+    """Obtiene el historial de pasos de exclusión para una clave 'carpeta|canal'."""
+    val = (excl_dict or {}).get(key, {})
+    if isinstance(val, dict):
+        return val.get("historial", [])
+    return []
+
+
+def parsear_lista_disparos(texto_o_num, n_max_segs=None):
+    """Parsea una entrada como '5', '1, 3, 5', '2-6' a una lista de enteros (1-indexed)."""
+    if texto_o_num is None or texto_o_num == "":
+        return []
+    if isinstance(texto_o_num, (int, float)):
+        val = int(texto_o_num)
+        return [val] if val >= 1 and (n_max_segs is None or val <= n_max_segs) else []
+    segs = set()
+    partes = str(texto_o_num).replace(";", ",").replace(" ", ",").split(",")
+    for p in partes:
+        p = p.strip()
+        if not p:
+            continue
+        if "-" in p:
+            sub = p.split("-")
+            if len(sub) == 2 and sub[0].strip().isdigit() and sub[1].strip().isdigit():
+                i0, i1 = int(sub[0].strip()), int(sub[1].strip())
+                for s in range(min(i0, i1), max(i0, i1) + 1):
+                    if s >= 1 and (n_max_segs is None or s <= n_max_segs):
+                        segs.add(s)
+        elif p.isdigit():
+            s = int(p)
+            if s >= 1 and (n_max_segs is None or s <= n_max_segs):
+                segs.add(s)
+    return sorted(segs)
+
+
+def contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=None):
+    """Nº de peaks válidos (con ventana completa de 70 ns) del canal trigger por segmento,
+    omitiendo los índices de descargas excluidas si se proporcionan."""
     cap = capturar(carpeta, canal, umbral, dist_us, tmin)
     n_segs = n_segmentos(carpeta)
     segs = list(range(1, n_segs + 1))
+    excl_set = set(excluidos or [])
     if cap["seg"].size:
-        conteos = {s: int(np.sum(cap["seg"] == s)) for s in segs}
+        if excl_set:
+            activos = [i for i in range(cap["seg"].size) if i not in excl_set]
+            segs_activos = cap["seg"][activos] if activos else np.array([])
+            conteos = {s: int(np.sum(segs_activos == s)) for s in segs}
+        else:
+            conteos = {s: int(np.sum(cap["seg"] == s)) for s in segs}
     else:
         conteos = {s: 0 for s in segs}
     return segs, [conteos[s] for s in segs]
@@ -519,15 +571,34 @@ def capturar(carpeta, canal, umbral, dist_us, tmin,
     return res
 
 
-def _idx_scatter(datos, n):
+def _idx_scatter(datos, n, activos=None):
     """Índices desde un scatter (Peaks o Vpp/Energía): la curva 0 es 1:1 con las
-    ventanas, así que se usa pointNumber (siempre presente, también en Scattergl).
+    ventanas activas. Se intenta extraer el índice global desde customdata (columna 5)
+    o se mapea pointNumber a través de la lista de índices activos.
     Devuelve None si no hay puntos válidos de la curva 0."""
     if not datos or not datos.get("points"):
         return None
-    idx = [p.get("pointNumber", p.get("pointIndex"))
-           for p in datos["points"] if p.get("curveNumber") == 0]
-    idx = [int(i) for i in idx if i is not None and 0 <= int(i) < n]
+    idx = []
+    for p in datos["points"]:
+        if p.get("curveNumber") != 0:
+            continue
+        cd = p.get("customdata")
+        if cd is not None and len(cd) > 5:
+            try:
+                g_idx = int(cd[5])
+                if 0 <= g_idx < n:
+                    idx.append(g_idx)
+                    continue
+            except (ValueError, TypeError, IndexError):
+                pass
+        pt = p.get("pointNumber", p.get("pointIndex"))
+        if pt is not None:
+            pt = int(pt)
+            if activos is not None:
+                if 0 <= pt < len(activos):
+                    idx.append(activos[pt])
+            elif 0 <= pt < n:
+                idx.append(pt)
     return sorted(set(idx)) if idx else None
 
 
@@ -803,10 +874,11 @@ COLUMNAS_DENSIDAD = [
 ]
 
 
-def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0):
+def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, excluidos=None):
     """Calcula la fila de la tabla de densidad para la medición y canal dados,
     inspirada en la tabla experimental de resumen (Specimen, Voltage, Sensor,
-    N_PD distribution [0, 1, 2, 3, 4, > 4], Media de N_PD, d (mm), V̄_max (V), V̄_pp (V), t_lag (ns), t̄_abs (µs))."""
+    N_PD distribution [0, 1, 2, 3, 4, > 4], Media de N_PD, d (mm), V̄_max (V), V̄_pp (V), t_lag (ns), t̄_abs (µs)).
+    Si se proporciona `excluidos`, omite dichos índices globales del cálculo."""
     meta = obtener_metadata(carpeta)
     prob = meta.get("probeta", {})
     circ = meta.get("circuito_impulso", {})
@@ -832,8 +904,14 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0):
     sens_nom = sens_info.get("sensor") or canal.upper()
     sensor = f"{sens_nom} ({canal.upper()})"
 
-    segs, cuentas = contar_peaks(carpeta, canal, umbral, dist_us, tmin)
+    cap = capturar(carpeta, canal, umbral, dist_us, tmin)
+    n_total = cap["t_peak"].size
+    excl_set = set(excluidos or [])
+    activos = [i for i in range(n_total) if i not in excl_set]
+
+    segs, cuentas = contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=excl_set)
     cuentas_arr = np.asarray(cuentas)
+
     if cuentas_arr.size > 0:
         c0 = int(np.sum(cuentas_arr == 0))
         c1 = int(np.sum(cuentas_arr == 1))
@@ -849,9 +927,8 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0):
 
     diametro = inferir_diametros(prob, codigo_prob)
 
-    cap = capturar(carpeta, canal, umbral, dist_us, tmin)
-    todos_vp = cap["v_peak"]
-    todos_vpp = cap["vpp"]
+    todos_vp = cap["v_peak"][activos] if activos else np.array([])
+    todos_vpp = cap["vpp"][activos] if activos else np.array([])
 
     if todos_vp.size > 0:
         vp_mean_mv = float(np.mean(np.abs(todos_vp)))
@@ -868,8 +945,9 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0):
         vpp_str = "-"
 
     t_abs_arr = t_abs_captura(cap, t_lag_us)
-    if t_abs_arr.size > 0:
-        tabs_mean = float(np.mean(t_abs_arr))
+    t_abs_activos = t_abs_arr[activos] if activos else np.array([])
+    if t_abs_activos.size > 0:
+        tabs_mean = float(np.mean(t_abs_activos))
         tabs_str = f"{tabs_mean:.3f} µs"
     else:
         tabs_str = "-"
@@ -1232,10 +1310,13 @@ def _dibujar_impulso_ch1(fig, carpeta, fila):
 
 
 def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="vmax",
-                   t_abs=None, t10_ref=None, t_lag_us=0.0, calibrado=False):
-    # Peaks SIEMPRE como curva 0 (la selección mapea por pointNumber = índice de
-    # ventana). La referencia CH1 y el resaltado amarillo van como trazas extra.
+                   t_abs=None, t10_ref=None, t_lag_us=0.0, calibrado=False, excluidos=None):
+    # Peaks SIEMPRE como curva 0 (la selección mapea por pointNumber o customdata).
+    # La referencia CH1 y el resaltado amarillo van como trazas extra.
     n = cap["t_peak"].size
+    excl_set = set(excluidos or [])
+    activos = [i for i in range(n) if i not in excl_set]
+
     fig = go.Figure()
     es_vpp = (modo == "vpp")
     y_val = cap["vpp"] if es_vpp else cap["v_peak"]
@@ -1244,11 +1325,20 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
 
     x = t_abs if (t_abs is not None and t_abs.size == n) else cap["t_peak"]
 
-    cd = np.stack([cap["v_peak"], cap["vpp"], cap["t_peak"], cap["seg"], x * 1e3], axis=1) if n > 0 else None
+    # customdata incluye el índice global i en la columna 5
+    if n > 0:
+        indices_arr = np.arange(n)
+        cd = np.stack([cap["v_peak"], cap["vpp"], cap["t_peak"], cap["seg"], x * 1e3, indices_arr], axis=1)
+    else:
+        cd = None
+
+    x_act = x[activos] if n > 0 else np.array([])
+    y_act = y_val[activos] if n > 0 else np.array([])
+    cd_act = cd[activos] if cd is not None else None
 
     fig.add_trace(go.Scattergl(
-        x=x, y=y_val, mode="markers", name=traza_nombre,
-        customdata=cd,
+        x=x_act, y=y_act, mode="markers", name=traza_nombre,
+        customdata=cd_act,
         marker=dict(color="#EF553B", size=6, opacity=0.6),
         hovertemplate="t_abs=%{x:.4f} µs (%{customdata[4]:.2f} ns)<br>t_osc=%{customdata[2]:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<br>Seg %{customdata[3]:.0f}<extra>" + canal.upper() + "</extra>",
     ))
@@ -1266,21 +1356,17 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
                                    opacity=0.6, hovertemplate=htmpl))
         fig.add_vline(x=0, line=dict(color="#2ca02c", width=1, dash="dot"),
                       annotation_text="t10", annotation_position="top")
-    h = [i for i in (highlight or []) if 0 <= i < n]
+    h = [i for i in (highlight or []) if 0 <= i < n and i not in excl_set]
     if h and y_val.size > 0:
         fig.add_trace(go.Scattergl(
             x=x[h], y=y_val[h], mode="markers", name="sel",
             marker=dict(color="#FFD400", size=11, line=dict(color="black", width=1)),
             hoverinfo="skip", showlegend=False,
         ))
-    tlag_ns_val = (t_lag_us or 0.0) * 1e3
-    sufijo_cal = "" if calibrado else " (sin calibrar)"
-    titulo_patron = f"Patrón TRPD ({'Vpp' if es_vpp else 'Vmax'}) — {canal.upper()} · t_lag = {tlag_ns_val:.2f} ns{sufijo_cal}"
     fig.update_layout(
-        title=titulo_patron,
         xaxis_title="Tiempo relativo al impulso t_abs [µs] (t10 = 0)", yaxis_title=y_label,
-        height=415, margin=dict(t=75, r=20), showlegend=True, dragmode="select",
-        legend=dict(orientation="h", y=1.04, yanchor="bottom", x=0, xanchor="left"),
+        height=415, margin=dict(t=40, r=20), showlegend=True, dragmode="select",
+        legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0.5, xanchor="center"),
         plot_bgcolor="white", paper_bgcolor="white", uirevision=uirev,
     )
     return fig
@@ -1300,6 +1386,7 @@ app.layout = html.Div(
         dcc.Store(id="umbral"),
         dcc.Store(id="captura_params"),
         dcc.Store(id="seleccion", data=[]),
+        dcc.Store(id="descargas_excluidas", data={}),
         dcc.Store(id="densidad_store", data=[]),
         dcc.Store(id="calibracion_store"),
         dcc.Store(id="explorador_ruta_actual"),
@@ -1338,11 +1425,11 @@ app.layout = html.Div(
                 dcc.Dropdown(
                     id="canal",
                     options=[
-                        {"label": "CH2 (HFCT)", "value": "ch2"},
-                        {"label": "CH3 (Vivaldi)", "value": "ch3"},
-                        {"label": "CH4 (Bioinspirada)", "value": "ch4"},
+                        {"label": "CH2", "value": "ch2"},
+                        {"label": "CH3", "value": "ch3"},
+                        {"label": "CH4", "value": "ch4"},
                     ],
-                    value="ch4", clearable=False, style={"width": "175px"},
+                    value="ch4", clearable=False, style={"width": "120px"},
                 ),
                 html.Button("⚡ Calcular peaks", id="btn", n_clicks=0,
                             style={"backgroundColor": "#2563eb", "color": "white", "fontWeight": "600"}),
@@ -1407,7 +1494,7 @@ app.layout = html.Div(
             children=[
                 html.Span("🎯 Configuración Multi-Trigger:",
                           style={"fontSize": "11px", "fontWeight": "bold", "color": "#1e293b", "marginRight": "4px"}),
-                # CH2: HFCT
+                # CH2
                 html.Div(
                     style={
                         "display": "flex", "alignItems": "center", "gap": "6px",
@@ -1416,7 +1503,7 @@ app.layout = html.Div(
                         "borderRadius": "4px", "fontSize": "11px",
                     },
                     children=[
-                        html.Span("CH2 (HFCT):", style={"fontWeight": "bold", "color": "#1d4ed8"}),
+                        html.Span("CH2:", style={"fontWeight": "bold", "color": "#1d4ed8"}),
                         html.Span("u (mV):"),
                         dcc.Input(id="umbral_ch2", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
@@ -1425,7 +1512,7 @@ app.layout = html.Div(
                         dcc.Input(id="tmin_ch2", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
-                # CH3: Vivaldi
+                # CH3
                 html.Div(
                     style={
                         "display": "flex", "alignItems": "center", "gap": "6px",
@@ -1434,7 +1521,7 @@ app.layout = html.Div(
                         "borderRadius": "4px", "fontSize": "11px",
                     },
                     children=[
-                        html.Span("CH3 (Vivaldi):", style={"fontWeight": "bold", "color": "#047857"}),
+                        html.Span("CH3:", style={"fontWeight": "bold", "color": "#047857"}),
                         html.Span("u (mV):"),
                         dcc.Input(id="umbral_ch3", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
@@ -1443,7 +1530,7 @@ app.layout = html.Div(
                         dcc.Input(id="tmin_ch3", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
-                # CH4: Bioinspirada
+                # CH4
                 html.Div(
                     style={
                         "display": "flex", "alignItems": "center", "gap": "6px",
@@ -1452,7 +1539,7 @@ app.layout = html.Div(
                         "borderRadius": "4px", "fontSize": "11px",
                     },
                     children=[
-                        html.Span("CH4 (Bioinspirada):", style={"fontWeight": "bold", "color": "#b45309"}),
+                        html.Span("CH4:", style={"fontWeight": "bold", "color": "#b45309"}),
                         html.Span("u (mV):"),
                         dcc.Input(id="umbral_ch4", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
@@ -1661,25 +1748,53 @@ app.layout = html.Div(
                                         children=[
                                             html.Div(
                                                 style={
-                                                    "display": "flex", "alignItems": "center", "gap": "10px",
+                                                    "display": "flex", "alignItems": "center", "gap": "6px",
                                                     "padding": "4px 8px", "backgroundColor": "#f8fafc",
                                                     "borderBottom": "1px solid #e2e8f0", "marginBottom": "4px",
                                                     "flexWrap": "wrap",
                                                 },
                                                 children=[
-                                                    html.Span("Magnitud TRPD:", style={"fontSize": "11px", "fontWeight": "bold", "color": "#334155"}),
+                                                    html.Span("Magnitud:", style={"fontSize": "11px", "fontWeight": "bold", "color": "#334155"}),
                                                     dcc.RadioItems(
                                                         id="modo_magnitud_trpd",
                                                         options=[
-                                                            {"label": " Vmax (pico máximo)", "value": "vmax"},
-                                                            {"label": " Vpp (peak-to-peak en 70 ns)", "value": "vpp"},
+                                                            {"label": " Vmax", "value": "vmax"},
+                                                            {"label": " Vpp", "value": "vpp"},
                                                         ],
                                                         value="vmax",
                                                         inline=True,
                                                         style={"fontSize": "11px"},
-                                                        inputStyle={"marginRight": "4px"},
-                                                        labelStyle={"marginRight": "12px", "cursor": "pointer", "fontWeight": "500"},
+                                                        inputStyle={"marginRight": "3px"},
+                                                        labelStyle={"marginRight": "8px", "cursor": "pointer", "fontWeight": "500"},
                                                     ),
+                                                    html.Span("|", style={"color": "#cbd5e1", "margin": "0 1px"}),
+                                                    html.Button("🚫 Quitar selección", id="btn_excluir_seleccion", n_clicks=0, disabled=True,
+                                                                style={"backgroundColor": "#ef4444", "color": "white", "border": "none",
+                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
+                                                                       "fontWeight": "600", "cursor": "pointer"}),
+                                                    html.Button("↩ Deshacer", id="btn_deshacer_exclusion", n_clicks=0, disabled=True,
+                                                                style={"backgroundColor": "#f59e0b", "color": "white", "border": "none",
+                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
+                                                                       "fontWeight": "600", "cursor": "pointer"}),
+                                                    html.Button("🔄 Restaurar todo", id="btn_restaurar_descargas", n_clicks=0, disabled=True,
+                                                                style={"backgroundColor": "#64748b", "color": "white", "border": "none",
+                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
+                                                                       "fontWeight": "600", "cursor": "pointer"}),
+                                                    html.Span("|", style={"color": "#cbd5e1", "margin": "0 1px"}),
+                                                    html.Span("Disparo:", style={"fontSize": "11px", "fontWeight": "bold", "color": "#334155"}),
+                                                    dcc.Input(
+                                                        id="input_excluir_disparo",
+                                                        type="text",
+                                                        placeholder="ej. 5 o 2,4",
+                                                        style={"width": "75px", "fontSize": "11px", "padding": "2px 5px",
+                                                               "textAlign": "center", "borderRadius": "4px", "border": "1px solid #cbd5e1"}
+                                                    ),
+                                                    html.Button("🗑 Excluir", id="btn_excluir_disparo", n_clicks=0,
+                                                                style={"backgroundColor": "#dc2626", "color": "white", "border": "none",
+                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
+                                                                       "fontWeight": "600", "cursor": "pointer"}),
+                                                    html.Span(id="badge_filtro_descargas",
+                                                              style={"fontSize": "11px", "color": "#475569", "fontWeight": "600", "marginLeft": "auto"}),
                                                 ],
                                             ),
                                             dcc.Graph(id="grafico_scatter"),
@@ -1994,11 +2109,14 @@ def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4):
 @app.callback(
     Output("grafico_peaks", "figure"),
     Input("captura_params", "data"),
+    Input("descargas_excluidas", "data"),
 )
-def calcular_peaks(p):
+def calcular_peaks(p, excl_dict):
     if not p:
         return no_update
-    segs, cuentas = contar_peaks(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+    key = f"{p['carpeta']}|{p['canal']}"
+    excl = _obtener_excluidos(excl_dict, key)
+    segs, cuentas = contar_peaks(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], excluidos=excl)
     if not segs:
         fig = go.Figure()
         fig.update_layout(title=f"{p['canal'].upper()} no disponible en esta medición", height=415)
@@ -2156,6 +2274,7 @@ def badges_calibracion(cal):
     Input("captura_params", "data"),
     Input("btn_calc_todos_sensores", "n_clicks"),
     Input("btn_limpiar_densidad", "n_clicks"),
+    Input("descargas_excluidas", "data"),
     State("densidad_store", "data"),
     State("umbral_ch2", "value"),
     State("dist_ch2", "value"),
@@ -2169,7 +2288,7 @@ def badges_calibracion(cal):
     State("calibracion_store", "data"),
     prevent_initial_call=True,
 )
-def actualizar_densidad_store(p, n_todos, n_limpiar, data_actual,
+def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
                               u2, d2, t2, u3, d3, t3, u4, d4, t4, cal_store):
     try:
         trig = ctx.triggered_id
@@ -2191,6 +2310,7 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, data_actual,
         "ch3": {"umbral": u3, "dist": d3, "tmin": t3},
         "ch4": {"umbral": u4, "dist": d4, "tmin": t4},
     }
+    excl_dict = excl_dict or {}
 
     if trig == "btn_calc_todos_sensores" and p:
         carpeta = p["carpeta"]
@@ -2204,13 +2324,17 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, data_actual,
                 dist_ch = cfg_ch.get("dist") or 1.0
                 tmin_ch = cfg_ch.get("tmin") if cfg_ch.get("tmin") is not None else 0.0
                 t_lag = lag_canal(cal_store, carpeta, ch)
-                f = calcular_fila_densidad(carpeta, ch, float(u_ch), float(dist_ch), float(tmin_ch), t_lag_us=t_lag)
+                excl_ch = _obtener_excluidos(excl_dict, f"{carpeta}|{ch}")
+                f = calcular_fila_densidad(carpeta, ch, float(u_ch), float(dist_ch), float(tmin_ch),
+                                           t_lag_us=t_lag, excluidos=excl_ch)
                 _upsert(f)
         return filas
 
-    if trig == "captura_params" and p:
+    if trig in ("captura_params", "descargas_excluidas") and p:
         t_lag = lag_canal(cal_store, p["carpeta"], p["canal"])
-        f = calcular_fila_densidad(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], t_lag_us=t_lag)
+        excl_ch = _obtener_excluidos(excl_dict, f"{p['carpeta']}|{p['canal']}")
+        f = calcular_fila_densidad(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"],
+                                   t_lag_us=t_lag, excluidos=excl_ch)
         _upsert(f)
         return filas
 
@@ -2368,29 +2492,158 @@ def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, cal_store, yaml
     Input("grafico_scatter", "selectedData"),
     Input("grafico_scatter", "clickData"),
     Input("grafico", "clickData"),
+    Input("btn_excluir_seleccion", "n_clicks"),
+    Input("btn_deshacer_exclusion", "n_clicks"),
+    Input("btn_restaurar_descargas", "n_clicks"),
+    Input("btn_excluir_disparo", "n_clicks"),
+    Input("input_excluir_disparo", "n_submit"),
     State("captura_params", "data"),
+    State("descargas_excluidas", "data"),
 )
-def set_seleccion(_cap_in, sel_pk, click_pk, click_g, p):
+def set_seleccion(_cap_in, sel_pk, click_pk, click_g, n_exc, n_undo, n_res, n_disp, n_sub, p, excl_dict):
     """Fuente única de la selección (índices globales de ventana). La alimentan
     los clics/cajas del scatter TRPD y los clics en las cruces del canal
-    trigger. Una nueva captura la limpia; los reset a None (por redibujo) se
+    trigger. Una nueva captura o acción de exclusión/restauración/deshacer la limpian; los reset a None (por redibujo) se
     ignoran para no romper el ciclo."""
     trg = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-    if trg.startswith("captura_params"):
-        return []  # nueva captura: limpiar selección
+    if (trg.startswith("captura_params") or
+            trg.startswith("btn_excluir_seleccion") or
+            trg.startswith("btn_deshacer_exclusion") or
+            trg.startswith("btn_restaurar_descargas") or
+            trg.startswith("btn_excluir_disparo") or
+            trg.startswith("input_excluir_disparo")):
+        return []  # limpiar selección
     if not p:
         return no_update
     n = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])["W"].shape[0]
+    key = f"{p['carpeta']}|{p['canal']}"
+    excl = set(_obtener_excluidos(excl_dict, key))
+    activos = [i for i in range(n) if i not in excl]
+
     if trg == "grafico.clickData":            # cruces del trigger (customdata)
         idx = _idx_cruces(click_g, n)
     elif trg == "grafico_scatter.selectedData":
-        idx = _idx_scatter(sel_pk, n)
+        idx = _idx_scatter(sel_pk, n, activos=activos)
     elif trg == "grafico_scatter.clickData":
-        idx = _idx_scatter(click_pk, n)
+        idx = _idx_scatter(click_pk, n, activos=activos)
     else:
         idx = None
     # None = reset por redibujo o clic sin punto válido: no cambiar la selección.
     return no_update if idx is None else idx
+
+
+@app.callback(
+    Output("descargas_excluidas", "data"),
+    Output("input_excluir_disparo", "value"),
+    Input("btn_excluir_seleccion", "n_clicks"),
+    Input("btn_deshacer_exclusion", "n_clicks"),
+    Input("btn_restaurar_descargas", "n_clicks"),
+    Input("btn_excluir_disparo", "n_clicks"),
+    Input("input_excluir_disparo", "n_submit"),
+    State("seleccion", "data"),
+    State("input_excluir_disparo", "value"),
+    State("descargas_excluidas", "data"),
+    State("captura_params", "data"),
+    prevent_initial_call=True,
+)
+def gestionar_exclusiones_descargas(n_exc, n_undo, n_res, n_disp, n_sub,
+                                    sel, val_disparo, excl_dict, p):
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if not p:
+        return no_update, no_update
+
+    excl_dict = dict(excl_dict) if isinstance(excl_dict, dict) else {}
+    key = f"{p['carpeta']}|{p['canal']}"
+
+    curr_excl = list(_obtener_excluidos(excl_dict, key))
+    curr_hist = [dict(h) for h in _obtener_historial(excl_dict, key)]
+
+    if trig == "btn_excluir_seleccion" and sel:
+        nuevos = [int(i) for i in sel if i not in set(curr_excl)]
+        if nuevos:
+            curr_hist.append({"tipo": "lazo", "indices": nuevos, "desc": f"{len(nuevos)} descargas"})
+            curr_excl = sorted(set(curr_excl).union(nuevos))
+            excl_dict[key] = {"excluidos": curr_excl, "historial": curr_hist}
+            return excl_dict, no_update
+        return no_update, no_update
+
+    if trig in ("btn_excluir_disparo", "input_excluir_disparo"):
+        cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+        n_segs = n_segmentos(p["carpeta"])
+        segs = parsear_lista_disparos(val_disparo, n_segs)
+        if segs and cap["seg"].size:
+            segs_set = set(segs)
+            indices_segs = [int(i) for i, s in enumerate(cap["seg"]) if s in segs_set]
+            nuevos = [i for i in indices_segs if i not in set(curr_excl)]
+            if nuevos:
+                curr_hist.append({
+                    "tipo": "disparo",
+                    "segs": segs,
+                    "indices": nuevos,
+                    "desc": f"Disparo(s) {segs} ({len(nuevos)} peaks)"
+                })
+                curr_excl = sorted(set(curr_excl).union(nuevos))
+                excl_dict[key] = {"excluidos": curr_excl, "historial": curr_hist}
+                return excl_dict, ""
+        return no_update, ""
+
+    if trig == "btn_deshacer_exclusion":
+        if curr_hist:
+            curr_hist.pop()
+            reconstruidos = set()
+            for paso in curr_hist:
+                reconstruidos.update(paso.get("indices", []))
+            curr_excl = sorted(reconstruidos)
+            excl_dict[key] = {"excluidos": curr_excl, "historial": curr_hist}
+            return excl_dict, no_update
+        return no_update, no_update
+
+    if trig == "btn_restaurar_descargas":
+        if curr_excl or curr_hist:
+            excl_dict[key] = {"excluidos": [], "historial": []}
+            return excl_dict, no_update
+        return excl_dict, no_update
+
+    return no_update, no_update
+
+
+@app.callback(
+    Output("btn_excluir_seleccion", "disabled"),
+    Output("btn_excluir_seleccion", "children"),
+    Output("btn_deshacer_exclusion", "disabled"),
+    Output("btn_restaurar_descargas", "disabled"),
+    Output("badge_filtro_descargas", "children"),
+    Input("seleccion", "data"),
+    Input("descargas_excluidas", "data"),
+    Input("captura_params", "data"),
+)
+def actualizar_badge_filtro(sel, excl_dict, p):
+    if not p:
+        return True, "🚫 Quitar selección", True, True, ""
+    n_sel = len(sel) if sel else 0
+    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+    n_total = cap["t_peak"].size
+    key = f"{p['carpeta']}|{p['canal']}"
+    excl = set(_obtener_excluidos(excl_dict, key))
+    hist = _obtener_historial(excl_dict, key)
+    n_excl = len(excl.intersection(range(n_total)))
+    n_act = max(0, n_total - n_excl)
+
+    btn_txt = f"🚫 Quitar {n_sel} seleccionada{'s' if n_sel != 1 else ''}" if n_sel > 0 else "🚫 Quitar selección"
+    btn_disabled = (n_sel == 0)
+    btn_undo_disabled = (len(hist) == 0)
+    btn_reset_disabled = (n_excl == 0 and len(hist) == 0)
+
+    if n_excl > 0:
+        pasos_txt = f" en {len(hist)} paso{'s' if len(hist) != 1 else ''}" if len(hist) > 1 else ""
+        badge = f"📊 {n_act}/{n_total} activas ({n_excl} excluida{'s' if n_excl != 1 else ''}{pasos_txt})"
+    else:
+        badge = f"📊 {n_total} descargas activas"
+
+    return btn_disabled, btn_txt, btn_undo_disabled, btn_reset_disabled, badge
 
 
 @app.callback(
@@ -2399,8 +2652,9 @@ def set_seleccion(_cap_in, sel_pk, click_pk, click_g, p):
     Input("seleccion", "data"),
     Input("modo_magnitud_trpd", "value"),
     Input("calibracion_store", "data"),
+    Input("descargas_excluidas", "data"),
 )
-def actualizar_scatter(p, sel, modo_trpd, cal):
+def actualizar_scatter(p, sel, modo_trpd, cal, excl_dict):
     """Scatter de Patrón TRPD, con los puntos seleccionados en
     amarillo (venga la selección del scatter o de las cruces del trigger)."""
     if not p:
@@ -2413,11 +2667,14 @@ def actualizar_scatter(p, sel, modo_trpd, cal):
     T = tiempos_impulso(p["carpeta"])
     t10_ref = T["t10"] if T else None
     calibrado = bool(cal and cal.get("carpeta") == p["carpeta"] and cal.get("canales", {}).get(p["canal"], {}).get("calibrado"))
+    key = f"{p['carpeta']}|{p['canal']}"
+    excl = _obtener_excluidos(excl_dict, key)
     # uirevision estable dentro de una captura: al pintar el amarillo no se
-    # pierde zoom ni la caja de selección; cambia al hacer una captura nueva o cambiar modo.
-    rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}"
+    # pierde zoom ni la caja de selección; cambia al hacer una captura nueva, cambiar modo o exclusiones.
+    rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}|{len(excl)}"
     return figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo,
-                          t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado)
+                          t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado,
+                          excluidos=excl)
 
 
 @app.callback(
