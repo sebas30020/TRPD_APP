@@ -18,7 +18,6 @@ import generate_metadata
 from datos import (
     obtener_metadata,
     guardar_metadata_archivo,
-    listar_mediciones,
     _dir_medicion,
 )
 import referencia
@@ -72,10 +71,10 @@ def guardar_calibracion_metadata(carpeta: str, bloque: dict) -> tuple[bool, str]
     )
 
 
-def mediciones_con_calibracion() -> list[str]:
-    """Lista las mediciones cuyo metadata.yaml contiene 'calibracion_retardo'."""
+def mediciones_con_calibracion(mediciones: list[str]) -> list[str]:
+    """De `mediciones` (rutas), las que tienen 'calibracion_retardo' en su metadata.yaml."""
     res = []
-    for m in listar_mediciones():
+    for m in mediciones:
         d = _dir_medicion(m)
         if not d:
             continue

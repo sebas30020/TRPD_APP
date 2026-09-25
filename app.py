@@ -25,12 +25,11 @@ from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, c
 
 from generate_metadata import plantilla_metadata, inferir_parametros, inferir_diametros
 
+import rutas
+
 AQUI = os.path.dirname(os.path.abspath(__file__))
-# Carpeta de datos: vive fuera del repo, en la carpeta hermana "mediciones/Mediciones"
-# (../mediciones/Mediciones respecto a este archivo). Antes se accedía via un
-# symlink "Mediciones" dentro del repo, pero git en Windows no lo versiona
-# correctamente (core.symlinks=false), así que se referencia por ruta directa.
-MEDICIONES = os.path.abspath(os.path.join(AQUI, os.pardir, "mediciones", "Mediciones"))
+# No hay carpeta de datos fija: las mediciones se eligen con el explorador de
+# carpetas y se identifican por su ruta absoluta (ver rutas.py).
 CANALES = ["ch1", "ch2", "ch3", "ch4"]
 TRIGGERS = ["ch2", "ch3", "ch4"]  # canales seleccionables como trigger
 
@@ -54,121 +53,21 @@ ST_NT_SEGMENTO = 1000   # segmento completo (-5..30 µs)
 ST_FMAX_MHZ = 1000      # por defecto a Fs = 1 GSa/s
 
 
-_CHAN_RE = re.compile(r"^(.*?)(ch[1-4])(.*?)\.h5$", re.IGNORECASE)
-
-
-def _orden_natural(s):
-    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", s)]
+_CHAN_RE = rutas.CHAN_RE
+_orden_natural = rutas.orden_natural
 
 
 def _ruta(carpeta, canal):
-    canal = canal.lower()
-    if os.path.isabs(carpeta):
-        if os.path.isfile(carpeta):
-            d, fname = os.path.split(carpeta)
-            m = _CHAN_RE.match(fname)
-            if m:
-                pref, suff = m.group(1), m.group(3)
-                p = os.path.join(d, f"{pref}{canal}{suff}.h5")
-                if os.path.isfile(p):
-                    return p
-            return carpeta if canal in fname.lower() else None
-        elif os.path.isdir(carpeta):
-            carpeta = os.path.relpath(carpeta, MEDICIONES).replace("\\", "/")
-
-    # 1. Caso directo estándar: carpeta/canal.h5
-    p = os.path.join(MEDICIONES, carpeta, f"{canal}.h5")
-    if os.path.isfile(p):
-        return p
-
-    # 2. Si carpeta es un directorio existente (ej. Mediciones/otros/4 o subcarpeta con archivos)
-    dir_directo = os.path.join(MEDICIONES, carpeta)
-    if os.path.isdir(dir_directo):
-        for f in os.listdir(dir_directo):
-            m = _CHAN_RE.match(f)
-            if m and m.group(2).lower() == canal:
-                return os.path.join(dir_directo, f)
-        return None
-
-    # 3. Si carpeta es de la forma 'categoria/stem' (ej. 'otros/1v2-30s')
-    # donde los archivos están sueltos en MEDICIONES/categoria con nombre '1v2chX-30s.h5'
-    parent, stem = os.path.split(carpeta)
-    parent_dir = os.path.join(MEDICIONES, parent)
-    if os.path.isdir(parent_dir):
-        stem_clean = re.sub(r"\.h5$", "", stem, flags=re.IGNORECASE)
-        stem_clean = re.sub(r"ch[1-4]", "", stem_clean, flags=re.IGNORECASE)
-        for f in os.listdir(parent_dir):
-            m = _CHAN_RE.match(f)
-            if m and m.group(2).lower() == canal:
-                pref, suff = m.group(1), m.group(3)
-                if f"{pref}{suff}" == stem_clean or stem_clean in f:
-                    return os.path.join(parent_dir, f)
-
-    return None
+    """Ruta absoluta al .h5 del canal (la medición es una ruta absoluta en disco)."""
+    return rutas.ruta_canal(carpeta, canal)
 
 
 def canales_presentes(carpeta):
     """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden."""
-    return [c for c in CANALES if _ruta(carpeta, c) is not None and os.path.isfile(_ruta(carpeta, c))]
+    return rutas.canales_presentes(carpeta)
 
 
-def listar_mediciones():
-    """Carpetas o mediciones con al menos un ch1..ch4.h5, directas en MEDICIONES,
-    en subcarpetas de cadencia (p. ej. 'cada_30s/7') o archivos agrupados por prefijo/sufijo
-    (p. ej. 'otros/1v2-30s')."""
-    if not os.path.isdir(MEDICIONES):
-        return []
-    mediciones = set()
-    for root, dirs, files in os.walk(MEDICIONES):
-        h5_files = [f for f in files if f.lower().endswith(".h5")]
-        if not h5_files:
-            continue
-        rel_dir = os.path.relpath(root, MEDICIONES).replace("\\", "/")
-        grupos = {}
-        for f in h5_files:
-            m = _CHAN_RE.match(f)
-            if m:
-                pref, ch, suff = m.group(1), m.group(2).lower(), m.group(3)
-                grupos.setdefault((pref, suff), {})[ch] = f
-
-        for (pref, suff), chans in grupos.items():
-            if not chans:
-                continue
-            if not pref and not suff:
-                if rel_dir != ".":
-                    mediciones.add(rel_dir)
-            else:
-                stem = f"{pref}{suff}"
-                if rel_dir.endswith(stem):
-                    mediciones.add(rel_dir)
-                elif rel_dir != ".":
-                    mediciones.add(f"{rel_dir}/{stem}")
-                else:
-                    mediciones.add(stem)
-    return sorted(mediciones, key=_orden_natural)
-
-
-def listar_subcarpetas(ruta):
-    """(nombre, ruta_absoluta, tiene_h5) de las subcarpetas directas de `ruta`."""
-    if not ruta or not os.path.isdir(ruta):
-        return []
-    items = []
-    try:
-        nombres = sorted(os.listdir(ruta), key=_orden_natural)
-    except Exception:
-        return []
-    for nombre in nombres:
-        p = os.path.join(ruta, nombre)
-        if os.path.isdir(p):
-            try:
-                tiene_h5 = any(
-                    _CHAN_RE.match(f) for f in os.listdir(p)
-                    if os.path.isfile(os.path.join(p, f))
-                )
-            except Exception:
-                tiene_h5 = False
-            items.append((nombre, p, tiene_h5))
-    return items
+listar_subcarpetas = rutas.listar_subcarpetas
 
 
 def _meta(carpeta, canal):
@@ -800,18 +699,7 @@ def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ):
 
 def _dir_medicion(carpeta):
     """Encuentra el directorio físico que contiene los archivos de la medición."""
-    for c in CANALES:
-        p = _ruta(carpeta, c)
-        if p and os.path.isfile(p):
-            return os.path.dirname(p)
-    p_dir = os.path.join(MEDICIONES, carpeta)
-    if os.path.isdir(p_dir):
-        return p_dir
-    parent, _ = os.path.split(carpeta)
-    p_parent = os.path.join(MEDICIONES, parent)
-    if os.path.isdir(p_parent):
-        return p_parent
-    return p_dir
+    return rutas.dir_medicion(carpeta) or os.path.abspath(carpeta)
 
 
 def obtener_metadata(carpeta):
@@ -1372,9 +1260,6 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
     return fig
 
 
-MEDICIONES_INICIAL = listar_mediciones()
-CARPETA_INICIAL = MEDICIONES_INICIAL[0] if MEDICIONES_INICIAL else None
-
 app = Dash(__name__)
 app.title = "Análisis de Vacuolas"
 
@@ -1389,7 +1274,7 @@ app.layout = html.Div(
         dcc.Store(id="descargas_excluidas", data={}),
         dcc.Store(id="densidad_store", data=[]),
         dcc.Store(id="calibracion_store"),
-        dcc.Store(id="explorador_ruta_actual"),
+        dcc.Store(id="explorador_ruta_actual", data=rutas.ruta_inicial()),
         html.Div(
             className="header",
             children=[
@@ -1403,8 +1288,8 @@ app.layout = html.Div(
                 html.Label("Medición:"),
                 dcc.Dropdown(
                     id="carpeta",
-                    options=[{"label": c, "value": c} for c in MEDICIONES_INICIAL],
-                    value=CARPETA_INICIAL, clearable=False, style={"width": "260px"},
+                    options=[], value=None, clearable=False,
+                    placeholder="Elija una carpeta con 📂 Examinar…", style={"width": "260px"},
                 ),
                 html.Button("📂 Examinar…", id="btn_examinar", n_clicks=0,
                             style={"backgroundColor": "#475569", "color": "white", "border": "none",
@@ -1440,7 +1325,7 @@ app.layout = html.Div(
         ),
         html.Div(
             id="explorador_panel",
-            hidden=True,
+            hidden=False,
             style={
                 "margin": "0 12px 10px 12px",
                 "padding": "12px",
@@ -1842,19 +1727,21 @@ def toggle_explorador(n_abrir, n_cancelar, n_confirmar, ruta_actual, carpeta_val
     except Exception:
         trig = None
     if trig == "btn_examinar":
-        inicio = _dir_medicion(carpeta_val) if carpeta_val else None
-        if not inicio or not os.path.isdir(inicio):
-            inicio = os.path.dirname(MEDICIONES)
+        inicio = rutas.dir_medicion(carpeta_val) if carpeta_val else None
+        if not inicio:
+            inicio = ruta_actual if ruta_actual else rutas.ruta_inicial()
         return False, inicio, no_update, no_update
     if trig == "explorador_cancelar":
         return True, no_update, no_update, no_update
     if trig == "explorador_confirmar":
-        if not ruta_actual:
+        nuevas = rutas.mediciones_en(ruta_actual)
+        if not nuevas:
             return no_update, no_update, no_update, no_update
         opts = list(opciones or [])
-        if not any(o.get("value") == ruta_actual for o in opts):
-            opts = opts + [{"label": ruta_actual, "value": ruta_actual}]
-        return True, no_update, ruta_actual, opts
+        for m in nuevas:
+            if not any(o.get("value") == m for o in opts):
+                opts.append({"label": rutas.etiqueta(m), "value": m, "title": m})
+        return True, no_update, nuevas[0], opts
     return no_update, no_update, no_update, no_update
 
 
@@ -1871,10 +1758,7 @@ def navegar_explorador(n_subir, n_subcarpetas, ruta_actual):
     except Exception:
         trig = None
     if trig == "explorador_subir":
-        if ruta_actual:
-            padre = os.path.dirname(os.path.normpath(ruta_actual))
-            return padre if os.path.isdir(padre) else no_update
-        return no_update
+        return rutas.padre(ruta_actual)
     if isinstance(trig, dict) and trig.get("type") == "explorador_ir":
         return trig["ruta"]
     return no_update
@@ -1887,8 +1771,8 @@ def navegar_explorador(n_subir, n_subcarpetas, ruta_actual):
     Input("explorador_ruta_actual", "data"),
 )
 def renderizar_explorador(ruta_actual):
-    if not ruta_actual or not os.path.isdir(ruta_actual):
-        return [], "", True
+    if ruta_actual != rutas.EQUIPO and (not ruta_actual or not os.path.isdir(ruta_actual)):
+        ruta_actual = rutas.EQUIPO
     filas = []
     for nombre, p, tiene_h5 in listar_subcarpetas(ruta_actual):
         filas.append(html.Button(
@@ -1910,14 +1794,9 @@ def renderizar_explorador(ruta_actual):
         ))
     if not filas:
         filas = [html.Div("(No hay subcarpetas)", style={"color": "#94a3b8", "fontStyle": "italic", "padding": "6px 8px"})]
-    try:
-        tiene_h5_aqui = any(
-            _CHAN_RE.match(f) for f in os.listdir(ruta_actual)
-            if os.path.isfile(os.path.join(ruta_actual, f))
-        )
-    except Exception:
-        tiene_h5_aqui = False
-    return filas, ruta_actual, not tiene_h5_aqui
+    if ruta_actual == rutas.EQUIPO:
+        return filas, "Este equipo", True
+    return filas, ruta_actual, not rutas.tiene_h5(ruta_actual)
 
 
 @app.callback(

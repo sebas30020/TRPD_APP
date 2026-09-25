@@ -173,9 +173,10 @@ _dibujar_impulso_ch1()     |                                     [t_peak, v_peak
     - `<ID_Probeta>`: Código estándar de probeta (ej. `1V2`, `2V22`, `3V224`, `3V444H`, `4V4444`).
     - Subcarpeta fechada: Fecha (`YYYYMMDD`), tensión DC en el condensador de carga del circuito de impulso (ej. `30kV`) y réplica (ej. `rep01`).
     - Ejemplo: `Mediciones/3V224/20260915_30kV_rep01/`.
-  - `listar_mediciones` en `app.py` busca automáticamente carpetas con `ch*.h5`
-    a 1 o 2 niveles de profundidad, por lo que reconoce tanto las históricas como las nuevas
-    sin requerir cambios de código.
+  - No hay carpeta de datos fija: en `app.py` y `calibrar_app` la medición se elige
+    con el explorador de carpetas (📂 Examinar…), que navega todo el equipo (unidades
+    `C:\`, `G:\`, …). La medición queda identificada por su **ruta absoluta**
+    (ver `rutas.py`). Una carpeta es seleccionable si contiene algún `*chN*.h5`.
 - Archivos por carpeta de medición:
   - `ch1.h5`: Tensión de impulso LI (divisor capacitivo / sincronismo).
   - `ch2.h5`: Corriente de descarga (HFCT, atenuador 30 dB) o sensor reconfigurable.
@@ -185,9 +186,6 @@ _dibujar_impulso_ch1()     |                                     [t_peak, v_peak
   - `registro_disparos.csv`: Registro de los 50 disparos (Npd, detecciones por canal, observaciones).
 - Cadencia: cada segmento tiene el atributo `SegmentedTimeTag` [s], instante
   de la descarga relativo al segmento 1 (idéntico en los 4 canales).
-  `MEDICIONES` (en `app.py` y `generate_metadata.py`) se calcula por **ruta
-  directa** desde `AQUI` (`os.path.join(AQUI, os.pardir, "mediciones",
-  "Mediciones")`).
   Cada archivo es un canal con varios **segmentos** (~1.000.003 muestras `int16`).
 - Conversión desde el HDF5: `v = raw * YInc + YOrg`, `t = XOrg + i * XInc`.
 - Frecuencia de muestreo típica: **Fs = 5 GSa/s** (`XInc = 2e-10 s`).
@@ -745,10 +743,15 @@ Dos escalas, compartiendo la misma función:
   sin cambios. Se ejecuta manualmente y una sola vez por medición
   (`python3 preprocesar.py`); **no** se invoca desde la app.
 
-- **`generate_metadata.py`.** Genera una **plantilla YAML** de metadatos enriquecida
-  por medición: `Mediciones/<experimento>/metadata.yaml` (usa `PyYAML` y `h5py`, ver
-  `requirements.txt`). No sobrescribe un `metadata.yaml` existente salvo que se pase `--forzar`.
-  Ejecutar: `python generate_metadata.py <experimento> [--forzar]`.
+- **`generate_metadata.py`.** Punto único para **rellenar automáticamente** el
+  `metadata.yaml` de cada medición (`<carpeta_medicion>/metadata.yaml`; usa `PyYAML`,
+  `h5py` y `numpy`). Incluye la lógica de cadencia (sección `cadencia` del YAML),
+  amplitudes por canal, saturación (segmentos fuera de pantalla), polaridad y
+  canal/pendiente/nivel del trigger estimados desde CH1 en t = 0. Lo que no se
+  puede deducir queda listado en `generado_automaticamente.campos_pendientes`.
+  Ejecutar: `python generate_metadata.py <carpeta_medicion | carpeta_raiz> [--completar | --forzar] [--sin-senales]`
+  (con una carpeta raíz procesa recursivamente todas las mediciones; `--completar`
+  rellena solo campos ausentes o vacíos sin tocar lo escrito a mano ni `calibracion_retardo`).
   
   **Características principales:**
   1. **Extracción automática desde los archivos `.h5`:** Lee directamente los encabezados del osciloscopio (Keysight Infiniium DSOS804A) para autocompletar el modelo, serial, fecha de adquisición, base de tiempo (frecuencia de muestreo en GSa/s, ventana temporal total en µs, puntos y segmentos) y las **escalas verticales de cada canal** (`escala_v_div`, `rango_total_v`, `offset_v`).
@@ -836,19 +839,20 @@ Dos escalas, compartiendo la misma función:
       rango_total_v: 4.0
   ```
 
-- **`cadencia.py`.** Diagnostica y clasifica la cadencia de adquisición de cada
-  medición a partir del atributo `SegmentedTimeTag` [s] de cada segmento
+- **`cadencia.py`.** Reporte por lotes y reorganización de carpetas; reutiliza la
+  lógica de cadencia de `generate_metadata.py` (`analizar_cadencia`). Diagnostica y
+  clasifica la cadencia de adquisición de cada medición a partir del atributo `SegmentedTimeTag` [s] de cada segmento
   (`Waveforms/Channel N/Channel N SegKData`, relativo al segmento 1; idéntico
   en los 4 canales). Calcula Δt entre descargas consecutivas y clasifica por
   la **mediana**: a ±2 s de 60 s → `cada_1min`; a ±2 s de 30 s → `cada_30s`;
   si no → `otros`. Un Δt que se aparta más de 2 s del nominal de su clase se
   marca como **anómalo** en el reporte (no cambia la clasificación).
-  - `python3 cadencia.py` → simulacro: genera `archivos_md/reporte_cadencia.md`
+  - `python3 cadencia.py <raiz>` → simulacro: genera `archivos_md/reporte_cadencia.md`
     (tabla resumen, conteo por clase, anomalías, Δt por medición) y
     `cadencia_segmentos.csv` (`medicion, segmento, time_tag_s, dt_s, anomalo,
     clase`), e imprime qué movería sin mover nada.
-  - `python3 cadencia.py --mover` → además mueve cada medición a
-    `Mediciones/<clase>/<medición>/`. Es idempotente: si ya está en su
+  - `python3 cadencia.py <raiz> --mover` → además mueve cada medición a
+    `<raiz>/<clase>/<medición>/`. Es idempotente: si ya está en su
     carpeta no la toca, y si el destino ya existe no sobrescribe.
 
 ---

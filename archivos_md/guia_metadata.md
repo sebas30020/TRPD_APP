@@ -54,7 +54,7 @@ El analizador de expresiones regulares (`inferir_parametros` en `generate_metada
 
 ### 1.4 Descubrimiento de mediciones y ubicación de archivos
 - **Ubicación de `metadata.yaml`:** Reside directamente en la raíz de la carpeta de la medición, al mismo nivel que los archivos binarios HDF5 (`ch1.h5`, `ch2.h5`, `ch3.h5`, `ch4.h5`). No debe ubicarse dentro de subcarpetas.
-- **Criterio de descubrimiento:** Para que una carpeta aparezca en los selectores desplegables de `app.py` o `calibrar_app`, la función `listar_mediciones` verifica que exista **al menos un archivo** que cumpla el patrón `ch[1-4].h5`. No es obligatorio que existan los 4 canales ni que exista previamente `metadata.yaml`.
+- **Criterio de selección:** Las mediciones se eligen con el explorador de carpetas de `app.py` o `calibrar_app` (no hay carpeta de datos fija). El botón "Seleccionar esta carpeta" se habilita si la carpeta contiene **al menos un archivo** que cumpla el patrón `*ch[1-4]*.h5`. No es obligatorio que existan los 4 canales ni que exista previamente `metadata.yaml`.
 
 ---
 
@@ -204,14 +204,16 @@ El script [generate_metadata.py](file:///G:/Mi%20unidad/yo/usm/investigacion/pro
 Debe ejecutarse desde la raíz del proyecto utilizando el entorno virtual:
 
 ```powershell
-.venv\Scripts\python.exe generate_metadata.py <experimento> [--forzar]
+.venv\Scripts\python.exe generate_metadata.py <carpeta_medicion | carpeta_raiz> [--completar | --forzar] [--sin-senales]
 ```
 
-- `<experimento>`: Ruta relativa de la carpeta dentro de `Mediciones/` utilizando barras inclinadas hacia adelante (`/`).
-  - Ejemplo: `3V224/20260915_30kV_rep01` o `cada_30s/7`.
+- Ruta absoluta (o relativa al directorio actual) a la carpeta de la medición. No hay carpeta de datos fija.
+  - Si la carpeta no contiene `chN.h5`, se recorren sus subcarpetas y se procesan todas las mediciones encontradas.
+- `--completar`: rellena solo los campos ausentes o vacíos de un `metadata.yaml` existente; conserva lo escrito a mano y `calibracion_retardo`. **Es la opción segura para actualizar metadatas ya calibradas.**
+- `--sin-senales`: omite la lectura de señales (amplitudes, saturación, polaridad, trigger); solo usa atributos.
 
 ### 4.2 Comportamiento del flag `--forzar`
-- **Sin `--forzar` (comportamiento seguro):** Si el archivo `metadata.yaml` ya existe en la carpeta indicada, el script **no lo modifica**. Imprime el aviso `"Ya existe, no se sobrescribe: <ruta>"` y finaliza con código de éxito.
+- **Sin opciones (comportamiento seguro):** Si el archivo `metadata.yaml` ya existe en la carpeta indicada, el script **no lo modifica** e imprime un aviso.
 - **Con `--forzar`:** Sobrescribe el archivo **completamente** con una plantilla nueva regenerada desde los `.h5` y el nombre de la carpeta.
   
 > [!CAUTION]
@@ -270,7 +272,7 @@ sequenceDiagram
   La interfaz de `app.py` cuenta con un botón **"🔄 Recargar desde disco"** para actualizar la calibración sin reiniciar el servidor Dash si el archivo fue modificado externamente por `calibrar_app`.
 
 ### 6.3 ⚠️ Trampa del orden de trabajo (crítica)
-Si se ejecuta `calibrar_app` sobre una medición que aún **no tiene** `metadata.yaml` en disco, `calibrar_app` creará un archivo nuevo que contendrá **exclusivamente** la clave `calibracion_retardo`, perdiéndose la estructura enriquecida (`experimento`, `probeta`, etc.). Si posteriormente el usuario intenta crear esa estructura ejecutando `python generate_metadata.py <experimento> --forzar`, el script **sobrescribirá todo el archivo y destruirá la calibración ya guardada**.
+Si se ejecuta `calibrar_app` sobre una medición que aún **no tiene** `metadata.yaml` en disco, `calibrar_app` creará un archivo nuevo que contendrá **exclusivamente** la clave `calibracion_retardo`, perdiéndose la estructura enriquecida (`experimento`, `probeta`, etc.). Si posteriormente el usuario intenta crear esa estructura ejecutando `python generate_metadata.py <carpeta> --forzar`, el script **sobrescribirá todo el archivo y destruirá la calibración ya guardada**. Use `--completar` en su lugar: agrega la estructura enriquecida y conserva `calibracion_retardo`.
 
 ### 6.4 Flujo de trabajo estándar recomendado (4 pasos)
 Para evitar pérdidas de información, siga siempre esta secuencia:
@@ -278,7 +280,7 @@ Para evitar pérdidas de información, siga siempre esta secuencia:
 ```text
 [1. Adquisición]      Volcar los registros ch1.h5..ch4.h5 en la carpeta de medición.
        ↓
-[2. Inicialización]   Ejecutar: python generate_metadata.py <experimento>
+[2. Inicialización]   Ejecutar: python generate_metadata.py <carpeta_medicion>
                       (Crea la plantilla enriquecida extrayendo datos del .h5 y la ruta).
        ↓
 [3. Parametrización]  Completar datos ambientales y de probeta manualmente

@@ -8,13 +8,20 @@ from __future__ import annotations
 import functools
 import os
 import re
+import sys
 import h5py
 import numpy as np
 import yaml
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 RAIZ_REPO = os.path.abspath(os.path.join(AQUI, os.pardir))
-MEDICIONES = os.path.abspath(os.path.join(RAIZ_REPO, os.pardir, "mediciones", "Mediciones"))
+if RAIZ_REPO not in sys.path:
+    sys.path.insert(0, RAIZ_REPO)
+
+import rutas  # noqa: E402  (resolución de rutas compartida con app.py)
+
+# No hay carpeta de datos fija: las mediciones se eligen con el explorador de
+# carpetas y se identifican por su ruta absoluta (ver rutas.py).
 
 CANALES = ["ch1", "ch2", "ch3", "ch4"]
 TRIGGERS = ["ch2", "ch3", "ch4"]
@@ -22,124 +29,23 @@ TRIGGERS = ["ch2", "ch3", "ch4"]
 VENTANA_T10 = (-5.0, 30.0)  # idéntica a app.T_MIN / T_MAX
 VENTANA_IEC = None          # registro completo para ajuste de cola IEC
 
-_CHAN_RE = re.compile(r"^(.*?)(ch[1-4])(.*)\.h5$", re.IGNORECASE)
-
-
-def _orden_natural(texto: str):
-    """Clave para ordenar cadenas con números de forma natural."""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(texto))]
+_CHAN_RE = rutas.CHAN_RE
+_orden_natural = rutas.orden_natural
 
 
 def _ruta(carpeta: str, canal: str) -> str | None:
     """Resuelve la ruta absoluta al archivo .h5 del canal."""
-    if not carpeta:
-        return None
-    canal = canal.lower()
-
-    if os.path.isabs(carpeta):
-        if os.path.isfile(carpeta):
-            d, fname = os.path.split(carpeta)
-            m = _CHAN_RE.match(fname)
-            if m:
-                pref, suff = m.group(1), m.group(3)
-                p = os.path.join(d, f"{pref}{canal}{suff}.h5")
-                if os.path.isfile(p):
-                    return p
-            return carpeta if canal in fname.lower() else None
-        elif os.path.isdir(carpeta):
-            carpeta = os.path.relpath(carpeta, MEDICIONES).replace("\\", "/")
-
-    # 1. Caso directo estándar: carpeta/canal.h5
-    p = os.path.join(MEDICIONES, carpeta, f"{canal}.h5")
-    if os.path.isfile(p):
-        return p
-
-    # 2. Si carpeta es un directorio existente
-    dir_directo = os.path.join(MEDICIONES, carpeta)
-    if os.path.isdir(dir_directo):
-        for f in os.listdir(dir_directo):
-            m = _CHAN_RE.match(f)
-            if m and m.group(2).lower() == canal:
-                return os.path.join(dir_directo, f)
-        return None
-
-    # 3. Archivos agrupados en parent
-    parent, stem = os.path.split(carpeta)
-    parent_dir = os.path.join(MEDICIONES, parent)
-    if os.path.isdir(parent_dir):
-        stem_clean = re.sub(r"\.h5$", "", stem, flags=re.IGNORECASE)
-        stem_clean = re.sub(r"ch[1-4]", "", stem_clean, flags=re.IGNORECASE)
-        for f in os.listdir(parent_dir):
-            m = _CHAN_RE.match(f)
-            if m and m.group(2).lower() == canal:
-                pref, suff = m.group(1), m.group(3)
-                if f"{pref}{suff}" == stem_clean or stem_clean in f:
-                    return os.path.join(parent_dir, f)
-
-    return None
+    return rutas.ruta_canal(carpeta, canal)
 
 
 def canales_presentes(carpeta: str) -> list[str]:
     """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden."""
-    return [c for c in CANALES if _ruta(carpeta, c) is not None and os.path.isfile(_ruta(carpeta, c))]
-
-
-def listar_mediciones() -> list[str]:
-    """Lista todas las mediciones disponibles."""
-    if not os.path.isdir(MEDICIONES):
-        return []
-    mediciones = set()
-    for root, dirs, files in os.walk(MEDICIONES):
-        h5_files = [f for f in files if f.lower().endswith(".h5")]
-        if not h5_files:
-            continue
-        rel_dir = os.path.relpath(root, MEDICIONES).replace("\\", "/")
-        grupos = {}
-        for f in h5_files:
-            m = _CHAN_RE.match(f)
-            if m:
-                pref, ch, suff = m.group(1), m.group(2).lower(), m.group(3)
-                grupos.setdefault((pref, suff), {})[ch] = f
-
-        for (pref, suff), chans in grupos.items():
-            if not chans:
-                continue
-            if not pref and not suff:
-                if rel_dir != ".":
-                    mediciones.add(rel_dir)
-            else:
-                stem = f"{pref}{suff}"
-                if rel_dir.endswith(stem):
-                    mediciones.add(rel_dir)
-                elif rel_dir != ".":
-                    mediciones.add(f"{rel_dir}/{stem}")
-                else:
-                    mediciones.add(stem)
-    return sorted(mediciones, key=_orden_natural)
+    return rutas.canales_presentes(carpeta)
 
 
 def listar_subcarpetas(ruta: str) -> list[tuple[str, str, bool]]:
     """(nombre, ruta_absoluta, tiene_h5) de las subcarpetas directas de `ruta`."""
-    if not ruta or not os.path.isdir(ruta):
-        return []
-    items = []
-    try:
-        nombres = sorted(os.listdir(ruta), key=_orden_natural)
-    except Exception:
-        return []
-    for nombre in nombres:
-        p = os.path.join(ruta, nombre)
-        if os.path.isdir(p):
-            try:
-                archivos = os.listdir(p)
-                tiene_h5 = any(
-                    _CHAN_RE.match(f) for f in archivos
-                    if os.path.isfile(os.path.join(p, f))
-                )
-            except Exception:
-                tiene_h5 = False
-            items.append((nombre, p, tiene_h5))
-    return items
+    return rutas.listar_subcarpetas(ruta)
 
 
 def _meta(carpeta: str, canal: str) -> dict:
@@ -225,10 +131,7 @@ def cargar_segmento(carpeta: str, canal: str, seg: int, ventana: tuple[float, fl
 
 
 def _dir_medicion(carpeta: str) -> str | None:
-    if not carpeta:
-        return None
-    r = _ruta(carpeta, "ch1") or _ruta(carpeta, "ch2") or _ruta(carpeta, "ch3") or _ruta(carpeta, "ch4")
-    return os.path.dirname(r) if r else None
+    return rutas.dir_medicion(carpeta)
 
 
 def obtener_metadata(carpeta: str) -> dict:

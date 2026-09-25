@@ -28,7 +28,8 @@ from main import (
 )
 import datos
 
-CARPETA_TEST = "mediciones_filtros/cada_30s/7"
+# Medición de prueba: ruta absoluta a una carpeta con ch1..ch4.h5 (no hay carpeta de datos fija).
+CARPETA_TEST = os.environ.get("TRPD_CARPETA_TEST", "")
 
 
 def test_layout_componentes_requeridos():
@@ -70,8 +71,8 @@ def test_callback_label_segmento():
 
 
 def test_callback_grafico_canal():
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     fig = actualizar_grafico_canal(
         carpeta=CARPETA_TEST,
@@ -87,8 +88,8 @@ def test_callback_grafico_canal():
 
 
 def test_callback_grafico_impulso():
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     fig = actualizar_grafico_impulso(carpeta=CARPETA_TEST, seg=1)
     assert isinstance(fig, go.Figure)
@@ -96,8 +97,8 @@ def test_callback_grafico_impulso():
 
 
 def test_callback_evaluar_iec():
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     res = evaluar_conformidad_iec(1, CARPETA_TEST)
     assert "resumen_iec" in res and "delta" in res
@@ -144,8 +145,8 @@ def test_sincronizar_umbral_arrastre_shape():
 
 def test_calcular_retardo_todos_canales():
     """Al seleccionar canal='todos', calcula el retardo de CH2, CH3 y CH4 simultáneamente."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     res = calcular_retardo_canal(1, CARPETA_TEST, "todos", None, 0.035, 0.15, "t10", {})
     assert "ch2" in res
@@ -156,8 +157,8 @@ def test_calcular_retardo_todos_canales():
 
 def test_multicanal_figura_canal_layout():
     """Verifica que figura_canal configure uirevision y trazas para todos los canales presentes."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     fig = actualizar_grafico_canal(CARPETA_TEST, "ch4", 1, 30.0, 0.035, 0.15, "t10")
     assert isinstance(fig, go.Figure)
@@ -168,8 +169,8 @@ def test_multicanal_figura_canal_layout():
 
 def test_multicanal_figura_canal_lineas_umbral_editables():
     """Verifica que figura_canal dibuje las líneas horizontales de umbral como shapes editables."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     fig = actualizar_grafico_canal(
         CARPETA_TEST, "todos", 1, None, 0.035, 0.15, "t10",
@@ -236,8 +237,8 @@ def test_sincronizar_triggers_arrastre_shape_especifico():
 
 def test_calcular_retardo_multi_trigger_independiente():
     """Al calcular retardo en modo 'todos', cada canal procesa su propio umbral y t_min."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     res = calcular_retardo_canal(
         n_clicks=1,

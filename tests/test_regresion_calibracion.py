@@ -22,7 +22,8 @@ import arribo
 import datos
 import persistencia
 
-CARPETA_TEST = "mediciones_filtros/cada_30s/7"
+# Medición de prueba: ruta absoluta a una carpeta con ch1..ch4.h5 (no hay carpeta de datos fija).
+CARPETA_TEST = os.environ.get("TRPD_CARPETA_TEST", "")
 
 
 def test_1_sintetico_t_arribo():
@@ -66,8 +67,8 @@ def test_1_sintetico_t_arribo():
 
 def test_2_t10_por_segmento_app():
     """Test 2: t10 por segmento en app.py."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     t10_arr = app.t10_por_segmento(CARPETA_TEST)
     n_fb = app.n_fallback_t10(CARPETA_TEST)
@@ -84,8 +85,8 @@ def test_2_t10_por_segmento_app():
 
 def test_3_humo_calibracion_calibrar_app():
     """Test 3: Humo de calibrar_retardo en CH4 vía calibrar_app."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     t, v = datos.cargar_segmento(CARPETA_TEST, "ch4", 1)
     u = float(np.max(np.abs(v)) * 0.60)
@@ -101,8 +102,8 @@ def test_3_humo_calibracion_calibrar_app():
 
 def test_4_trpd_antes_despues_app():
     """Test 4: TRPD antes vs después de calibración en app.py (t_abs_captura)."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     cfg_sensores = app.config_sensores_defecto(CARPETA_TEST)
     t_lag_test = 0.0124  # 12.4 ns
@@ -128,8 +129,8 @@ def test_4_trpd_antes_despues_app():
 
 def test_5_persistencia_calibrar_app():
     """Test 5: Persistencia en metadata.yaml vía persistencia y lectura en app."""
-    if not os.path.isdir(datos.MEDICIONES):
-        pytest.skip("MEDICIONES no montado")
+    if not datos.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
 
     dir_med = datos._dir_medicion(CARPETA_TEST)
     meta_path = os.path.join(dir_med, "metadata.yaml")
@@ -160,7 +161,7 @@ def test_5_persistencia_calibrar_app():
         assert abs(app.lag_canal(cal, CARPETA_TEST, "ch2") - 0.0124) < 1e-6
         assert app.lag_canal(cal, "otra_carpeta", "ch2") == 0.0
 
-        meds_cal = persistencia.mediciones_con_calibracion()
+        meds_cal = persistencia.mediciones_con_calibracion([CARPETA_TEST])
         assert CARPETA_TEST in meds_cal
 
         meta_nueva = datos.obtener_metadata(CARPETA_TEST)

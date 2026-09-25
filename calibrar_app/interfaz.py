@@ -1,7 +1,14 @@
 """Definición del layout y componentes visuales para calibrar_app."""
 
 from __future__ import annotations
+import os
+import sys
 from dash import dcc, html
+
+_RAIZ = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+if _RAIZ not in sys.path:
+    sys.path.insert(0, _RAIZ)
+import rutas  # noqa: E402
 
 
 ESTILO_CONTENEDOR = {
@@ -71,7 +78,7 @@ ESTILO_BOTON_STEPPER = {
 
 def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
     """Construye el árbol de componentes del layout de calibrar_app."""
-    med_options = [{"label": m, "value": m} for m in mediciones]
+    med_options = [{"label": rutas.etiqueta(m), "value": m, "title": m} for m in mediciones]
 
     return html.Div(
         style=ESTILO_CONTENEDOR,
@@ -79,7 +86,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
             # Stores
             dcc.Store(id="resultado_store", data={}),
             dcc.Store(id="iec_store", data={}),
-            dcc.Store(id="explorador_ruta_actual"),
+            dcc.Store(id="explorador_ruta_actual", data=rutas.ruta_inicial()),
 
             # Cabecera
             html.Div(
@@ -158,8 +165,9 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                 dcc.Dropdown(
                                     id="carpeta",
                                     options=med_options,
-                                    value=carpeta_inicial or (mediciones[0] if mediciones else ""),
+                                    value=carpeta_inicial or (mediciones[0] if mediciones else None),
                                     clearable=False,
+                                    placeholder="Elija una carpeta con 📂 Examinar…",
                                     style={"marginTop": "4px", "fontSize": "13px"},
                                 ),
                             ]),
@@ -306,7 +314,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
             # Panel Explorador de Carpetas
             html.Div(
                 id="explorador_panel",
-                hidden=True,
+                hidden=False,
                 style={
                     **ESTILO_CARD,
                     "backgroundColor": "#f8fafc",

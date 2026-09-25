@@ -16,8 +16,8 @@ if RAIZ not in sys.path:
 if AQUI not in sys.path:
     sys.path.insert(0, AQUI)
 
+import rutas
 from datos import (
-    listar_mediciones,
     canales_presentes,
     cargar_segmento,
     umbral_defecto,
@@ -28,7 +28,6 @@ from datos import (
     _CHAN_RE,
     _orden_natural,
     _dir_medicion,
-    MEDICIONES,
 )
 from arribo import t_arribo, calibrar_retardo
 from referencia import (
@@ -59,12 +58,8 @@ app = Dash(
     assets_folder=os.path.join(RAIZ, "assets"),
 )
 
-mediciones_disponibles = listar_mediciones()
-carpeta_defecto = "mediciones_filtros/cada_30s/7" if "mediciones_filtros/cada_30s/7" in mediciones_disponibles else (
-    mediciones_disponibles[0] if mediciones_disponibles else ""
-)
-
-app.layout = layout(mediciones_disponibles, carpeta_defecto)
+# Sin carpeta de datos fija: la medición se elige con el explorador de carpetas.
+app.layout = layout([], "")
 
 
 @app.callback(
@@ -86,19 +81,21 @@ def toggle_explorador(n_abrir, n_cancelar, n_confirmar, ruta_actual, carpeta_val
     except Exception:
         trig = None
     if trig == "btn_examinar":
-        inicio = _dir_medicion(carpeta_val) if carpeta_val else None
-        if not inicio or not os.path.isdir(inicio):
-            inicio = os.path.dirname(MEDICIONES)
+        inicio = rutas.dir_medicion(carpeta_val) if carpeta_val else None
+        if not inicio:
+            inicio = ruta_actual if ruta_actual else rutas.ruta_inicial()
         return False, inicio, no_update, no_update
     if trig == "explorador_cancelar":
         return True, no_update, no_update, no_update
     if trig == "explorador_confirmar":
-        if not ruta_actual:
+        nuevas = rutas.mediciones_en(ruta_actual)
+        if not nuevas:
             return no_update, no_update, no_update, no_update
         opts = list(opciones or [])
-        if not any(o.get("value") == ruta_actual for o in opts):
-            opts = opts + [{"label": ruta_actual, "value": ruta_actual}]
-        return True, no_update, ruta_actual, opts
+        for m in nuevas:
+            if not any(o.get("value") == m for o in opts):
+                opts.append({"label": rutas.etiqueta(m), "value": m, "title": m})
+        return True, no_update, nuevas[0], opts
     return no_update, no_update, no_update, no_update
 
 
@@ -115,10 +112,7 @@ def navegar_explorador(n_subir, n_subcarpetas, ruta_actual):
     except Exception:
         trig = None
     if trig == "explorador_subir":
-        if ruta_actual:
-            padre = os.path.dirname(os.path.normpath(ruta_actual))
-            return padre if os.path.isdir(padre) else no_update
-        return no_update
+        return rutas.padre(ruta_actual)
     if isinstance(trig, dict) and trig.get("type") == "explorador_ir":
         return trig["ruta"]
     return no_update
@@ -131,8 +125,8 @@ def navegar_explorador(n_subir, n_subcarpetas, ruta_actual):
     Input("explorador_ruta_actual", "data"),
 )
 def renderizar_explorador(ruta_actual):
-    if not ruta_actual or not os.path.isdir(ruta_actual):
-        return [], "", True
+    if ruta_actual != rutas.EQUIPO and (not ruta_actual or not os.path.isdir(ruta_actual)):
+        ruta_actual = rutas.EQUIPO
     filas = []
     for nombre, p, tiene_h5 in listar_subcarpetas(ruta_actual):
         filas.append(html.Button(
@@ -154,14 +148,9 @@ def renderizar_explorador(ruta_actual):
         ))
     if not filas:
         filas = [html.Div("(No hay subcarpetas)", style={"color": "#94a3b8", "fontStyle": "italic", "padding": "6px 8px"})]
-    try:
-        tiene_h5_aqui = any(
-            _CHAN_RE.match(f) for f in os.listdir(ruta_actual)
-            if os.path.isfile(os.path.join(ruta_actual, f))
-        )
-    except Exception:
-        tiene_h5_aqui = False
-    return filas, ruta_actual, not tiene_h5_aqui
+    if ruta_actual == rutas.EQUIPO:
+        return filas, "Este equipo", True
+    return filas, ruta_actual, not rutas.tiene_h5(ruta_actual)
 
 
 @app.callback(

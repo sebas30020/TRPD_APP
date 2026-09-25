@@ -1,196 +1,93 @@
 """
-Cadencia de adquisición de las mediciones (1 min vs 30 s).
+Reporte por lotes de la cadencia de adquisición (1 min vs 30 s) y reorganización
+opcional de carpetas.
 
-Lee el atributo `SegmentedTimeTag` [s] de cada segmento (relativo al segmento 1)
-en los ch*.h5 de cada medición, calcula los intervalos entre descargas (dt) y
-clasifica la medición por la mediana de dt:
-  cada_1min -> mediana a ±TOL_S de 60 s
-  cada_30s  -> mediana a ±TOL_S de 30 s
-  otros     -> cualquier otra cadencia
-Un dt que se aparta más de TOL_S del nominal de su clase se marca como anómalo.
-Genera `archivos_md/reporte_cadencia.md` y `cadencia_segmentos.csv` junto a
-este script.
+La lógica de cadencia (SegmentedTimeTag, clasificación, anomalías) vive en
+generate_metadata.py, que además la escribe en la sección 'cadencia' de cada
+metadata.yaml. Este script solo la reutiliza para:
+  - generar `archivos_md/reporte_cadencia.md` y `cadencia_segmentos.csv`;
+  - mover cada medición a <raiz>/<clase>/<medición>/ (con --mover).
 
-Ejecutar:
-  python3 cadencia.py           # simulacro: reporte + qué se movería
-  python3 cadencia.py --mover   # además mueve a Mediciones/<clase>/<medición>/
+Ejecutar (<raiz>: carpeta que contiene las mediciones, se recorre recursivamente):
+  python3 cadencia.py <raiz>           # simulacro: reporte + qué se movería
+  python3 cadencia.py <raiz> --mover   # además mueve a <raiz>/<clase>/<medición>/
 """
 import csv
 import os
-import re
 import shutil
 import sys
 from datetime import datetime
 
-import h5py
 import numpy as np
 
-AQUI = os.path.dirname(os.path.abspath(__file__))
-MEDICIONES = os.path.abspath(os.path.join(AQUI, os.pardir, "mediciones", "Mediciones"))
-CANALES = ["ch1", "ch2", "ch3", "ch4"]
+import generate_metadata as gm
+import rutas
 
-CLASES = {"cada_1min": 60.0, "cada_30s": 30.0}  # clase -> dt nominal [s]
-OTROS = "otros"
-TOL_S = 2.0
+AQUI = os.path.dirname(os.path.abspath(__file__))
+
+CLASES = gm.CLASES_CADENCIA
+OTROS = gm.CADENCIA_OTROS
+TOL_S = gm.TOL_CADENCIA_S
 
 REPORTE_MD = os.path.join(AQUI, "archivos_md", "reporte_cadencia.md")
 REPORTE_CSV = os.path.join(AQUI, "cadencia_segmentos.csv")
 
-
-_CHAN_RE = re.compile(r"^(.*?)(ch[1-4])(.*?)\.h5$", re.IGNORECASE)
-
-
-def _orden_natural(s):
-    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", s)]
+_orden_natural = rutas.orden_natural
+_ruta = rutas.ruta_canal
 
 
-def _ruta(carpeta, canal):
-    canal = canal.lower()
-    if os.path.isabs(carpeta):
-        if os.path.isfile(carpeta):
-            d, fname = os.path.split(carpeta)
-            m = _CHAN_RE.match(fname)
-            if m:
-                pref, suff = m.group(1), m.group(3)
-                p = os.path.join(d, f"{pref}{canal}{suff}.h5")
-                if os.path.isfile(p):
-                    return p
-            return carpeta if canal in fname.lower() else None
-        elif os.path.isdir(carpeta):
-            carpeta = os.path.relpath(carpeta, MEDICIONES).replace("\\", "/")
-
-    # 1. Caso directo estándar: carpeta/canal.h5
-    p = os.path.join(MEDICIONES, carpeta, f"{canal}.h5")
-    if os.path.isfile(p):
-        return p
-
-    # 2. Si carpeta es un directorio existente (ej. Mediciones/otros/4)
-    dir_directo = os.path.join(MEDICIONES, carpeta)
-    if os.path.isdir(dir_directo):
-        for f in os.listdir(dir_directo):
-            m = _CHAN_RE.match(f)
-            if m and m.group(2).lower() == canal:
-                return os.path.join(dir_directo, f)
-        return None
-
-    # 3. Si carpeta es de la forma 'categoria/stem' (ej. 'otros/1v2-30s')
-    parent, stem = os.path.split(carpeta)
-    parent_dir = os.path.join(MEDICIONES, parent)
-    if os.path.isdir(parent_dir):
-        stem_clean = re.sub(r"\.h5$", "", stem, flags=re.IGNORECASE)
-        stem_clean = re.sub(r"ch[1-4]", "", stem_clean, flags=re.IGNORECASE)
-        for f in os.listdir(parent_dir):
-            m = _CHAN_RE.match(f)
-            if m and m.group(2).lower() == canal:
-                pref, suff = m.group(1), m.group(3)
-                if f"{pref}{suff}" == stem_clean or stem_clean in f:
-                    return os.path.join(parent_dir, f)
-
-    return None
-
-
-def canales_presentes(carpeta):
-    """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden."""
-    return [c for c in CANALES if _ruta(carpeta, c) is not None and os.path.isfile(_ruta(carpeta, c))]
-
-
-def listar_mediciones():
-    """Rutas relativas a MEDICIONES de las mediciones encontradas."""
-    if not os.path.isdir(MEDICIONES):
+def listar_mediciones(raiz):
+    """Rutas absolutas de las mediciones encontradas bajo `raiz` (recursivo)."""
+    if not os.path.isdir(raiz):
         return []
-    mediciones = set()
-    for root, dirs, files in os.walk(MEDICIONES):
-        h5_files = [f for f in files if f.lower().endswith(".h5")]
-        if not h5_files:
-            continue
-        rel_dir = os.path.relpath(root, MEDICIONES).replace("\\", "/")
-        grupos = {}
-        for f in h5_files:
-            m = _CHAN_RE.match(f)
-            if m:
-                pref, ch, suff = m.group(1), m.group(2).lower(), m.group(3)
-                grupos.setdefault((pref, suff), {})[ch] = f
-
-        for (pref, suff), chans in grupos.items():
-            if not chans:
-                continue
-            if not pref and not suff:
-                if rel_dir != ".":
-                    mediciones.add(rel_dir)
-            else:
-                stem = f"{pref}{suff}"
-                if rel_dir.endswith(stem):
-                    mediciones.add(rel_dir)
-                elif rel_dir != ".":
-                    mediciones.add(f"{rel_dir}/{stem}")
-                else:
-                    mediciones.add(stem)
+    mediciones = []
+    for root, dirs, files in os.walk(raiz):
+        mediciones.extend(rutas.mediciones_en(root))
     return sorted(mediciones, key=_orden_natural)
 
 
-def marcas_temporales(ruta_h5):
-    """SegmentedTimeTag [s] de cada segmento, ordenado por nº de segmento.
-    Solo lee atributos (no carga las señales)."""
-    with h5py.File(ruta_h5, "r") as f:
-        g = f["Waveforms/" + list(f["Waveforms"].keys())[0]]
-        marcas = {}
-        for k in g.keys():
-            m = re.search(r"Seg(\d+)Data$", k)
-            if m:
-                marcas[int(m.group(1))] = float(g[k].attrs["SegmentedTimeTag"])
-    return np.array([marcas[k] for k in sorted(marcas)])
-
-
-def clasificar(mediana):
-    for clase, nominal in CLASES.items():
-        if abs(mediana - nominal) <= TOL_S:
-            return clase, nominal
-    return OTROS, None
-
-
-def diagnosticar(carpeta):
-    canales = canales_presentes(carpeta)
-    marcas = {c: marcas_temporales(_ruta(carpeta, c)) for c in canales}
-    ref = marcas[canales[0]]
-    coinciden = all(m.shape == ref.shape and np.allclose(m, ref) for m in marcas.values())
-    dt = np.diff(ref)
-    mediana = float(np.median(dt)) if dt.size else float("nan")
-    clase, nominal = clasificar(mediana)
-    anomalos = [] if nominal is None else [i for i, d in enumerate(dt) if abs(d - nominal) > TOL_S]
+def diagnosticar(carpeta, raiz):
+    marcas = gm.extraer_info_h5(carpeta)["marcas"]
+    cad = gm.analizar_cadencia(marcas) or {}
+    canales = [c for c in rutas.CANALES if marcas.get(c)]
+    ref = np.asarray(marcas[canales[0]], dtype=float) if canales else np.array([])
     return {
         "medicion": os.path.basename(carpeta),
-        "ubicacion": carpeta,
+        "ubicacion": os.path.relpath(carpeta, raiz).replace("\\", "/"),
+        "ruta": carpeta,
         "canales": canales,
         "marcas": ref,
-        "dt": dt,
-        "mediana": mediana,
-        "clase": clase,
-        "anomalos": anomalos,  # índices i de dt: salto Seg(i+1) -> Seg(i+2)
-        "coinciden": coinciden,
+        "dt": np.diff(ref),
+        "mediana": cad.get("dt_mediana_s", float("nan")),
+        "clase": cad.get("clase") or OTROS,
+        # índices i de dt: salto Seg(i+1) -> Seg(i+2)
+        "anomalos": [a["desde_seg"] - 1 for a in cad.get("anomalias", [])],
+        "coinciden": cad.get("marcas_coinciden_entre_canales", True),
     }
 
 
-def mover(d, ejecutar):
-    """Mueve la medición a MEDICIONES/<clase>/<medición>/. Devuelve un mensaje."""
+def mover(d, ejecutar, raiz):
+    """Mueve la medición a <raiz>/<clase>/<medición>/. Devuelve un mensaje."""
     destino_rel = f"{d['clase']}/{d['medicion']}"
     if d["ubicacion"] == destino_rel:
         return f"  {d['ubicacion']}: ya esta en su carpeta"
-    destino = os.path.join(MEDICIONES, d["clase"], d["medicion"])
+    destino = os.path.join(raiz, d["clase"], d["medicion"])
     if os.path.exists(destino):
         return f"  {d['ubicacion']}: el destino {destino_rel} ya existe, NO se mueve"
     if not ejecutar:
         return f"  {d['ubicacion']} -> {destino_rel} (simulacro)"
     os.makedirs(destino, exist_ok=True)
-    origen_dir = os.path.join(MEDICIONES, d["ubicacion"])
+    origen_dir = d["ruta"]
     if os.path.isdir(origen_dir):
         shutil.move(origen_dir, destino)
     else:
         for c in d["canales"]:
-            src = _ruta(d["ubicacion"], c)
+            src = _ruta(d["ruta"], c)
             if src and os.path.isfile(src):
                 shutil.move(src, os.path.join(destino, f"{c}.h5"))
     origen = d["ubicacion"]
     d["ubicacion"] = destino_rel
+    d["ruta"] = destino
     return f"  {origen} -> {destino_rel} (movido)"
 
 
@@ -268,8 +165,13 @@ def escribir_md(diags):
 
 
 def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        print("Uso: python cadencia.py <carpeta_raiz_mediciones> [--mover]")
+        sys.exit(1)
+    raiz = os.path.abspath(args[0])
     ejecutar = "--mover" in sys.argv[1:]
-    diags = [diagnosticar(c) for c in listar_mediciones()]
+    diags = [diagnosticar(c, raiz) for c in listar_mediciones(raiz)]
     diags.sort(key=lambda d: _orden_natural(d["medicion"]))
 
     print(f"{'medicion':<10}{'segs':>5}{'dt mediana':>12}  clase")
@@ -278,7 +180,7 @@ def main():
 
     print("\nMover:" if ejecutar else "\nSimulacro (usa --mover para mover):")
     for d in diags:
-        print(mover(d, ejecutar))
+        print(mover(d, ejecutar, raiz))
 
     escribir_csv(diags)
     escribir_md(diags)

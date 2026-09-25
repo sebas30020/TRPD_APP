@@ -26,7 +26,8 @@ from app import (
     _obtener_historial,
 )
 
-CARPETA_TEST = "mediciones_filtros/cada_30s/7"
+# Medición de prueba: ruta absoluta a una carpeta con ch1..ch4.h5 (no hay carpeta de datos fija).
+CARPETA_TEST = os.environ.get("TRPD_CARPETA_TEST", "")
 
 
 def test_layout_elementos_filtro_presentes():
@@ -253,6 +254,8 @@ def test_calcular_peaks_callback(monkeypatch):
 
 def test_calcular_fila_densidad_con_y_sin_exclusiones():
     """Verifica que calcular_fila_densidad refleje numéricamente las descargas excluidas."""
+    if not app.canales_presentes(CARPETA_TEST):
+        pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
     carpeta = CARPETA_TEST
     canal = "ch3"
     umbral = 15.0

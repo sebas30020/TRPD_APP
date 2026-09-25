@@ -1,6 +1,6 @@
 """Tests de persistencia, formato YAML y compatibilidad de referencias (V5, V6).
 
-Verifica round-trip en metadata.yaml de mediciones_filtros/cada_30s/7 con backup/restore
+Verifica round-trip en metadata.yaml de la medición TRPD_CARPETA_TEST con backup/restore
 garantizado, preservación de secciones originales, compatibilidad de bloques legados,
 manejo de referencia O1 con y sin ancla, y equivalencia end-to-end t10 vs O1.
 """
@@ -23,7 +23,8 @@ import persistencia
 import arribo
 import referencia
 
-CARPETA_TEST = "mediciones_filtros/cada_30s/7"
+# Medición de prueba: ruta absoluta a una carpeta con ch1..ch4.h5 (no hay carpeta de datos fija).
+CARPETA_TEST = os.environ.get("TRPD_CARPETA_TEST", "")
 
 
 @pytest.fixture
