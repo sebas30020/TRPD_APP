@@ -260,6 +260,11 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
         title=f"{carpeta} — Segmento {seg}",
         plot_bgcolor="white", paper_bgcolor="white",
         uirevision=f"{carpeta}-{canal}",
+        # Las ediciones a mano de shapes (barras arrastradas) persisten mientras
+        # editrevision no cambie; al depender de los umbrales, un valor escrito en
+        # "Configuración Multi-Trigger" prevalece sobre la posición arrastrada.
+        editrevision=f"{carpeta}-{canal}-" + "-".join(
+            str(cfg_sensores.get(ch, {}).get("umbral")) for ch in TRIGGERS),
     )
     return fig
 
@@ -1390,11 +1395,11 @@ app.layout = html.Div(
                     children=[
                         html.Span("CH2:", style={"fontWeight": "bold", "color": "#1d4ed8"}),
                         html.Span("u (mV):"),
-                        dcc.Input(id="umbral_ch2", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="umbral_ch2", debounce=True, type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
-                        dcc.Input(id="dist_ch2", type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="dist_ch2", debounce=True, type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("t_mín (µs):"),
-                        dcc.Input(id="tmin_ch2", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="tmin_ch2", debounce=True, type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
                 # CH3
@@ -1408,11 +1413,11 @@ app.layout = html.Div(
                     children=[
                         html.Span("CH3:", style={"fontWeight": "bold", "color": "#047857"}),
                         html.Span("u (mV):"),
-                        dcc.Input(id="umbral_ch3", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="umbral_ch3", debounce=True, type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
-                        dcc.Input(id="dist_ch3", type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="dist_ch3", debounce=True, type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("t_mín (µs):"),
-                        dcc.Input(id="tmin_ch3", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="tmin_ch3", debounce=True, type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
                 # CH4
@@ -1426,11 +1431,11 @@ app.layout = html.Div(
                     children=[
                         html.Span("CH4:", style={"fontWeight": "bold", "color": "#b45309"}),
                         html.Span("u (mV):"),
-                        dcc.Input(id="umbral_ch4", type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="umbral_ch4", debounce=True, type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("Δt (µs):"),
-                        dcc.Input(id="dist_ch4", type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="dist_ch4", debounce=True, type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                         html.Span("t_mín (µs):"),
-                        dcc.Input(id="tmin_ch4", type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
+                        dcc.Input(id="tmin_ch4", debounce=True, type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
             ],
@@ -1884,15 +1889,17 @@ def sincronizar_parametros_sensores(carpeta, relayout):
     Input("segmento", "value"),
     Input("canal", "value"),
     Input("captura_params", "data"),
-    State("umbral_ch2", "value"),
-    State("dist_ch2", "value"),
-    State("tmin_ch2", "value"),
-    State("umbral_ch3", "value"),
-    State("dist_ch3", "value"),
-    State("tmin_ch3", "value"),
-    State("umbral_ch4", "value"),
-    State("dist_ch4", "value"),
-    State("tmin_ch4", "value"),
+    # Inputs (no State): editar umbral, Δt o t_mín redibuja la línea de umbral y
+    # las cruces de peaks con la misma configuración que usará "⚡ Calcular peaks".
+    Input("umbral_ch2", "value"),
+    Input("dist_ch2", "value"),
+    Input("tmin_ch2", "value"),
+    Input("umbral_ch3", "value"),
+    Input("dist_ch3", "value"),
+    Input("tmin_ch3", "value"),
+    Input("umbral_ch4", "value"),
+    Input("dist_ch4", "value"),
+    Input("tmin_ch4", "value"),
 )
 def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4):
     if not carpeta or not seg:
@@ -1910,9 +1917,23 @@ def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4):
                 "tmin": float(t4) if t4 is not None else 0.0},
     }
     cap = None
-    if p and p["canal"] == canal and p["carpeta"] == carpeta:
+    if (p and p["canal"] == canal and p["carpeta"] == carpeta
+            and _captura_vigente(p, cfg_sensores.get(canal, {}))):
         cap = capturar(carpeta, canal, p["umbral"], p["dist"], p["tmin"])
     return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap)
+
+
+def _captura_vigente(p, cfg_act):
+    """True si el snapshot de "⚡ Calcular peaks" coincide con la configuración
+    actual del canal activo. Si el usuario editó umbral, Δt o t_mín después de
+    capturar, las cruces se muestran en vista previa con los valores nuevos."""
+    for clave in ("umbral", "dist", "tmin"):
+        actual = cfg_act.get(clave)
+        if actual is None:
+            continue  # umbral vacío: la captura usó el valor por defecto
+        if p.get(clave) is None or abs(float(p[clave]) - float(actual)) > 1e-9:
+            return False
+    return True
 
 
 @app.callback(
