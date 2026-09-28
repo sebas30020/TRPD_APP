@@ -1,4 +1,4 @@
-"""Punto de entrada y servidor Dash de calibrar_app (puerto 8051).
+"""Punto de entrada y servidor Dash de calibrar_app (puerto 8052).
 
 Aplicación autónoma para calibración instrumental de retardos y diagnóstico IEC 60060-1.
 """
@@ -646,5 +646,5 @@ def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente:
 
 
 if __name__ == "__main__":
-    print("Iniciando servidor calibrar_app en http://127.0.0.1:8051 ...")
-    app.run(host="127.0.0.1", port=8051, debug=False)
+    print("Iniciando servidor calibrar_app en http://127.0.0.1:8052 ...")
+    app.run(host="127.0.0.1", port=8052, debug=False)

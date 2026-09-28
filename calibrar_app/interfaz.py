@@ -111,7 +111,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                     ]),
                     html.Div([
                         html.Span(
-                            "Puerto 8051 · Modo Autónomo",
+                            "Puerto 8052 · Modo Autónomo",
                             style={
                                 "backgroundColor": "#eff6ff",
                                 "color": "#1d4ed8",
@@ -124,8 +124,8 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                             },
                         ),
                         html.A(
-                            "🔗 Ir a TRPD_APP (8050)",
-                            href="http://127.0.0.1:8050",
+                            "🔗 Ir a TRPD_APP (8051)",
+                            href="http://127.0.0.1:8051",
                             target="_blank",
                             style={
                                 "fontSize": "13px",

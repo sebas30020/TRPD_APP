@@ -15,11 +15,11 @@ YINC = 1e-4
 TAGS = [0.0, 60.2, 120.4, 180.6, 245.0]   # último salto anómalo (64.4 s)
 
 
-def _escribir_canal(ruta, n_canal, senal, yrango=8.0, bw=1e9):
+def _escribir_canal(ruta, n_canal, senal, yrango=8.0, bw=1e9, fecha=b"22-Sep-2026 10:00:00"):
     with h5py.File(ruta, "w") as f:
         dt = np.dtype([("Model", "S12"), ("Serial", "S12"), ("Date", "S22")])
         f.create_group("Frame").create_dataset(
-            "TheFrame", data=np.array((b"DSOS804A", b"MY123", b"22-Sep-2026 10:00:00"), dtype=dt))
+            "TheFrame", data=np.array((b"DSOS804A", b"MY123", fecha), dtype=dt))
         g = f.create_group("Waveforms").create_group(f"Channel {n_canal}")
         for k, v in {"YInc": YINC, "YOrg": 0.0, "XInc": XINC, "XOrg": XORG, "NumPoints": NPTS,
                      "NumSegments": len(TAGS), "YDispRange": yrango, "YDispOrigin": 0.0,
@@ -49,7 +49,7 @@ def medicion(tmp_path):
     d = tmp_path / "3V224_30kV"
     d.mkdir()
     _escribir_canal(str(d / "ch1.h5"), 1, impulso)
-    _escribir_canal(str(d / "ch3.h5"), 3, uhf, yrango=1.6, bw=2.5e9)
+    _escribir_canal(str(d / "ch3.h5"), 3, uhf, yrango=1.6, bw=2.5e9, fecha=b"22-Sep-2026 09:58:30")
     return str(d)
 
 
@@ -82,6 +82,8 @@ def test_plantilla_rellena_automaticamente(medicion):
     assert trig["nivel_v"] == pytest.approx(1.26, abs=0.05)   # 2*(1-e^-1)
     assert trig["posicion_horizontal_pct"] == pytest.approx(9.78, abs=0.01)
     assert trig["jitter_trigger_ns"] == pytest.approx(0.04, abs=1e-3)
+    assert trig["flanco_ch1_en_t0"] is True
+    assert trig["nivel_v_fuente"].startswith("medido")
 
     ch = d["canales"]
     assert ch["ch1"]["presente"] and not ch["ch2"]["presente"]
@@ -95,14 +97,16 @@ def test_plantilla_rellena_automaticamente(medicion):
 
 
 def test_trigger_no_en_ch1(tmp_path):
-    """Si CH1 está en su línea base en t = 0, el trigger no se atribuye a CH1."""
+    """El trigger siempre es CH1: si CH1 está en su línea base en t = 0 se sigue
+    midiendo el nivel, pero la verificación del flanco queda en False."""
     t = XORG + np.arange(NPTS) * XINC
     d = tmp_path / "m"
     d.mkdir()
     _escribir_canal(str(d / "ch1.h5"), 1,
                     lambda _: np.where(t > 5e-6, 2.0, 0.0) + np.random.default_rng(1).normal(0, 0.005, NPTS))
     trig = gm.plantilla_metadata(str(d), str(d))["trigger"]
-    assert trig["canal_origen"] is None and trig["nivel_v"] is None
+    assert trig["canal_origen"] == "ch1" and trig["flanco_ch1_en_t0"] is False
+    assert trig["nivel_v"] == pytest.approx(0.0, abs=0.01)
 
 
 def test_generar_completar_conserva_lo_manual(medicion):
@@ -135,3 +139,46 @@ def test_buscar_mediciones_recursivo(medicion, tmp_path):
     assert gm.buscar_mediciones(str(tmp_path)) == [medicion]
     with pytest.raises(FileNotFoundError):
         gm.generar(str(tmp_path / "no_existe"))
+
+
+def test_parsear_fecha_osc():
+    import datetime
+    assert gm.parsear_fecha_osc("9-Sep-2026 14:16:57") == datetime.datetime(2026, 9, 9, 14, 16, 57)
+    assert gm.parsear_fecha_osc("14 AUG 2025 19:09:37") == datetime.datetime(2025, 8, 14, 19, 9, 37)
+    assert gm.parsear_fecha_osc("sin fecha") is None
+    assert gm.normalizar_fecha_osc("14 AUG 2025 19:09:37") == "2025-08-14 19:09:37"
+    assert gm.normalizar_fecha_osc("raro") == "raro"
+    assert gm.normalizar_fecha_osc(None) is None
+
+
+def test_fecha_global_desde_h5_de_ch1(medicion):
+    """Una sola fecha por experimento: la del .h5 de CH1 (aunque otro canal difiera)."""
+    d = gm.plantilla_metadata(medicion, medicion, analizar=False)
+    assert d["experimento"]["fecha_hora"] == "2026-09-22 10:00:00"
+    assert not any(k.startswith("fecha") for k in d["osciloscopio"])
+
+
+def test_completar_actualiza_fecha_y_quita_clave_antigua(medicion):
+    destino = gm.generar(medicion, analizar=False)
+    datos = yaml.safe_load(open(destino, encoding="utf-8"))
+    datos["experimento"]["fecha_hora"] = None
+    datos["osciloscopio"]["fecha_adquisicion"] = "22-Sep-2026 10:00:00"
+    datos["trigger"]["posicion_horizontal_pct"] = 10.0
+    datos["trigger"]["canal_origen"] = None
+    datos["osciloscopio"]["fecha_guardado_por_canal"] = {"ch1": "x"}
+    with open(destino, "w", encoding="utf-8") as f:
+        yaml.safe_dump(datos, f, allow_unicode=True, sort_keys=False)
+
+    gm.generar(medicion, completar=True, analizar=False)
+    datos = yaml.safe_load(open(destino, encoding="utf-8"))
+    assert datos["experimento"]["fecha_hora"] == "2026-09-22 10:00:00"   # string, no datetime
+    assert not any(k.startswith("fecha") for k in datos["osciloscopio"])
+    assert datos["trigger"]["posicion_horizontal_pct"] == pytest.approx(9.78, abs=0.01)
+    assert datos["trigger"]["canal_origen"] == "ch1"
+
+
+def test_trigger_sin_senales_es_ch1(medicion):
+    trig = gm.plantilla_metadata(medicion, medicion, analizar=False)["trigger"]
+    assert trig["canal_origen"] == "ch1"
+    assert trig["posicion_horizontal_pct"] == pytest.approx(9.78, abs=0.01)
+    assert trig["nivel_v"] is None and trig["pendiente"] is None

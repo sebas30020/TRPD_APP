@@ -63,6 +63,30 @@ def _decodificar(b):
     return b.decode("utf-8", errors="ignore").strip() if isinstance(b, bytes) else str(b).strip()
 
 
+# Formatos de 'Frame/TheFrame.Date' vistos en los .h5: Infiniium ('9-Sep-2026 14:16:57')
+# y archivos convertidos desde CSV ('14 AUG 2025 19:09:37'). strptime ignora mayúsculas.
+_FORMATOS_FECHA_OSC = ("%d-%b-%Y %H:%M:%S", "%d %b %Y %H:%M:%S")
+
+
+def parsear_fecha_osc(texto):
+    """Fecha 'Date' del .h5 -> datetime, o None si no se reconoce el formato."""
+    for fmt in _FORMATOS_FECHA_OSC:
+        try:
+            return datetime.datetime.strptime(str(texto).strip(), fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def normalizar_fecha_osc(texto):
+    """Fecha 'Date' del .h5 -> 'YYYY-MM-DD HH:MM:SS'. Un texto no reconocido se
+    conserva tal cual; None si no hay fecha."""
+    if texto is None:
+        return None
+    dt = parsear_fecha_osc(texto)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else texto
+
+
 def _segmentos(grupo):
     """[(n_segmento, dataset)] ordenados por número de segmento."""
     segs = []
@@ -90,14 +114,15 @@ def extraer_info_h5(carpeta_medicion):
             continue
         try:
             with h5py.File(p, "r") as f:
-                # Metadatos del equipo (Frame). 'Date' es la hora de GUARDADO del
-                # archivo (o de exportación del CSV), no la de inicio de adquisición.
+                # Metadatos del equipo (Frame) del primer canal presente (CH1, referencia
+                # del experimento, igual que el trigger). 'Date' es la hora de GUARDADO
+                # del archivo (o de exportación del CSV), no la de inicio de adquisición.
                 if "Frame/TheFrame" in f and not info["osciloscopio"]:
                     tf = f["Frame/TheFrame"][()]
                     info["osciloscopio"] = {
                         "modelo": _decodificar(tf["Model"]),
                         "serial": _decodificar(tf["Serial"]),
-                        "fecha_adquisicion": _decodificar(tf["Date"]),
+                        "fecha_guardado": normalizar_fecha_osc(_decodificar(tf["Date"])),
                     }
                 if "Waveforms" not in f:
                     continue
@@ -194,7 +219,8 @@ def analizar_cadencia(marcas_por_canal):
 def _analizar_canal(ruta_h5, es_impulso):
     """Amplitudes por segmento de un canal en la ventana [T_INI_ANALISIS_S,
     T_FIN_ANALISIS_S] (lee solo el inicio de cada segmento). Para el canal de
-    impulso estima además polaridad y nivel del trigger (señal en t = 0)."""
+    impulso (CH1, que siempre es el canal de trigger) mide además la polaridad y el
+    nivel del trigger (señal en t = 0)."""
     with h5py.File(ruta_h5, "r") as f:
         k = list(f["Waveforms"].keys())[0]
         g = f["Waveforms"][k]
@@ -244,14 +270,14 @@ def _analizar_canal(ruta_h5, es_impulso):
     }
     if es_impulso:
         res["polaridad"] = "positiva" if np.median(picos) >= 0 else "negativa"
-        # Si el trigger está en este canal, en t = 0 la señal cruza el nivel de
-        # disparo: claramente fuera del ruido y por debajo del pico.
+        # El trigger siempre está en CH1: en t = 0 la señal está en el nivel de disparo.
+        # Verificación: ese valor debe quedar claramente fuera del ruido y bajo el pico.
         nivel = float(np.median(niveles))
         salto = abs(nivel - float(np.median(bases)))
         ruido = float(np.median(ruidos))
         en_flanco = 5 * ruido < salto < 0.95 * float(np.median(np.abs(picos)))
         res["trigger_en_este_canal"] = bool(en_flanco)
-        res["nivel_trigger_estimado_v"] = _r(nivel) if en_flanco else None
+        res["nivel_trigger_estimado_v"] = _r(nivel)
     return res
 
 
@@ -457,11 +483,12 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
     }
 
     polaridad = imp.get("polaridad", "positiva")
-    trigger_ch1 = imp.get("trigger_en_este_canal")
     datos = {
         "experimento": {
             "id": experimento,
-            "fecha_hora": osc.get("fecha_adquisicion"),
+            # Única fecha del experimento: 'Frame/TheFrame.Date' del .h5 de CH1
+            # (hora de guardado del archivo ≈ fin de la adquisición)
+            "fecha_hora": osc.get("fecha_guardado"),
             "temperatura_c": None,
             "humedad_relativa_pct": None,
         },
@@ -492,8 +519,6 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
         "osciloscopio": {
             "modelo": osc.get("modelo", "DSOS804A"),
             "serial": osc.get("serial"),
-            # 'Date' del .h5: hora de guardado del archivo, no de inicio de adquisición
-            "fecha_adquisicion": osc.get("fecha_adquisicion"),
             "frecuencia_muestreo_gsas": bt.get("frecuencia_muestreo_gsas"),
             "tiempo_total_ventana_us": bt.get("tiempo_total_us"),
             "escala_tiempo_us_div": bt.get("escala_tiempo_us_div"),
@@ -501,13 +526,16 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
             "puntos_por_segmento": bt.get("puntos_por_segmento"),
         },
         "trigger": {
-            # El .h5 no guarda la configuración del trigger: canal, pendiente y nivel se
-            # deducen de CH1 en t = 0 (si CH1 está en su flanco, el trigger es CH1).
-            "canal_origen": "ch1" if trigger_ch1 else None,
+            # El trigger siempre es CH1 (montaje fijo). El .h5 no guarda la configuración
+            # del trigger: pendiente y nivel se miden en la señal de CH1 en t = 0.
+            "canal_origen": "ch1",
             "tipo": "flanco",
-            "pendiente": polaridad if trigger_ch1 else None,
+            "pendiente": imp.get("polaridad"),
             "nivel_v": imp.get("nivel_trigger_estimado_v"),
-            "nivel_v_fuente": "estimado: mediana de CH1 en t = 0" if trigger_ch1 else None,
+            "nivel_v_fuente": "medido: mediana de CH1 en t = 0 (.h5)"
+            if imp.get("nivel_trigger_estimado_v") is not None else None,
+            # True si CH1 está en su flanco en t = 0 (confirma que disparó CH1)
+            "flanco_ch1_en_t0": imp.get("trigger_en_este_canal"),
             "posicion_horizontal_pct": bt.get("posicion_trigger_pct"),
             "pretrigger_us": bt.get("pretrigger_us"),
             "jitter_trigger_ns": bt.get("jitter_trigger_ns"),
@@ -593,9 +621,25 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
     return bloque
 
 
+def _actualizar_desde_h5(datos, nuevo):
+    """Fecha y trigger se leen del .h5 de CH1 (no se editan a mano): siempre se
+    reescriben desde `nuevo`. En el trigger solo se reescriben los valores obtenidos
+    (con --sin-senales el nivel y la pendiente quedan None y se conserva lo que había).
+    La fecha vive solo en 'experimento.fecha_hora': se eliminan las claves de fecha
+    del bloque 'osciloscopio'."""
+    datos.setdefault("experimento", {})["fecha_hora"] = nuevo["experimento"]["fecha_hora"]
+    osc = datos.setdefault("osciloscopio", {})
+    for k in ("fecha_adquisicion", "fecha_guardado", "fecha_guardado_por_canal"):
+        osc.pop(k, None)
+    trig = datos.setdefault("trigger", {})
+    for k, v in nuevo["trigger"].items():
+        if v is not None:
+            trig[k] = v
+
+
 def _guardar_yaml(datos, destino):
     with open(destino, "w", encoding="utf-8") as f:
-        yaml.safe_dump(datos, f, allow_unicode=True, sort_keys=False, default_flow_style=None)
+        yaml.safe_dump(datos, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
 
 def generar(experimento, forzar=False, completar=False, analizar=True):
@@ -622,6 +666,7 @@ def generar(experimento, forzar=False, completar=False, analizar=True):
         with open(destino, "r", encoding="utf-8") as f:
             datos = yaml.safe_load(f) or {}
         datos = completar_metadata(datos, nuevo)
+        _actualizar_desde_h5(datos, nuevo)
         datos.setdefault("generado_automaticamente", {})
         datos["generado_automaticamente"]["fecha"] = datetime.date.today().isoformat()
         datos["generado_automaticamente"]["campos_pendientes"] = _campos_pendientes(

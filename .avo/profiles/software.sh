@@ -10,7 +10,15 @@ PROJECT_DIR="$(cd "$AVO_DIR/.." && pwd)"
 source "$AVO_DIR/lib/common.sh"
 cd "$PROJECT_DIR" || exit 1
 
-PYTHON="${TRPD_PYTHON:-$PROJECT_DIR/.venv/Scripts/python.exe}"
+# Interprete: TRPD_PYTHON > venv local (fuera de Drive) > .venv legado en Drive
+VENV_LOCAL_PY="${LOCALAPPDATA:-}/venvs/trpd_app/Scripts/python.exe"
+if [[ -n "${TRPD_PYTHON:-}" ]]; then
+  PYTHON="$TRPD_PYTHON"
+elif [[ -n "${LOCALAPPDATA:-}" && -x "$VENV_LOCAL_PY" ]]; then
+  PYTHON="$VENV_LOCAL_PY"
+else
+  PYTHON="$PROJECT_DIR/.venv/Scripts/python.exe"
+fi
 if [[ ! -x "$PYTHON" ]]; then
   cat <<EOF
 {"pass":false,"metric_name":"entorno","metric_value":1,"signals":["python_env:fail"],"error_details":"No se encontro el interprete de Python en $PYTHON. No degradar al Python global."}

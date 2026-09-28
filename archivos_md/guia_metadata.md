@@ -1,6 +1,6 @@
 # Guía de Referencia: `metadata.yaml`, Probetas y `generate_metadata.py`
 
-Esta guía documenta la convención de nomenclatura de carpetas de mediciones y probetas, el esquema completo de `metadata.yaml`, el uso de la herramienta `generate_metadata.py`, las reglas de obligatoriedad del archivo y el flujo coordinado de trabajo entre **TRPD_APP** (`app.py`, puerto 8050) y el calibrador instrumental (**`calibrar_app`**, puerto 8051).
+Esta guía documenta la convención de nomenclatura de carpetas de mediciones y probetas, el esquema completo de `metadata.yaml`, el uso de la herramienta `generate_metadata.py`, las reglas de obligatoriedad del archivo y el flujo coordinado de trabajo entre **TRPD_APP** (`app.py`, puerto 8051) y el calibrador instrumental (**`calibrar_app`**, puerto 8052).
 
 ---
 
@@ -65,7 +65,7 @@ El archivo `metadata.yaml` contiene la parametrización física, instrumental y 
 ```yaml
 experimento:
   id: <experimento>                    # Ruta relativa dentro de Mediciones/
-  fecha_hora: null                     # Fecha leída del osciloscopio (.h5) si está disponible
+  fecha_hora: null                     # Única fecha: Frame/TheFrame.Date del .h5 de CH1 (≈ fin de adquisición), 'YYYY-MM-DD HH:MM:SS'
   temperatura_c: null                  # Temperatura ambiente del laboratorio (°C)
   humedad_relativa_pct: null           # Humedad relativa del laboratorio (%)
 
@@ -93,7 +93,6 @@ probeta:
 osciloscopio:
   modelo: DSOS804A
   serial: null                         # Serial instrumental extraído de los metadatos HDF5
-  fecha_adquisicion: null
   frecuencia_muestreo_gsas: null       # Frecuencia en GSa/s (ej. 5.0)
   tiempo_total_ventana_us: null        # Ventana total adquirida en µs (ej. 200.0)
   escala_tiempo_us_div: null           # Base de tiempo (µs/div)
@@ -101,11 +100,15 @@ osciloscopio:
   puntos_por_segmento: null            # Muestras por segmento (ej. 1000003)
 
 trigger:
-  canal_origen: ch1                    # Canal de sincronismo del impulso
+  canal_origen: ch1                    # Siempre CH1 (montaje fijo)
   tipo: flanco
-  pendiente: positiva
-  nivel_v: null                        # Nivel de disparo en voltios
-  posicion_horizontal_pct: 10.0        # Porcentaje horizontal de pre-trigger en pantalla
+  pendiente: positiva                  # Polaridad medida en CH1 (.h5)
+  nivel_v: null                        # Medido: mediana de CH1 en t = 0 (.h5)
+  posicion_horizontal_pct: 10.0        # XDispOrigin / XDispRange del .h5
+  nivel_v_fuente: null
+  pretrigger_us: null                  # -XDispOrigin del .h5
+  jitter_trigger_ns: null              # Dispersión de SegmentedXOrg entre segmentos
+  flanco_ch1_en_t0: null               # Verificación: CH1 está en su flanco en t = 0
 
 canales:
   ch1:
@@ -171,7 +174,7 @@ flowchart TD
 ### 3.1 Extracción automática desde los archivos HDF5 (`extraer_info_h5`)
 Cuando los archivos `ch1.h5` a `ch4.h5` existen en la carpeta, `generate_metadata.py` lee directamente sus atributos HDF5 (`Infiniium_Header` y metadatos de canal):
 - **Base temporal:** Frecuencia de muestreo (`XInc` $\rightarrow$ GSa/s), número de segmentos (`NumSegments`), puntos por segmento y duración de la ventana.
-- **Instrumento:** Modelo del osciloscopio, número de serie y fecha exacta de adquisición del registro.
+- **Instrumento:** Modelo del osciloscopio, número de serie y fecha de guardado del .h5 de CH1 (única fecha del experimento, en `experimento.fecha_hora`).
 - **Canales:** Escala vertical (`YPerDiv`), offset de voltaje (`YOrg`) y rango total de cada canal.
 
 ### 3.2 Extracción automática desde el nombre de carpeta (`inferir_parametros`)
@@ -234,15 +237,15 @@ Tanto `app.py` como `calibrar_app` extraen las trazas de tensión y corriente, d
 
 | Aplicación | Comportamiento si `metadata.yaml` no existe | Persistencia en disco |
 |---|---|---|
-| **`app.py`** (8050) | Genera la plantilla completa **en memoria** (`plantilla_metadata`), infiriendo datos de los `.h5` y de la ruta. Muestra la etiqueta *"Autogenerado desde HDF5 (no guardado)"*. | **No escribe en disco automáticamente.** Solo persiste si el usuario presiona *"💾 Guardar metadata.yaml"* o *"Guardar cambios del texto YAML"*. |
-| **`calibrar_app`** (8051) | Devuelve un diccionario vacío `{}`. No genera plantilla enriquecida en memoria. | **Escribe solo al calibrar.** Si el usuario presiona *"💾 Guardar YAML"*, crea el archivo conteniendo únicamente el bloque `calibracion_retardo`. |
+| **`app.py`** (8051) | Genera la plantilla completa **en memoria** (`plantilla_metadata`), infiriendo datos de los `.h5` y de la ruta. Muestra la etiqueta *"Autogenerado desde HDF5 (no guardado)"*. | **No escribe en disco automáticamente.** Solo persiste si el usuario presiona *"💾 Guardar metadata.yaml"* o *"Guardar cambios del texto YAML"*. |
+| **`calibrar_app`** (8052) | Devuelve un diccionario vacío `{}`. No genera plantilla enriquecida en memoria. | **Escribe solo al calibrar.** Si el usuario presiona *"💾 Guardar YAML"*, crea el archivo conteniendo únicamente el bloque `calibracion_retardo`. |
 
 ---
 
 ## 6. Interrelación entre `app.py` y `calibrar_app`
 
 ### 6.1 Arquitectura desacoplada
-`app.py` y `calibrar_app` son procesos independientes ejecutados en puertos distintos (8050 y 8051). **No comparten código ni memoria en tiempo de ejecución**. Cada aplicación posee sus propias rutinas para leer y escribir metadata (`obtener_metadata` y `guardar_metadata_archivo` existen de forma independiente en `app.py` y en `calibrar_app/datos.py`).
+`app.py` y `calibrar_app` son procesos independientes ejecutados en puertos distintos (8051 y 8052). **No comparten código ni memoria en tiempo de ejecución**. Cada aplicación posee sus propias rutinas para leer y escribir metadata (`obtener_metadata` y `guardar_metadata_archivo` existen de forma independiente en `app.py` y en `calibrar_app/datos.py`).
 
 El único medio de sincronización y comunicación entre ambas es el archivo físico `metadata.yaml` en disco:
 
@@ -250,8 +253,8 @@ El único medio de sincronización y comunicación entre ambas es el archivo fí
 sequenceDiagram
     autonumber
     participant D as Disco (metadata.yaml)
-    participant C as calibrar_app (Puerto 8051)
-    participant A as app.py (Puerto 8050)
+    participant C as calibrar_app (Puerto 8052)
+    participant A as app.py (Puerto 8051)
 
     Note over D: Archivo creado con generate_metadata.py
     C->>D: Lee metadata.yaml (obtener_metadata)
@@ -286,7 +289,7 @@ Para evitar pérdidas de información, siga siempre esta secuencia:
 [3. Parametrización]  Completar datos ambientales y de probeta manualmente
                       (desde editor de texto o en pestaña Metadata de app.py).
        ↓
-[4. Calibración]      Abrir calibrar_app (8051), calcular retardo instrumental y
+[4. Calibración]      Abrir calibrar_app (8052), calcular retardo instrumental y
                       presionar "💾 Guardar YAML" (preserva todo y anexa calibracion_retardo).
 ```
 
@@ -309,7 +312,7 @@ Medición histórica real almacenada en disco, donde el código de probeta fue r
 ```yaml
 experimento:
   id: cada_30s/7
-  fecha_hora: 10-Sep-2026 11:31:11
+  fecha_hora: '2026-09-10 11:31:11'
   temperatura_c: null
   humedad_relativa_pct: null
 circuito_impulso:
@@ -333,7 +336,6 @@ probeta:
 osciloscopio:
   modelo: DSOS804A
   serial: MY60060103
-  fecha_adquisicion: 10-Sep-2026 11:31:11
   frecuencia_muestreo_gsas: 5.0
   tiempo_total_ventana_us: 200.0
   escala_tiempo_us_div: 20.0
@@ -433,7 +435,7 @@ calibracion_retardo:
 Para profundizar en la implementación técnica de las funciones citadas, consulte los siguientes archivos del repositorio:
 
 1. [generate_metadata.py](file:///G:/Mi%20unidad/yo/usm/investigacion/proyectos/inv_pd_vac/TRPD_APP/generate_metadata.py): Extracción HDF5, inferencia de expresiones regulares por convención y generación CLI.
-2. [app.py](file:///G:/Mi%20unidad/yo/usm/investigacion/proyectos/inv_pd_vac/TRPD_APP/app.py): Interfaz TRPD (puerto 8050), generación de metadata en memoria y panel de solo lectura.
+2. [app.py](file:///G:/Mi%20unidad/yo/usm/investigacion/proyectos/inv_pd_vac/TRPD_APP/app.py): Interfaz TRPD (puerto 8051), generación de metadata en memoria y panel de solo lectura.
 3. [calibrar_app/datos.py](file:///G:/Mi%20unidad/yo/usm/investigacion/proyectos/inv_pd_vac/TRPD_APP/calibrar_app/datos.py): Gestión de carga de mediciones y lectura de metadata en el calibrador.
 4. [calibrar_app/persistencia.py](file:///G:/Mi%20unidad/yo/usm/investigacion/proyectos/inv_pd_vac/TRPD_APP/calibrar_app/persistencia.py): Guardado no destructivo del bloque `calibracion_retardo`.
 5. [archivos_md/DOCUMENTACION.md](file:///G:/Mi%20unidad/yo/usm/investigacion/proyectos/inv_pd_vac/TRPD_APP/archivos_md/DOCUMENTACION.md): Documentación global del sistema TRPD_APP.

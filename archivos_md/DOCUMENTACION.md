@@ -12,32 +12,36 @@ añada o cambie una funcionalidad.
 El proyecto cuenta con dos aplicaciones Dash independientes que operan en puertos diferentes:
 
 1. **Visor TRPD Principal (`app.py`):**
-   - **URL:** `http://127.0.0.1:8050`
+   - **URL:** `http://127.0.0.1:8051` (antes 8050; se movió porque un proceso huérfano de `app.py` quedó reteniendo el 8050 de forma irrecuperable)
    - **Propósito:** Exploración de mediciones HDF5, detección de descargas parciales, visualización TRPD y cálculo de métricas. Es consumidor de calibraciones (`metadata.yaml`).
    - **Arranque recomendado:** Ejecutar el script versionado `run_app.cmd` (doble clic o desde consola) en la raíz del proyecto.
    - **Arranque manual por terminal:**
      ```cmd
-     .\.venv\Scripts\python.exe -u app.py
+     "%LOCALAPPDATA%\venvs\trpd_app\Scripts\python.exe" -u app.py
      ```
 
 2. **Calibrador Instrumental (`calibrar_app/main.py`):**
-   - **URL:** `http://127.0.0.1:8051`
+   - **URL:** `http://127.0.0.1:8052`
    - **Propósito:** Detección de retardo instrumental ($t_{\text{lag}}$) sobre señales de calibración, ajuste de impulso IEC 60060-1 / Anexo B y guardado de resultados en `metadata.yaml`.
    - **Arranque recomendado:** Ejecutar el script versionado `run_calibrar.cmd` (doble clic o desde consola) en la raíz del proyecto.
    - **Arranque manual por terminal:**
      ```cmd
-     .\.venv\Scripts\python.exe -u calibrar_app\main.py
+     "%LOCALAPPDATA%\venvs\trpd_app\Scripts\python.exe" -u calibrar_app\main.py
      ```
 
 ### Scripts de arranque (`run_app.cmd` y `run_calibrar.cmd`)
 Ambos scripts garantizan una inicialización robusta:
 - **Ruta relativa autocontenida:** Resuelven el directorio base mediante `%~dp0`, funcionando desde cualquier ubicación.
-- **Aislamiento del intérprete:** Utilizan explícitamente `"%~dp0.venv\Scripts\python.exe"` (o la variable de entorno `TRPD_PYTHON` si está configurada).
+- **Aislamiento del intérprete:** Resuelven el intérprete en este orden: (1) la variable de entorno `TRPD_PYTHON`, si está definida; (2) el entorno local `%LOCALAPPDATA%\venvs\trpd_app\Scripts\python.exe`, si existe; (3) el `.venv` legado dentro de Google Drive (`%~dp0.venv\Scripts\python.exe`), con un aviso de que el arranque puede tardar minutos. Además fijan `PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\venvs\trpd_app\pycache` para que los `.pyc` del proyecto no se escriban en Drive.
 - **Protección contra fallos silenciosos:** Si el entorno virtual no está presente en la ruta esperada, muestran un mensaje de diagnóstico claro en español explicando el problema y abortan con código de error, evitando degradar al Python del sistema (el cual carece de dependencias y generaría falsos errores de importación).
 - **Inspección de errores:** Terminan con `pause` en caso de terminación anormal o fallo del intérprete para que las trazas sean legibles tras un doble clic.
 
 ### Consideraciones de rendimiento y entorno (Google Drive)
-- **Acceso offline al `.venv`:** Debido a que el entorno virtual reside en una unidad de Google Drive (`G:\Mi unidad\...`), el sistema de archivos de streaming puede ralentizar sustancialmente la importación de librerías complejas (`scipy`, `dash`, `h5py`) si los archivos deben consultarse en la nube. Para un arranque casi instantáneo (< 10 s), la carpeta `.venv` debe marcarse como **Disponible sin conexión** (clic derecho → *Acceso offline* → *Disponible sin conexión* en Windows Explorer).
+- **Entorno virtual fuera de Google Drive:** Con el `.venv` dentro de Drive (`G:\Mi unidad\...`, ~11.600 archivos) la importación de `scipy`, `dash` y `h5py` tarda ~3 minutos, incluso con la carpeta marcada como *Disponible sin conexión*. El entorno de trabajo vive por eso en disco local, en `%LOCALAPPDATA%\venvs\trpd_app`. El `.venv` de Drive se conserva solo como respaldo. Para recrear el entorno local:
+  ```cmd
+  "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" -m venv "%LOCALAPPDATA%\venvs\trpd_app"
+  "%LOCALAPPDATA%\venvs\trpd_app\Scripts\python.exe" -m pip install -r requirements.txt
+  ```
 - **Desactivación del recargador en desarrollo:** `app.py` ejecuta con `use_reloader=False`. Esto previene que Werkzeug importe dos veces todo el árbol de dependencias, reduciendo el tiempo de inicialización a la mitad.
 
 ---
@@ -754,7 +758,7 @@ Dos escalas, compartiendo la misma función:
   rellena solo campos ausentes o vacíos sin tocar lo escrito a mano ni `calibracion_retardo`).
   
   **Características principales:**
-  1. **Extracción automática desde los archivos `.h5`:** Lee directamente los encabezados del osciloscopio (Keysight Infiniium DSOS804A) para autocompletar el modelo, serial, fecha de adquisición, base de tiempo (frecuencia de muestreo en GSa/s, ventana temporal total en µs, puntos y segmentos) y las **escalas verticales de cada canal** (`escala_v_div`, `rango_total_v`, `offset_v`).
+  1. **Extracción automática desde los archivos `.h5`:** Lee directamente los encabezados del osciloscopio (Keysight Infiniium DSOS804A) para autocompletar el modelo, serial, fecha del experimento (guardado del .h5 de CH1), base de tiempo (frecuencia de muestreo en GSa/s, ventana temporal total en µs, puntos y segmentos) y las **escalas verticales de cada canal** (`escala_v_div`, `rango_total_v`, `offset_v`).
   2. **Inferencia por nombre de carpeta:** Si la ruta sigue el formato estándar `3V224/20260915_30kV_rep01`, infiere automáticamente el código de probeta (`3V224`), tipo de geometría (`mixta`, `monodiametro` o `asimetrica`), número de vacuolas (`3`) y la tensión DC de carga (`30.0 kV`).
   3. **Trigger y Canales configurables:** CH1 queda preasignado al divisor capacitivo de tensión de impulso / sincronismo. Los canales CH2, CH3 y CH4 vienen preconfigurados pero permiten renombrar el sensor, función, atenuación y filtros según la instrumentación conectada en el ensayo.
 
@@ -763,7 +767,7 @@ Dos escalas, compartiendo la misma función:
   ```yaml
   experimento:
     id: 3V224/20260915_30kV_rep01
-    fecha_hora: 10-Sep-2026 11:31:11     # Leído del osciloscopio (o a mano)
+    fecha_hora: '2026-09-10 11:31:11'    # Única fecha: .h5 de CH1 (≈ fin de adquisición)
     temperatura_c: null                  # Temperatura ambiente [°C]
     humedad_relativa_pct: null           # Humedad relativa [%]
 
@@ -790,7 +794,6 @@ Dos escalas, compartiendo la misma función:
   osciloscopio:
     modelo: DSOS804A
     serial: MY60060103
-    fecha_adquisicion: 10-Sep-2026 11:31:11
     frecuencia_muestreo_gsas: 5.0        # Fs = 5 GSa/s
     tiempo_total_ventana_us: 200.0       # Ventana horizontal completa [µs]
     escala_tiempo_us_div: 20.0           # Base de tiempo [µs/div]
@@ -798,11 +801,17 @@ Dos escalas, compartiendo la misma función:
     puntos_por_segmento: 1000003
 
   trigger:
-    canal_origen: ch1                    # Canal de sincronismo
+    canal_origen: ch1                    # Siempre CH1 (montaje fijo)
     tipo: flanco                         # flanco (edge)
-    pendiente: positiva                  # positiva / negativa
-    nivel_v: null                        # Nivel de umbral de disparo en osciloscopio [V]
-    posicion_horizontal_pct: 10.0
+    pendiente: positiva                  # Polaridad medida en CH1 (.h5)
+    nivel_v: 0.9914                      # Medido: mediana de CH1 en t = 0 (.h5) [V]
+    posicion_horizontal_pct: 10.0        # XDispOrigin / XDispRange del .h5
+    nivel_v_fuente: 'medido: mediana de CH1 en t = 0 (.h5)'
+    pretrigger_us: 20.0
+    jitter_trigger_ns: 0.1983
+    flanco_ch1_en_t0: true               # Verificación: CH1 está en su flanco en t = 0
+    # El .h5 no guarda la configuración del trigger; con --completar estos campos
+    # se reescriben siempre desde el .h5.
 
   canales:
     ch1:
@@ -857,18 +866,18 @@ Dos escalas, compartiendo la misma función:
 
 ---
 
-## 14. Calibración Instrumental y Aplicación `calibrar_app` (Puerto 8051)
+## 14. Calibración Instrumental y Aplicación `calibrar_app` (Puerto 8052)
 
 Para garantizar la precisión metrológica del tiempo absoluto de las descargas parciales sin sobrecargar la aplicación principal ni introducir riesgos de desincronización, el sistema desacopla el cálculo y el consumo en dos aplicaciones independientes:
 
-1. **`app.py` (Puerto 8050 — Consumidor TRPD):**
+1. **`app.py` (Puerto 8051 — Consumidor TRPD):**
    - Consume exclusivamente los retardos calibrados almacenados en `metadata.yaml` bajo el bloque `calibracion_retardo`.
    - El panel desplegable de calibración es de **solo lectura**, mostrando la trazabilidad metrológica (fuente, fecha, criterio, referencia de impulso, umbrales y estadísticas $\bar{t}_{\text{lag}} \pm \sigma$, válidos / total).
    - Incluye botón `"🔄 Recargar desde disco"` para actualizar el store de sesión inmediatamente tras guardar cambios en `calibrar_app`.
    - Realiza la traslación exacta de las nubes TRPD: $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$.
    - Si la medición fue calibrada contra el origen virtual $O_1$ de la norma IEC 60060-1, `app.py` normaliza automáticamente restando el ancla $\Delta = t_{10} - O_1 \approx 258\text{ ns}$ almacenada en el bloque `ancla`. De esta forma, el patrón TRPD es **invariante a la referencia elegida**.
 
-2. **`calibrar_app` (Puerto 8051 — Calibrador y Diagnóstico IEC):**
+2. **`calibrar_app` (Puerto 8052 — Calibrador y Diagnóstico IEC):**
    - Aplicación Dash autónoma ejecutada desde el subdirectorio `calibrar_app/` (`python calibrar_app/main.py`).
    - Permite seleccionar interactivamente la medición, el canal sensor (`ch2`, `ch3`, `ch4`) y el segmento de prueba.
    - Sincronización bidireccional entre la caja de texto del umbral $u_{\text{cal}}$ y una línea horizontal roja editable en el gráfico de señal, permitiendo ajustar umbrales visualmente arrastrando con el cursor.

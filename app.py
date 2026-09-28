@@ -8,7 +8,7 @@ selector de carpetas.
 4 filas (una por canal), eje temporal compartido, cada senal normalizada por su
 maximo (|pico| = 1). Selector de segmento. Render con WebGL (Scattergl).
 
-Ejecutar:  python3 app.py   ->  abrir http://127.0.0.1:8050
+Ejecutar:  python3 app.py   ->  abrir http://127.0.0.1:8051
 """
 import functools
 import os
@@ -1474,7 +1474,7 @@ app.layout = html.Div(
                             style={"marginLeft": "auto", "fontSize": "11px", "fontWeight": "600",
                                    "padding": "4px 10px", "backgroundColor": "#f1f5f9",
                                    "border": "1px solid #cbd5e1", "borderRadius": "4px", "cursor": "pointer"}),
-                html.A("⚡ Abrir calibrar_app (8051)", href="http://127.0.0.1:8051", target="_blank",
+                html.A("⚡ Abrir calibrar_app (8052)", href="http://127.0.0.1:8052", target="_blank",
                        style={"fontSize": "11px", "color": "#2563eb", "textDecoration": "none", "fontWeight": "600", "marginLeft": "4px"}),
             ],
         ),
@@ -2037,7 +2037,7 @@ def mostrar_detalle_calibracion(cal):
         msg_extra = f" ({aviso})" if aviso else ""
         return html.Div(
             f"Sin bloque calibracion_retardo en metadata.yaml para {carpeta}{msg_extra} — retardo 0 ns. "
-            f"Calcular en calibrar_app (puerto 8051).",
+            f"Calcular en calibrar_app (puerto 8052).",
             style={"color": "#64748b", "fontSize": "12px", "padding": "8px 0"}
         )
 
@@ -2600,4 +2600,4 @@ def seleccionar_segmento(click):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False, dev_tools_props_check=False, host="127.0.0.1", port=8050)
+    app.run(debug=True, use_reloader=False, dev_tools_props_check=False, host="127.0.0.1", port=8051)

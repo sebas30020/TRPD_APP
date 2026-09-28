@@ -4,7 +4,7 @@
 > **Agente ejecutor:** Antigravity (o cualquier agente de código). El documento se sostiene solo: no supone contexto previo.
 > **Especificación de origen:** `archivos_md/PROMPT_TRPD_Calibracion_Sincronizacion.md`. Léela antes de empezar, sobre todo las §2 y §3 (fórmulas).
 > **Repositorio:** `C:\0_matrix\doctorado\proyectos\inv_pd_vac\TRPD_APP` (Windows, Python, Dash + Plotly, rama base `main`).
-> **Datos:** fuera del repo, en `..\mediciones\Mediciones\` (constante `MEDICIONES` en `app.py:33`). Por ejemplo `mediciones_filtros/cada_30s/7/ch1..ch4.h5` + `metadata.yaml`. **No hay todavía un set de calibración de explosor.**
+> **Datos:** fuera del repo, en `..\mediciones\` (se eligen con el explorador de carpetas de la app; la constante `MEDICIONES` ya no existe). Por ejemplo `..\mediciones\tiempos_30vs1\30s_filtros_7\ch1..ch4.h5` + `metadata.yaml` (antes `mediciones_filtros/cada_30s/7`). **No hay todavía un set de calibración de explosor.**
 
 ---
 
@@ -172,7 +172,7 @@ def lag_canal(cal, carpeta, canal):
     """t_lag (µs) del canal si el store corresponde a la carpeta; 0.0 en otro caso."""
 ```
 
-**Criterio de salida:** `python -c "import app"` importa bien, y `app.t10_por_segmento("mediciones_filtros/cada_30s/7")` devuelve 50 valores finitos.
+**Criterio de salida:** `python -c "import app"` importa bien, y `app.t10_por_segmento(r"G:\Mi unidad\yo\usm\investigacion\proyectos\inv_pd_vac\mediciones\tiempos_30vs1\30s_filtros_7")` devuelve 50 valores finitos.
 
 ---
 
@@ -331,13 +331,13 @@ Crear `scripts_tmp/verificar_trpd_cal.py` (**no** commitear; o en una carpeta te
    - Sin cruce → `None`.
    - Precursor de 1.05·u a 0.1·Δt antes de un pico de 5·u, con `distance` que cubra ambos: el t_ant sale del flanco del pico **mayor**. Documentar el resultado observado.
    - Señal negativa (−v) → mismo t_ant (usa |v|).
-2. **t10 por segmento** en `mediciones_filtros/cada_30s/7`: 50 valores finitos. Imprimir `mean`, `std`, `min` y `max` en ns. Afirmar `abs(mean - tiempos_impulso()["t10"]) < 3·std + 1e-4`. Reportar cuántos usaron fallback.
+2. **t10 por segmento** en `..\mediciones\tiempos_30vs1\30s_filtros_7`: 50 valores finitos. Imprimir `mean`, `std`, `min` y `max` en ns. Afirmar `abs(mean - tiempos_impulso()["t10"]) < 3·std + 1e-4`. Reportar cuántos usaron fallback.
 3. **Humo de calibración** (no hay set de explosor): `calibrar_retardo(carpeta, "ch4", u, 0.5, 0.0)`, con `u` = 60 % del máximo |v| de CH4 en el segmento 1. Imprimir `n_valid/n_total`, `t_lag_us*1e3` y `sigma_us*1e3`. Afirmar que no hay excepción, que `len(t_lag) == n_total` y que los atípicos quedan marcados. Con un umbral absurdo (1e9): `n_valid == 0`, `t_lag_us is None`, sin excepción.
 4. **TRPD antes/después:** para cada canal presente, capturar con los parámetros por defecto (`config_sensores_defecto`) e imprimir una tabla con `mean(t_peak)`, `mean(t_abs lag=0)` y `mean(t_abs lag=0.0124 µs)`. Afirmar:
    - `np.allclose(t_abs(0), t_peak - t10_seg)`;
    - `np.allclose(t_abs(0) - t_abs(X), X)`;
    - tamaño de `t_abs` == tamaño de `t_peak`.
-5. **Persistencia:** copiar `..\mediciones\Mediciones\mediciones_filtros\cada_30s\7\metadata.yaml` a un respaldo antes de tocarlo. Luego:
+5. **Persistencia:** copiar `..\mediciones\tiempos_30vs1\30s_filtros_7\metadata.yaml` a un respaldo antes de tocarlo. Luego:
    - llamar `guardar_calibracion_metadata` con un bloque de prueba;
    - leer con `calibracion_desde_metadata` y afirmar `t_lag_us == t_lag_ns/1000` y que las secciones `experimento`, `osciloscopio` y `canales` sigan intactas;
    - **restaurar el respaldo** al terminar (en `finally`).
@@ -393,6 +393,8 @@ No hacer merge a `main` ni push sin confirmación del usuario.
 ## Resultados de verificación (Fase 5)
 
 Ejecución de `scripts_tmp/verificar_trpd_cal.py` sobre el entorno virtual (`.venv\Scripts\python.exe`):
+
+> Nota: salida histórica con las rutas de entonces. La medición `mediciones_filtros/cada_30s/7` está hoy en `..\mediciones\tiempos_30vs1\30s_filtros_7`.
 
 ```text
 === TEST 1: Verificación sintética de _t_arribo ===
