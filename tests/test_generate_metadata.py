@@ -46,8 +46,8 @@ def medicion(tmp_path):
     def uhf(_):
         return np.where(np.abs(t - 1e-6) < 5e-9, 1.0, 0.0) + rng.normal(0, 0.002, NPTS)
 
-    d = tmp_path / "3V224_30kV"
-    d.mkdir()
+    d = tmp_path / "3v_2mm2mm4mm_0" / "10kV"
+    d.mkdir(parents=True)
     _escribir_canal(str(d / "ch1.h5"), 1, impulso)
     _escribir_canal(str(d / "ch3.h5"), 3, uhf, yrango=1.6, bw=2.5e9, fecha=b"22-Sep-2026 09:58:30")
     return str(d)
@@ -74,7 +74,10 @@ def test_plantilla_rellena_automaticamente(medicion):
     assert d["cadencia"]["clase"] == "cada_1min"
     assert d["circuito_impulso"]["intervalo_entre_disparos_s"] == pytest.approx(60.2, abs=0.01)
     assert d["circuito_impulso"]["nro_disparos_programados"] == len(TAGS)
-    assert d["circuito_impulso"]["polaridad"] == "positiva"
+    assert d["circuito_impulso"]["tension_kv_ac_sec"] == 10.0
+    assert "polaridad" not in d["circuito_impulso"]
+    assert "tension_v_ac_prim" not in d["circuito_impulso"]
+    assert "tension_dc_condensador_kv" not in d["circuito_impulso"]
     assert d["circuito_impulso"]["v_pico_divisor_media_v"] == pytest.approx(2.0, abs=0.05)
 
     trig = d["trigger"]
@@ -91,7 +94,11 @@ def test_plantilla_rellena_automaticamente(medicion):
     assert ch["ch3"]["senal"]["n_segmentos_fuera_de_pantalla"] == len(TAGS)
     assert ch["ch1"]["senal"]["n_segmentos_fuera_de_pantalla"] == 0
 
-    assert d["probeta"]["codigo"] == "3V224"
+    assert d["probeta"]["codigo"] == "3v_2mm2mm4mm_0"
+    assert d["probeta"]["nro_vacuolas"] == 3
+    assert d["probeta"]["diametros"] == [2, 2, 4]
+    assert d["probeta"]["set_impulsos"] == 0
+    assert d["probeta"]["tipo_geometria"] == "mixta"
     pend = d["generado_automaticamente"]["campos_pendientes"]
     assert "experimento.temperatura_c" in pend and "trigger.nivel_v" not in pend
 
@@ -116,7 +123,7 @@ def test_generar_completar_conserva_lo_manual(medicion):
 
     # Edición manual + un campo automático borrado
     datos["experimento"]["temperatura_c"] = 21.5
-    datos["circuito_impulso"]["polaridad"] = "negativa"
+    datos["circuito_impulso"]["tension_kv_ac_sec"] = 15.0
     del datos["cadencia"]
     with open(destino, "w", encoding="utf-8") as f:
         yaml.safe_dump(datos, f, allow_unicode=True, sort_keys=False)
@@ -127,7 +134,8 @@ def test_generar_completar_conserva_lo_manual(medicion):
     gm.generar(medicion, completar=True)
     datos = yaml.safe_load(open(destino, encoding="utf-8"))
     assert datos["experimento"]["temperatura_c"] == 21.5
-    assert datos["circuito_impulso"]["polaridad"] == "negativa"
+    assert datos["circuito_impulso"]["tension_kv_ac_sec"] == 15.0
+    assert "polaridad" not in datos["circuito_impulso"]
     assert datos["cadencia"]["clase"] == "cada_1min"
     assert "experimento.temperatura_c" not in datos["generado_automaticamente"]["campos_pendientes"]
 

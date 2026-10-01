@@ -2,71 +2,83 @@ import pytest
 from generate_metadata import inferir_parametros, inferir_diametros
 
 
-def test_inferir_parametros_nuevo_paradigma():
-    # 2 vacuolas monodiametro misma capa
-    res = inferir_parametros("Mediciones/2Vmo/20260915_30kV_rep01")
-    assert res["codigo_probeta"] == "2Vmo"
-    assert res["nro_vacuolas"] == 2
+def test_inferir_parametros_nueva_jerarquia():
+    # 3 vacuolas mixtas en misma capa, set 0, 10kV
+    res = inferir_parametros("Mediciones/3v_2mm3mm3.5mm_0/10kV")
+    assert res["codigo_probeta"] == "3v_2mm3mm3.5mm_0"
+    assert res["nro_vacuolas"] == 3
+    assert res["asimetrica"] is False
+    assert res["tipo_geometria"] == "mixta"
+    assert res["diametros"] == [2, 3, 3.5]
+    assert res["set_impulsos"] == 0
+    assert res["tension_sec_kv"] == 10.0
+    assert "tension_dc" not in res
+
+    # 3 vacuolas asimétrica (distintas capas / altura), set 0, 11kV
+    res = inferir_parametros("Mediciones/3VH_2mm3mm3.5mm_0/11kV")
+    assert res["codigo_probeta"] == "3VH_2mm3mm3.5mm_0"
+    assert res["nro_vacuolas"] == 3
+    assert res["asimetrica"] is True
+    assert res["tipo_geometria"] == "asimetrica"
+    assert res["diametros"] == [2, 3, 3.5]
+    assert res["set_impulsos"] == 0
+    assert res["tension_sec_kv"] == 11.0
+
+    # 1 vacuola, set 1, 17.5kV
+    res = inferir_parametros("Mediciones/1v_2mm_1/17.5kV")
+    assert res["codigo_probeta"] == "1v_2mm_1"
+    assert res["nro_vacuolas"] == 1
+    assert res["asimetrica"] is False
     assert res["tipo_geometria"] == "monodiametro"
-    assert res["tension_dc"] == 30.0
+    assert res["diametros"] == [2]
+    assert res["set_impulsos"] == 1
+    assert res["tension_sec_kv"] == 17.5
 
-    # 2 vacuolas mixtas misma capa
-    res = inferir_parametros("Mediciones/2Vmi/20260915_30kV_rep01")
-    assert res["codigo_probeta"] == "2Vmi"
+    # Set de 2 dígitos y monodiámetro
+    res = inferir_parametros("Mediciones/2v_3mm3mm_12/15kV")
+    assert res["codigo_probeta"] == "2v_3mm3mm_12"
     assert res["nro_vacuolas"] == 2
-    assert res["tipo_geometria"] == "mixta"
-    assert res["tension_dc"] == 30.0
+    assert res["asimetrica"] is False
+    assert res["tipo_geometria"] == "monodiametro"
+    assert res["diametros"] == [3, 3]
+    assert res["set_impulsos"] == 12
+    assert res["tension_sec_kv"] == 15.0
 
-    # 2 vacuolas monodiametro asimétrica (distinta capa / altura)
-    res = inferir_parametros("Mediciones/2VmoH/20260915_30kV_rep01")
-    assert res["codigo_probeta"] == "2VmoH"
-    assert res["nro_vacuolas"] == 2
-    assert res["tipo_geometria"] == "asimetrica"
-    assert res["tension_dc"] == 30.0
-
-    # 2 vacuolas mixtas asimétrica
-    res = inferir_parametros("Mediciones/2VmiH/20260915_30kV_rep01")
-    assert res["codigo_probeta"] == "2VmiH"
-    assert res["nro_vacuolas"] == 2
-    assert res["tipo_geometria"] == "asimetrica"
-    assert res["tension_dc"] == 30.0
-
-    # 3 vacuolas mixtas
-    res = inferir_parametros("Mediciones/3Vmi/20260920_40kV_rep05")
-    assert res["codigo_probeta"] == "3Vmi"
-    assert res["nro_vacuolas"] == 3
-    assert res["tipo_geometria"] == "mixta"
-    assert res["tension_dc"] == 40.0
-
-    # 3 vacuolas monodiametro asimétrica
-    res = inferir_parametros("Mediciones/3VmoH/20260920_40kV_rep05")
-    assert res["codigo_probeta"] == "3VmoH"
-    assert res["nro_vacuolas"] == 3
-    assert res["tipo_geometria"] == "asimetrica"
-    assert res["tension_dc"] == 40.0
+    # Separadores Windows backslash y trailing slash
+    res = inferir_parametros(r"Mediciones\3v_2mm3mm3.5mm_0\10kV\\")
+    assert res["codigo_probeta"] == "3v_2mm3mm3.5mm_0"
+    assert res["tension_sec_kv"] == 10.0
+    assert res["diametros"] == [2, 3, 3.5]
 
 
-def test_inferir_parametros_retrocompatibilidad_legada():
-    # 3V224
-    res = inferir_parametros("Mediciones/3V224/20260915_30kV_rep01")
-    assert res["codigo_probeta"] == "3V224"
-    assert res["nro_vacuolas"] == 3
-    assert res["tipo_geometria"] == "mixta"
-    assert res["diametros"] == "2mm-2mm-4mm"
-    assert res["tension_dc"] == 30.0
-
-    # 3V444H
-    res = inferir_parametros("Mediciones/3V444H/20260915_30kV_rep01")
-    assert res["codigo_probeta"] == "3V444H"
-    assert res["nro_vacuolas"] == 3
-    assert res["tipo_geometria"] == "asimetrica"
-    assert res["diametros"] == "4mm-4mm-4mm"
+def test_inferir_parametros_nombres_invalidos():
+    rutas_invalidas = [
+        "Mediciones/invalido",
+        "Mediciones/2Vmo/20260915_30kV_rep01",
+        "Mediciones/3V224/30kV",
+        "Mediciones/30s_3v_2mm",
+        "3v_2mm3mm_0/10kV",     # n=3 pero solo 2 diámetros
+        "carpeta_aleatoria",
+        "",
+    ]
+    for ruta in rutas_invalidas:
+        res = inferir_parametros(ruta)
+        assert res["nro_vacuolas"] is None, ruta
+        assert res["asimetrica"] is None, ruta
+        assert res["tipo_geometria"] is None, ruta
+        assert res["diametros"] is None, ruta
+        assert res["set_impulsos"] is None, ruta
+        assert res["tension_sec_kv"] is None, ruta
+        assert res["codigo_probeta"] is None, ruta
 
 
 def test_inferir_diametros():
-    # Desde campo explícito 'diametros'
+    # Desde lista 'diametros'
+    assert inferir_diametros({"diametros": [2, 3, 3.5]}) == "2mm-3mm-3.5mm"
+    assert inferir_diametros({"diametros": [3, 3]}) == "3mm-3mm"
+
+    # Desde string 'diametros'
     assert inferir_diametros({"diametros": "2mm-2mm-3mm"}) == "2mm-2mm-3mm"
-    assert inferir_diametros({"diametros": "3mm-3mm"}) == "3mm-3mm"
 
     # Desde lista 'vacuolas'
     prob_vacs = {
@@ -78,10 +90,11 @@ def test_inferir_diametros():
     }
     assert inferir_diametros(prob_vacs) == "2mm-2mm-3mm"
 
-    # Fallback con código legado
-    assert inferir_diametros(codigo_probeta="3V224") == "2mm-2mm-4mm"
-    assert inferir_diametros({"codigo": "2V22"}) == "2mm-2mm"
+    # Desde codigo_probeta con nueva jerarquía
+    assert inferir_diametros(codigo_probeta="3v_2mm3mm3.5mm_0") == "2mm-3mm-3.5mm"
+    assert inferir_diametros({"codigo": "2v_2mm2mm_1"}) == "2mm-2mm"
 
-    # Código nuevo sin campo diametros ni vacuolas -> N/D
-    assert inferir_diametros(codigo_probeta="2Vmi") == "N/D"
+    # Sin fallback legado: códigos antiguos o inválidos -> N/D
+    assert inferir_diametros(codigo_probeta="3V224") == "N/D"
     assert inferir_diametros({"codigo": "2Vmo"}) == "N/D"
+    assert inferir_diametros(codigo_probeta="invalido") == "N/D"

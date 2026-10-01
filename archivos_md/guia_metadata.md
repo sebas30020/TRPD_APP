@@ -6,51 +6,37 @@ Esta guía documenta la convención de nomenclatura de carpetas de mediciones y 
 
 ## 1. Convención de nombres de carpetas y códigos de probeta
 
-Las mediciones residen en el directorio de almacenamiento `Mediciones/` (normalmente ubicado en `../mediciones/Mediciones` respecto al repositorio). Existen dos esquemas de nomenclatura:
+Las mediciones residen en el directorio de almacenamiento `Mediciones/` (normalmente ubicado en `../mediciones/Mediciones` respecto al repositorio) y siguen la jerarquía unificada v2:
 
-### 1.1 Esquema legado (histórico)
-- **Estructura:** `Mediciones/<clase>/<experimento>/`
-  - `<clase>` suele ser `cada_1min`, `cada_30s`, `otros`, etc.
-  - `<experimento>` suele ser un identificador numérico o secuencial (ej. `1`, `2`, `7`).
-- **Limitación:** Este esquema no sigue un patrón sintáctico inferible automáticamente por el código. Al procesar una carpeta legada, los campos de probeta y de tensión del impulso quedan vacíos (`null` o `""`) y deben completarse manualmente.
-- **Carpetas legadas actuales en disco:**
-  - `mediciones_filtros/cada_1min/1`
-  - `mediciones_filtros/cada_30s/2`, `cada_30s/3`, `cada_30s/5`, `cada_30s/6`, `cada_30s/7`
-  - `otros/4`
+```
+<mediciones>/
+  3v_2mm3mm3.5mm_0/        <- carpeta principal: {N}v[H]_{d1}mm{d2}mm..._{set}
+    10kV/                  <- nivel de tensión (secundario del transformador)
+      ch1.h5 ch2.h5 ... metadata.yaml
+    11kV/
+```
 
-### 1.2 Esquema estándar nuevo (recomendado)
-- **Estructura:** `Mediciones/<ID_Probeta>/<YYYYMMDD>_<TensionDC>kV_rep<NN>/`
-  - Ejemplo: `Mediciones/2Vmi/20260915_30kV_rep01/` o `Mediciones/2VmoH/20260915_30kV_rep01/`
-- **Ventaja:** Permite que las herramientas extraigan automáticamente el código de probeta, el número de cavidades, la clasificación geométrica (monodiametro, mixta, asimetrica) y la tensión de carga nominal del condensador sin intervención del usuario. El detalle numérico de los diámetros se documenta en el campo `diametros` de `metadata.yaml`.
+### 1.1 Estructura de la carpeta principal (`{N}v[H]_{d1}mm{d2}mm..._{set}`)
+- **`{N}v`:** Número de cavidades o vacuolas (ej. `1v`, `2v`, `3v`).
+- **Sufijo opcional `H`:** Situado inmediatamente tras la `v` (ej. `3VH_...`, insensible a mayúsculas); indica vacuolas en distintas capas o alturas relativas (`tipo_geometria: "asimetrica"`).
+- **Diámetros concatenados:** Secuencia de diámetros en milímetros (ej. `2mm3mm3.5mm` -> `[2, 3, 3.5]`, admiten decimales).
+- **Último token `_{set}`:** Número entero (`0`, `1`, `12`...) que identifica el set de impulsos con esas características constructivas.
 
-### 1.3 Sintaxis y reglas del código de probeta (`<ID_Probeta>`)
-El analizador de expresiones regulares (`inferir_parametros` en `generate_metadata.py`) procesa el identificador de la probeta bajo las siguientes reglas:
+### 1.2 Subcarpeta de nivel de tensión (`{X}kV`)
+- Contiene los archivos binarios HDF5 (`ch1.h5`..`ch4.h5`) y `metadata.yaml`.
+- El nombre `{X}kV` (p. ej. `10kV`, `17.5kV`) representa la tensión del secundario del transformador de impulso y se asigna automáticamente a `circuito_impulso.tension_kv_ac_sec`.
 
-| Elemento | Significado | Regla de validación |
-|---|---|---|
-| **Primer dígito** | Número de vacuolas / cavidades | Entero entre 1 y 4 (`nro_vacuolas`). |
-| **Letra `V`** | Separador identificador | Letra `V` mayúscula o minúscula. |
-| **Distribución en capa** | Distribución de diámetros en la misma capa | `mo` = monodiametro (diámetros iguales) / `mi` = mixto (diámetros diferentes). |
-| **Sufijo opcional `H`** | Variación geométrica en altura (distintas capas) | Indica disposición asimétrica (`tipo_geometria: "asimetrica"`), con cavidades situadas a diferente altura/capa respecto a los electrodos. |
-
-**Clasificación automática de geometría:**
-- Sin sufijo `H` (vacuolas en la misma capa):
-  - `mo`: `tipo_geometria = "monodiametro"`
-  - `mi`: `tipo_geometria = "mixta"`
-- Con sufijo `H` (vacuolas en distintas capas relativas):
-  - `tipo_geometria = "asimetrica"`
+### 1.3 Clasificación automática de geometría
+- **Con sufijo `H`:** `tipo_geometria = "asimetrica"`.
+- **Sin sufijo `H`:** Se deriva directamente de la lista de diámetros:
+  - Si todos los diámetros son iguales: `tipo_geometria = "monodiametro"`.
+  - Si existen diámetros diferentes: `tipo_geometria = "mixta"`.
 
 **Ejemplos representativos:**
-- `2Vmo`: 2 vacuolas de igual diámetro ubicadas en la misma capa (monodiametro).
-- `2Vmi`: 2 vacuolas de diferente diámetro ubicadas en la misma capa (mixta).
-- `2VmoH`: 2 vacuolas de igual diámetro situadas en diferente capa/altura (asimétrica).
-- `2VmiH`: 2 vacuolas de diferente diámetro situadas en diferente capa/altura (asimétrica).
-- `3Vmo` / `3Vmi` / `3VmoH` / `3VmiH`: 3 vacuolas según su simetría de diámetro y altura.
-- `1Vmo`: 1 vacuola (monodiametro).
-
-> [!NOTE]
-> **Compatibilidad con convención previa:**
-> El sistema mantiene plena compatibilidad con la convención anterior de dígitos explícitos (ej. `3V224`, `3V444H`). Al procesar una carpeta con dicho formato, el analizador extrae automáticamente la cantidad de vacuolas y precalcula los diámetros para `metadata.yaml`.
+- `3v_2mm3mm3.5mm_0/10kV/`: 3 vacuolas mixtas en la misma capa, set 0, tensión secundario 10 kV.
+- `3VH_2mm3mm3.5mm_0/11kV/`: 3 vacuolas en configuración asimétrica (distintas capas), set 0, 11 kV.
+- `1v_2mm_1/17.5kV/`: 1 vacuola monodiámetro de 2 mm, set 1, 17.5 kV.
+- `2v_3mm3mm_12/15kV/`: 2 vacuolas monodiámetro de 3 mm, set 12, 15 kV.
 
 ### 1.4 Descubrimiento de mediciones y ubicación de archivos
 - **Ubicación de `metadata.yaml`:** Reside directamente en la raíz de la carpeta de la medición, al mismo nivel que los archivos binarios HDF5 (`ch1.h5`, `ch2.h5`, `ch3.h5`, `ch4.h5`). No debe ubicarse dentro de subcarpetas.
@@ -64,28 +50,26 @@ El archivo `metadata.yaml` contiene la parametrización física, instrumental y 
 
 ```yaml
 experimento:
-  id: <experimento>                    # Ruta relativa dentro de Mediciones/
+  id: <principal>/<XkV>                # Ruta relativa <carpeta_principal>/<XkV>
   fecha_hora: null                     # Única fecha: Frame/TheFrame.Date del .h5 de CH1 (≈ fin de adquisición), 'YYYY-MM-DD HH:MM:SS'
   temperatura_c: null                  # Temperatura ambiente del laboratorio (°C)
   humedad_relativa_pct: null           # Humedad relativa del laboratorio (%)
 
 circuito_impulso:
   forma_onda_nominal: 1.2/50us         # Impulso tipo rayo normalizado IEC 60060-1
-  tension_v_ac_prim: null              # Tensión en primario de transformador de carga (V)
-  tension_kv_ac_sec: null              # Tensión en secundario (kV)
-  tension_dc_condensador_kv: null      # Tensión de carga del condensador (inferida si dice '<N>kV')
-  polaridad: positiva
+  tension_kv_ac_sec: null              # Tensión en secundario (kV, inferida automáticamente de la subcarpeta <X>kV)
   nro_disparos_programados: 50         # Segmentos configurados (leído de NumSegments en .h5)
   intervalo_entre_disparos_s: 30.0
 
 probeta:
-  codigo: ''                           # Código de la probeta (inferido de <ID_Probeta> si existe)
+  codigo: ''                           # Código de la probeta (inferido de la carpeta principal)
   tipo_geometria: ''                   # monodiametro / mixta / asimetrica
   descripcion: Pressboard sumergido en aceite mineral
   nro_capas_total: 4
   espesor_capa_mm: 0.48
-  nro_vacuolas: null                   # Número de cavidades (inferido del primer dígito)
-  diametros: ''                        # Detalle de diámetros en mm (ej. "2mm-2mm-3mm")
+  nro_vacuolas: null                   # Número de cavidades (inferido de {N}v)
+  diametros: []                        # Lista de diámetros en mm (ej. [2, 3, 3.5])
+  set_impulsos: null                   # Set de impulsos (inferido de _{set})
   vacuolas: []                         # Lista de detalles: {id: 1, diametro_mm: 2, capa: 2}
   distancias_entre_vacuolas_mm: []
   fotos: []
@@ -102,7 +86,7 @@ osciloscopio:
 trigger:
   canal_origen: ch1                    # Siempre CH1 (montaje fijo)
   tipo: flanco
-  pendiente: positiva                  # Polaridad medida en CH1 (.h5)
+  pendiente: positiva                  # Polaridad positiva constante o leída de HDF5
   nivel_v: null                        # Medido: mediana de CH1 en t = 0 (.h5)
   posicion_horizontal_pct: 10.0        # XDispOrigin / XDispRange del .h5
   nivel_v_fuente: null
@@ -147,7 +131,7 @@ canales:
 
 ### Propósito de las secciones de nivel superior:
 1. **`experimento`:** Identificador único de ruta y registro de condiciones termohigrométricas del laboratorio.
-2. **`circuito_impulso`:** Parámetros operativos del generador Marx/impulso (tensión de carga, polaridad, cadencia).
+2. **`circuito_impulso`:** Parámetros operativos del generador Marx/impulso (tensión del secundario, cadencia).
 3. **`probeta`:** Propiedades mecánicas y constructivas del espécimen de ensayo (pressboard, capas, dimensiones y cavidades).
 4. **`osciloscopio`:** Metadatos de digitalización y base de tiempo del instrumento (Keysight Infiniium DSOS804A).
 5. **`trigger`:** Configuración de sincronización del disparo de adquisición en el osciloscopio.
@@ -178,24 +162,26 @@ Cuando los archivos `ch1.h5` a `ch4.h5` existen en la carpeta, `generate_metadat
 - **Canales:** Escala vertical (`YPerDiv`), offset de voltaje (`YOrg`) y rango total de cada canal.
 
 ### 3.2 Extracción automática desde el nombre de carpeta (`inferir_parametros`)
-Aplica únicamente si la carpeta cumple con la convención nueva (`<ID_Probeta>/<YYYYMMDD>_<TensionDC>kV_rep<NN>`):
-- **`codigo_probeta`:** Extrae la etiqueta de probeta (ej. `2Vmi`, `2Vmo`, `2VmoH`, `3Vmi`).
-- **`tipo_geometria`:** Deduce automáticamente `monodiametro` (`mo`), `mixta` (`mi`) o `asimetrica` (`H`).
-- **`nro_vacuolas`:** Obtiene el conteo de cavidades a partir del primer dígito (`2`, `3`, etc.).
-- **`tension_dc_condensador_kv`:** Extrae el valor numérico precedente a `kV` (ej. `30.0`).
-
-*En carpetas con formato legado (ej. `cada_30s/7`), estos campos permanecen en `null` o vacíos. En carpetas con formato intermedio (ej. `3V224`), se extrae la información y se pre-infiere el campo `diametros`.*
+Aplica directamente según la nueva jerarquía (`<principal>/<XkV>`):
+- **`codigo_probeta`:** Nombre completo de la carpeta principal (ej. `3v_2mm3mm3.5mm_0`).
+- **`nro_vacuolas`:** Conteo de cavidades obtenido del prefijo `{N}v` (ej. `3`).
+- **`asimetrica`:** `True` si contiene sufijo `H` (ej. `3VH_...`), `False` en caso contrario.
+- **`tipo_geometria`:** `asimetrica` si tiene `H`; si no, `monodiametro` si todos los diámetros son iguales o `mixta` si son diferentes.
+- **`diametros`:** Lista numérica de diámetros en milímetros (ej. `[2, 3, 3.5]`).
+- **`set_impulsos`:** Número entero del set obtenido del sufijo `_{set}` (ej. `0`).
+- **`tension_kv_ac_sec`:** Tensión del secundario en kV obtenida de la subcarpeta `{X}kV` (ej. `10.0`).
 
 ### 3.3 Relleno y ajuste manual
 Los datos que no residen en el osciloscopio ni en la ruta deben ingresarse manualmente:
-- **Detalle de diámetros:** En el campo `diametros`, se especifica la magnitud y unidad de cada vacuola separadas por guion, por ejemplo: `"2mm-2mm-3mm"`.
-- **Otros campos manuales típicos:** Condiciones ambientales (`temperatura_c`, `humedad_relativa_pct`), tensiones AC de carga (`tension_v_ac_prim`, `tension_kv_ac_sec`), lista detallada de cavidades (`vacuolas: [{id: 1, diametro_mm: 2, capa: 2}]`) y distancias entre cavidades.
+- **Detalle de diámetros:** En el campo `diametros`, se infiere la lista numérica desde el nombre de carpeta (`[2, 3, 3.5]`). Si se requiere edición posterior, puede ajustarse en formato estándar o mediante la interfaz.
+- **Otros campos manuales típicos:** Condiciones ambientales (`temperatura_c`, `humedad_relativa_pct`), lista detallada de cavidades (`vacuolas: [{id: 1, diametro_mm: 2, capa: 2}]`) y distancias entre cavidades.
 - **Vías de edición:**
   1. **Directa en disco:** Abriendo `metadata.yaml` con cualquier editor de texto.
   2. **Desde la GUI de `app.py`:** En la pestaña **Metadata**, existe un cuadro de edición de texto YAML crudo (`meta_yaml_text`) con el botón **"💾 Guardar cambios del texto YAML"**.
-  
+  3. **Casilla de diámetros (`app.py`, pestaña Metadata, tarjeta 🧪 Probeta):** campo `meta_input_diametros` con el botón **"💾 Diámetros"**. Acepta `2mm-2mm-3mm`, `2, 2, 3`, `2 2 3`, `2;2;3` o `2/2/3` (decimales con punto: `2.5`) y guarda el formato estándar en `probeta.diametros`, conservando el resto del YAML. Valida contra el número de vacuolas y tipo de geometría (`monodiametro` o `mixta`). Si `metadata.yaml` aún no existe, se escribe la plantilla completa con ese campo.
+
 > [!IMPORTANT]
-> En la pestaña **Metadata** de `app.py`, las tarjetas visuales superiores (*Experimento, Circuito de Impulso, Probeta, Osciloscopio* y tabla de canales) son de **solo lectura**. No existe un formulario campo por campo; cualquier cambio manual en la interfaz se realiza exclusivamente sobre el área de texto YAML crudo.
+> En la pestaña **Metadata** de `app.py`, las tarjetas visuales superiores (*Experimento, Circuito de Impulso, Probeta, Osciloscopio* y tabla de canales) son de **solo lectura**, salvo la casilla de diámetros de la tarjeta Probeta. El resto de cambios manuales en la interfaz se realiza sobre el área de texto YAML crudo.
 
 ---
 
@@ -213,7 +199,7 @@ Debe ejecutarse desde la raíz del proyecto utilizando el entorno virtual:
 - Ruta absoluta (o relativa al directorio actual) a la carpeta de la medición. No hay carpeta de datos fija.
   - Si la carpeta no contiene `chN.h5`, se recorren sus subcarpetas y se procesan todas las mediciones encontradas.
 - `--completar`: rellena solo los campos ausentes o vacíos de un `metadata.yaml` existente; conserva lo escrito a mano y `calibracion_retardo`. **Es la opción segura para actualizar metadatas ya calibradas.**
-- `--sin-senales`: omite la lectura de señales (amplitudes, saturación, polaridad, trigger); solo usa atributos.
+- `--sin-senales`: omite el análisis de señales (amplitudes, saturación, nivel de trigger); solo usa atributos de cabecera HDF5.
 
 ### 4.2 Comportamiento del flag `--forzar`
 - **Sin opciones (comportamiento seguro):** Si el archivo `metadata.yaml` ya existe en la carpeta indicada, el script **no lo modifica** e imprime un aviso.
@@ -382,20 +368,22 @@ canales:
     rango_total_v: 4.0
 ```
 
-### 7.2 Comparativa con el estándar nuevo (`2Vmi/20260915_30kV_rep01`)
-Al procesar una medición bajo la convención moderna, `generate_metadata.py` genera automáticamente:
-- `probeta.codigo: "2Vmi"`
+### 7.2 Estándar de la nueva jerarquía (`3v_2mm3mm3.5mm_0/10kV`)
+Al procesar una medición bajo la nueva jerarquía, `generate_metadata.py` genera automáticamente:
+- `experimento.id: "3v_2mm3mm3.5mm_0/10kV"`
+- `circuito_impulso.tension_kv_ac_sec: 10.0`
+- `probeta.codigo: "3v_2mm3mm3.5mm_0"`
 - `probeta.tipo_geometria: "mixta"`
-- `probeta.nro_vacuolas: 2`
-- `probeta.diametros: ""` (para completar ej. `"2mm-3mm"`)
-- `circuito_impulso.tension_dc_condensador_kv: 30.0`
+- `probeta.nro_vacuolas: 3`
+- `probeta.diametros: [2, 3, 3.5]`
+- `probeta.set_impulsos: 0`
 
 Y al realizar la calibración con `calibrar_app`, se anexa de forma no destructiva:
 
 ```yaml
 calibracion_retardo:
   fecha: '2026-09-15'
-  fuente_calibracion: 2Vmi/20260915_30kV_rep01
+  fuente_calibracion: 3v_2mm3mm3.5mm_0/10kV
   criterio: primer_cruce_umbral
   referencia: t10_CH1_por_segmento
   referencia_impulso: t10

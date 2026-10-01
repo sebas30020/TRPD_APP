@@ -23,7 +23,8 @@ from plotly.subplots import make_subplots
 from scipy.signal import find_peaks, butter, sosfiltfilt, welch
 from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, ctx, ALL
 
-from generate_metadata import plantilla_metadata, inferir_parametros, inferir_diametros
+from generate_metadata import (plantilla_metadata, inferir_parametros, inferir_diametros,
+                               normalizar_diametros)
 
 import rutas
 
@@ -753,6 +754,26 @@ def guardar_metadata_archivo(carpeta, contenido_yaml_str):
         return False, f"Error al guardar: {e}"
 
 
+def guardar_diametros(carpeta, texto):
+    """Normaliza los diámetros escritos ('2, 2, 3' -> '2mm-2mm-3mm'), los valida contra
+    el código de probeta y los guarda en probeta.diametros sin tocar el resto del YAML.
+    Si metadata.yaml aún no existe, se escribe la plantilla completa con ese campo."""
+    meta = obtener_metadata(carpeta)
+    prob = meta.get("probeta") if isinstance(meta.get("probeta"), dict) else {}
+    # mo/mi se lee del código: con sufijo H, tipo_geometria es 'asimetrica' y lo oculta.
+    m = re.search(r"V(mo|mi)", str(prob.get("codigo") or ""), re.IGNORECASE)
+    tipo = {"mo": "monodiametro", "mi": "mixta"}[m.group(1).lower()] if m else prob.get("tipo_geometria")
+    norm, error = normalizar_diametros(texto, prob.get("nro_vacuolas"), tipo)
+    if error:
+        return False, f"Diámetros no guardados: {error}"
+    prob["diametros"] = norm
+    meta["probeta"] = prob
+    meta_clean = {k: v for k, v in meta.items() if not k.startswith("_")}
+    ok, msg = guardar_metadata_archivo(
+        carpeta, yaml.safe_dump(meta_clean, sort_keys=False, allow_unicode=True))
+    return ok, f"Diámetros {norm} — {msg}" if ok else msg
+
+
 COLUMNAS_DENSIDAD = [
     {"name": "Specimen", "id": "specimen"},
     {"name": "Voltage (kV)", "id": "voltage"},
@@ -786,12 +807,12 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
     else:
         specimen = prob.get("descripcion") or "Pressboard"
 
-    v_dc = circ.get("tension_dc_condensador_kv")
-    if v_dc is not None:
-        voltage = f"{v_dc} kV"
+    v_sec = circ.get("tension_kv_ac_sec")
+    if v_sec is not None:
+        voltage = f"{v_sec} kV"
     else:
         inf = inferir_parametros(carpeta)
-        voltage = f"{inf['tension_dc']} kV" if inf.get("tension_dc") else "-"
+        voltage = f"{inf['tension_sec_kv']} kV" if inf.get("tension_sec_kv") else "-"
 
     sens_info = canales_cfg.get(canal, {})
     sens_nom = sens_info.get("sensor") or canal.upper()
@@ -1563,6 +1584,18 @@ app.layout = html.Div(
                                 html.Div(className="card", style={"padding": "8px 10px"}, children=[
                                     html.H4("🧪 Probeta / Espécimen", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
                                     html.Div(id="meta_card_probeta", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                    # Diámetros de las vacuolas: el código (ej. 3Vmi) no los incluye.
+                                    html.Div(style={"display": "flex", "gap": "4px", "alignItems": "center",
+                                                    "marginTop": "6px", "fontSize": "11px"}, children=[
+                                        dcc.Input(id="meta_input_diametros", type="text",
+                                                  placeholder="ej. 2mm-2mm-3mm",
+                                                  style={"flex": "1", "minWidth": "0", "fontSize": "11px", "padding": "2px 4px"}),
+                                        html.Button("💾 Diámetros", id="btn_guardar_diametros",
+                                                    title="Guarda probeta.diametros en metadata.yaml",
+                                                    style={"backgroundColor": "#10b981", "color": "white", "border": "none",
+                                                           "padding": "3px 8px", "borderRadius": "4px", "fontWeight": "600",
+                                                           "cursor": "pointer", "fontSize": "11px"}),
+                                    ]),
                                 ]),
                                 html.Div(className="card", style={"padding": "8px 10px"}, children=[
                                     html.H4("📊 Osciloscopio & Adquisición", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
@@ -2260,22 +2293,33 @@ def sincronizar_tabla_densidad(data):
     Output("meta_card_osc", "children"),
     Output("meta_tabla_canales", "children"),
     Output("meta_yaml_text", "value"),
+    Output("meta_input_diametros", "value"),
     Input("carpeta", "value"),
     Input("btn_guardar_metadata", "n_clicks"),
     Input("btn_guardar_yaml_texto", "n_clicks"),
+    Input("btn_guardar_diametros", "n_clicks"),
     Input("calibracion_store", "data"),
     State("meta_yaml_text", "value"),
+    State("meta_input_diametros", "value"),
 )
-def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, cal_store, yaml_txt_state):
+def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, n_guardar_diam, cal_store,
+                              yaml_txt_state, diam_txt):
     if not carpeta:
-        return "", "", {}, "", "", "", "", "", "", ""
+        return "", "", {}, "", "", "", "", "", "", "", ""
     try:
         trig = ctx.triggered_id
     except Exception:
         trig = None
     msg_fb = ""
 
-    if trig == "btn_guardar_yaml_texto" and yaml_txt_state:
+    if trig == "btn_guardar_diametros":
+        ok, msg = guardar_diametros(carpeta, diam_txt)
+        color = "#10b981" if ok else "#ef4444"
+        msg_fb = html.Span(msg, style={"color": color, "fontWeight": "600"})
+        if not ok:
+            # Se conserva lo escrito para que el usuario lo corrija.
+            return (no_update,) * 3 + (msg_fb,) + (no_update,) * 7
+    elif trig == "btn_guardar_yaml_texto" and yaml_txt_state:
         ok, msg = guardar_metadata_archivo(carpeta, yaml_txt_state)
         color = "#10b981" if ok else "#ef4444"
         msg_fb = html.Span(msg, style={"color": color, "fontWeight": "600"})
@@ -2310,12 +2354,13 @@ def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, cal_store, yaml
         html.Div([html.Strong("Humedad: "), f"{exp.get('humedad_relativa_pct')} %" if exp.get("humedad_relativa_pct") is not None else "N/D"]),
     ]
 
+    v_sec = circ.get("tension_kv_ac_sec")
+    v_sec_str = f"{v_sec} kV" if v_sec is not None else "N/D"
     card_circ = [
         html.Div([html.Strong("Forma de onda: "), str(circ.get("forma_onda_nominal") or "1.2/50 µs")]),
-        html.Div([html.Strong("Tensión DC (carga): "), f"{circ.get('tension_dc_condensador_kv')} kV" if circ.get("tension_dc_condensador_kv") is not None else "N/D"]),
-        html.Div([html.Strong("Polaridad: "), str(circ.get("polaridad") or "positiva")]),
+        html.Div([html.Strong("Tensión secundario: "), v_sec_str]),
         html.Div([html.Strong("Disparos programados: "), str(circ.get("nro_disparos_programados") or 50)]),
-        html.Div([html.Strong("Intervalo entre disparos: "), f"{circ.get('intervalo_entre_disparos_s')} s" if circ.get("intervalo_entre_disparos_s") is not None else "30 s"]),
+        html.Div([html.Strong("Intervalo entre disparos: "), f"{circ.get('intervalo_entre_disparos_s')} s" if circ.get('intervalo_entre_disparos_s') is not None else "30 s"]),
     ]
 
     diam = inferir_diametros(prob, prob.get("codigo"))
@@ -2383,6 +2428,7 @@ def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, cal_store, yaml
         card_osc,
         tabla_ch,
         yaml_dump,
+        diam if diam != "N/D" else "",
     )
 
 

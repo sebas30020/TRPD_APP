@@ -171,12 +171,11 @@ _dibujar_impulso_ch1()     |                                     [t_peak, v_peak
   - **Mediciones históricas:** Están clasificadas por cadencia de adquisición
     (ver `cadencia.py`, sección 13) en `Mediciones/<clase>/<experimento>/`, con
     `<clase>` ∈ `cada_1min`, `cada_30s`, `otros`, y archivos `ch1.h5 … ch4.h5`.
-  - **Nuevas mediciones (estándar a partir de ahora):** Se organizan en 2 niveles
-    agrupadas por probeta y ensayo fechado:
-    `Mediciones/<ID_Probeta>/<YYYYMMDD>_<TensionDC>kV_rep<NN>/`
-    - `<ID_Probeta>`: Código estándar de probeta (ej. `1V2`, `2V22`, `3V224`, `3V444H`, `4V4444`).
-    - Subcarpeta fechada: Fecha (`YYYYMMDD`), tensión DC en el condensador de carga del circuito de impulso (ej. `30kV`) y réplica (ej. `rep01`).
-    - Ejemplo: `Mediciones/3V224/20260915_30kV_rep01/`.
+  - **Jerarquía estándar única (v2):** Se organizan en 2 niveles:
+    `<mediciones>/{N}v[H]_{d1}mm{d2}mm..._{set}/{X}kV/`
+    - Carpeta principal `{N}v[H]_{d1}mm{d2}mm..._{set}`: `{N}v` número de vacuolas, sufijo `H` opcional para asimetría, diámetros concatenados en mm (`2mm3mm3.5mm`), y `_{set}` entero de repetición/set.
+    - Subcarpeta `{X}kV`: nivel de tensión en el secundario del transformador de impulso (ej. `10kV`, `17.5kV`).
+    - Ejemplo: `Mediciones/3v_2mm3mm3.5mm_0/10kV/`.
   - No hay carpeta de datos fija: en `app.py` y `calibrar_app` la medición se elige
     con el explorador de carpetas (📂 Examinar…), que navega todo el equipo (unidades
     `C:\`, `G:\`, …). La medición queda identificada por su **ruta absoluta**
@@ -481,7 +480,7 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 - **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` id="tabla_densidad"):
   Tabla resumen de caracterización experimental multi-sensor de **10 columnas**:
   - `Specimen`: código y geometría de la probeta (ej. `2V33H (asimetrica)`).
-  - `Voltage (kV)`: tensión DC previa en el condensador de carga (ej. `15.0 kV`).
+  - `Voltage (kV)`: tensión del secundario del transformador de impulso (ej. `10.0 kV`).
   - `Sensor`: sensor y canal evaluado (ej. `HFCT (CH2)`, `Antena Vivaldi (CH3)`, `Antena Bioinspirada (CH4)`).
   - `t_lag (ns)`: retardo instrumental aplicado al canal ($\bar{t}_{\text{lag}, c}$), obtenido de la calibración activa o 0.0 ns si no está calibrado.
   - `N_PD distribution [0, 1, 2, 3, 4, > 4]`: vector con el conteo de disparos/segmentos que registraron exactamente 0, 1, 2, 3, 4 y más de 4 eventos de DP (ej. `[9, 33, 8, 0, 0, 0]`).
@@ -750,7 +749,7 @@ Dos escalas, compartiendo la misma función:
 - **`generate_metadata.py`.** Punto único para **rellenar automáticamente** el
   `metadata.yaml` de cada medición (`<carpeta_medicion>/metadata.yaml`; usa `PyYAML`,
   `h5py` y `numpy`). Incluye la lógica de cadencia (sección `cadencia` del YAML),
-  amplitudes por canal, saturación (segmentos fuera de pantalla), polaridad y
+  amplitudes por canal, saturación (segmentos fuera de pantalla) y
   canal/pendiente/nivel del trigger estimados desde CH1 en t = 0. Lo que no se
   puede deducir queda listado en `generado_automaticamente.campos_pendientes`.
   Ejecutar: `python generate_metadata.py <carpeta_medicion | carpeta_raiz> [--completar | --forzar] [--sin-senales]`
@@ -759,34 +758,33 @@ Dos escalas, compartiendo la misma función:
   
   **Características principales:**
   1. **Extracción automática desde los archivos `.h5`:** Lee directamente los encabezados del osciloscopio (Keysight Infiniium DSOS804A) para autocompletar el modelo, serial, fecha del experimento (guardado del .h5 de CH1), base de tiempo (frecuencia de muestreo en GSa/s, ventana temporal total en µs, puntos y segmentos) y las **escalas verticales de cada canal** (`escala_v_div`, `rango_total_v`, `offset_v`).
-  2. **Inferencia por nombre de carpeta:** Si la ruta sigue el formato estándar `3V224/20260915_30kV_rep01`, infiere automáticamente el código de probeta (`3V224`), tipo de geometría (`mixta`, `monodiametro` o `asimetrica`), número de vacuolas (`3`) y la tensión DC de carga (`30.0 kV`).
+  2. **Inferencia por nombre de carpeta:** Si la ruta sigue el formato estándar `{N}v[H]_{diams}_{set}/{X}kV`, infiere automáticamente el código de probeta, tipo de geometría (`mixta`, `monodiametro` o `asimetrica`), número de vacuolas (`nro_vacuolas`), lista de diámetros (`diametros`), set de impulsos (`set_impulsos`) y la tensión del secundario (`tension_kv_ac_sec`).
   3. **Trigger y Canales configurables:** CH1 queda preasignado al divisor capacitivo de tensión de impulso / sincronismo. Los canales CH2, CH3 y CH4 vienen preconfigurados pero permiten renombrar el sensor, función, atenuación y filtros según la instrumentación conectada en el ensayo.
 
   Esquema YAML generado:
 
   ```yaml
   experimento:
-    id: 3V224/20260915_30kV_rep01
+    id: 3v_2mm3mm3.5mm_0/10kV
     fecha_hora: '2026-09-10 11:31:11'    # Única fecha: .h5 de CH1 (≈ fin de adquisición)
     temperatura_c: null                  # Temperatura ambiente [°C]
     humedad_relativa_pct: null           # Humedad relativa [%]
 
   circuito_impulso:
     forma_onda_nominal: 1.2/50us         # Norma IEC 60060-1
-    tension_v_ac_prim: null              # Tensión Variac primario [V AC]
-    tension_kv_ac_sec: null              # Secundario transformador elevador [kV AC]
-    tension_dc_condensador_kv: 30.0      # Condensador de carga previo al disparo [kV DC]
-    polaridad: positiva                  # positiva / negativa
+    tension_kv_ac_sec: 10.0              # Secundario transformador elevador [kV AC]
     nro_disparos_programados: 50         # Nro de impulsos nominales
     intervalo_entre_disparos_s: 30.0     # Intervalo entre descargas [s]
 
   probeta:
-    codigo: 3V224                        # Identificador de probeta
+    codigo: 3v_2mm3mm3.5mm_0             # Identificador de probeta
     tipo_geometria: mixta                # monodiametro / mixta / asimetrica
     descripcion: Pressboard sumergido en aceite mineral
     nro_capas_total: 4
     espesor_capa_mm: 0.48
     nro_vacuolas: 3
+    diametros: [2, 3, 3.5]               # Diámetros de cavidades [mm]
+    set_impulsos: 0                      # Set de impulsos ensayados
     vacuolas: []                         # lista de {id, diametro_mm, capa}
     distancias_entre_vacuolas_mm: []     # N-1 distancias
     fotos: []
@@ -803,7 +801,7 @@ Dos escalas, compartiendo la misma función:
   trigger:
     canal_origen: ch1                    # Siempre CH1 (montaje fijo)
     tipo: flanco                         # flanco (edge)
-    pendiente: positiva                  # Polaridad medida en CH1 (.h5)
+    pendiente: positiva                  # Pendiente del trigger
     nivel_v: 0.9914                      # Medido: mediana de CH1 en t = 0 (.h5) [V]
     posicion_horizontal_pct: 10.0        # XDispOrigin / XDispRange del .h5
     nivel_v_fuente: 'medido: mediana de CH1 en t = 0 (.h5)'

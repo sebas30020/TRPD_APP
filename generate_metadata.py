@@ -15,9 +15,9 @@ que antes vivía solo en cadencia.py). Extrae al máximo desde los .h5:
 3. Señales (lee solo el inicio de cada segmento, ventana -5..20 µs; --sin-senales lo omite):
    - Por canal: línea base, ruido, pico medio/σ/máx, Vpp medio y segmentos que
      se salen de la pantalla vertical (escala mal elegida).
-   - CH1 (impulso): polaridad y, si CH1 está en su flanco en t = 0, canal,
+   - CH1 (impulso): si CH1 está en su flanco en t = 0, canal,
      pendiente y nivel del trigger estimados.
-4. Desde la ruta: código de probeta, geometría, nº de vacuolas, diámetros, tensión DC.
+4. Desde la ruta: código de probeta, geometría, nº de vacuolas, diámetros, set de impulsos, tensión del secundario (kV).
 
 Lo que no se puede deducir queda en None y se lista en
 'generado_automaticamente.campos_pendientes'. plantilla_metadata() no incluye
@@ -219,7 +219,7 @@ def analizar_cadencia(marcas_por_canal):
 def _analizar_canal(ruta_h5, es_impulso):
     """Amplitudes por segmento de un canal en la ventana [T_INI_ANALISIS_S,
     T_FIN_ANALISIS_S] (lee solo el inicio de cada segmento). Para el canal de
-    impulso (CH1, que siempre es el canal de trigger) mide además la polaridad y el
+    impulso (CH1, que siempre es el canal de trigger) mide además el
     nivel del trigger (señal en t = 0)."""
     with h5py.File(ruta_h5, "r") as f:
         k = list(f["Waveforms"].keys())[0]
@@ -269,7 +269,6 @@ def _analizar_canal(ruta_h5, es_impulso):
         "segmentos_fuera_de_pantalla": segs_fuera,
     }
     if es_impulso:
-        res["polaridad"] = "positiva" if np.median(picos) >= 0 else "negativa"
         # El trigger siempre está en CH1: en t = 0 la señal está en el nivel de disparo.
         # Verificación: ese valor debe quedar claramente fuera del ruido y bajo el pico.
         nivel = float(np.median(niveles))
@@ -299,90 +298,89 @@ def analizar_senales(carpeta_medicion):
     return res
 
 
+RE_KV = re.compile(r"^(\d+(?:\.\d+)?)kV$", re.IGNORECASE)
+RE_PRINCIPAL = re.compile(
+    r"^(?P<n>[1-9])[vV](?P<h>[hH])?_(?P<diams>(?:\d+(?:\.\d+)?mm)+)_(?P<set>\d+)$"
+)
+RE_DIAM_TOKEN = re.compile(r"(\d+(?:\.\d+)?)mm", re.IGNORECASE)
+
+
 def inferir_parametros(experimento):
-    """Infiere código de probeta, tensión DC y tipo de geometría a partir de la ruta."""
-    partes = experimento.replace("\\", "/").split("/")
+    """Infiere código de probeta, geometría, vacuolas, diámetros, set y tensión
+    del secundario a partir de la jerarquía: <principal>/<XkV>."""
+    partes = [p for p in str(experimento or "").replace("\\", "/").split("/") if p]
+    if partes and partes[-1].lower().endswith((".h5", ".yaml", ".yml")):
+        partes = partes[:-1]
+
     codigo_probeta = None
-    tension_dc = None
-    tipo_geometria = None
+    tension_sec_kv = None
     nro_vacuolas = None
+    asimetrica = None
+    tipo_geometria = None
     diametros = None
+    set_impulsos = None
 
-    # Patrón nuevo: 1-4 vacuolas, 'mo' (monodiametro) o 'mi' (mixto), sufijo opcional 'H' (asimetrica)
-    patron_nuevo = re.compile(r"([1-4]V(?:mo|mi)[H]?)(?:[_\-\s/]|\b|$)", re.IGNORECASE)
-    # Patrón legado de respaldo: dígitos de diámetros en el código (ej. 3V224, 3V444H)
-    patron_legado = re.compile(r"([1-4]V[2-4]+[H]?)(?:[_\-\s/]|\b|$)", re.IGNORECASE)
+    if not partes:
+        return {
+            "codigo_probeta": None,
+            "tipo_geometria": None,
+            "nro_vacuolas": None,
+            "asimetrica": None,
+            "diametros": None,
+            "set_impulsos": None,
+            "tension_sec_kv": None,
+        }
 
-    for p in partes:
-        m = patron_nuevo.search(p)
-        if m:
-            raw = m.group(1)
-            # Normalizar convención: ej. 2Vmo, 2Vmi, 2VmoH, 2VmiH
-            n = raw[0]
-            v = "V"
-            tipo_tag = raw[2:4].lower()
-            h_tag = "H" if len(raw) > 4 and raw[4].upper() == "H" else ""
-            codigo_probeta = f"{n}{v}{tipo_tag}{h_tag}"
-            break
+    m_kv = RE_KV.match(partes[-1])
+    cand_principal = None
+    if m_kv:
+        tension_sec_kv = float(m_kv.group(1))
+        if len(partes) >= 2:
+            cand_principal = partes[-2]
+    else:
+        m_direct = RE_PRINCIPAL.match(partes[-1])
+        if m_direct:
+            cand_principal = partes[-1]
+
+    if cand_principal:
+        m_p = RE_PRINCIPAL.match(cand_principal)
+        if m_p:
+            n_val = int(m_p.group("n"))
+            h_val = bool(m_p.group("h"))
+            diams_str = m_p.group("diams")
+            set_val = int(m_p.group("set"))
+
+            raw_tokens = RE_DIAM_TOKEN.findall(diams_str)
+            parsed_diams = [
+                int(float(x)) if float(x).is_integer() else float(x)
+                for x in raw_tokens
+            ]
+
+            tokens_rebuilt = "".join(f"{x}mm" for x in raw_tokens)
+            if tokens_rebuilt.lower() == diams_str.lower() and len(parsed_diams) == n_val:
+                codigo_probeta = cand_principal
+                nro_vacuolas = n_val
+                asimetrica = h_val
+                diametros = parsed_diams
+                set_impulsos = set_val
+                if asimetrica:
+                    tipo_geometria = "asimetrica"
+                elif len(set(diametros)) == 1:
+                    tipo_geometria = "monodiametro"
+                else:
+                    tipo_geometria = "mixta"
 
     if not codigo_probeta:
-        for p in partes:
-            m = patron_legado.search(p)
-            if m:
-                codigo_probeta = m.group(1).upper()
-                break
-
-    if codigo_probeta:
-        if codigo_probeta[0].isdigit():
-            nro_vacuolas = int(codigo_probeta[0])
-
-        # Caso 1: Nuevo formato (mo / mi / H)
-        match_nuevo = re.search(r"^[1-4]V(mo|mi)(H)?$", codigo_probeta, re.IGNORECASE)
-        if match_nuevo:
-            distrib = match_nuevo.group(1).lower()
-            tiene_h = bool(match_nuevo.group(2))
-            if tiene_h:
-                tipo_geometria = "asimetrica"
-            elif distrib == "mo":
-                tipo_geometria = "monodiametro"
-            else:
-                tipo_geometria = "mixta"
-        else:
-            # Caso 2: Formato legado con dígitos (ej. 3V224, 3V444H)
-            if "H" in codigo_probeta.upper():
-                tipo_geometria = "asimetrica"
-            else:
-                match_v = re.search(r"^[1-4]V([2-4]+)", codigo_probeta, re.IGNORECASE)
-                if match_v:
-                    digitos = match_v.group(1)
-                    tipo_geometria = "monodiametro" if len(set(digitos)) == 1 else "mixta"
-            match_v = re.search(r"^[1-4]V([2-4]+)", codigo_probeta, re.IGNORECASE)
-            if match_v:
-                digitos = match_v.group(1)
-                diametros = "-".join([f"{d}mm" for d in digitos])
-
-    if nro_vacuolas is None:
-        # Respaldo: número de vacuolas suelto en el nombre de carpeta (ej. '30s_3v_2mm',
-        # '2vac', '4 vacuolas'). Se busca desde la carpeta más profunda hacia arriba.
-        patron_nro = re.compile(r"(?<![A-Za-z0-9])([1-4])\s*(?:vacuolas?|vac|v)(?![A-Za-z])", re.IGNORECASE)
-        for p in reversed(partes):
-            m = patron_nro.search(p)
-            if m:
-                nro_vacuolas = int(m.group(1))
-                break
-
-    for p in partes:
-        m = re.search(r"(\d+(?:\.\d+)?)kV", p, re.IGNORECASE)
-        if m:
-            tension_dc = float(m.group(1))
-            break
+        tension_sec_kv = None
 
     return {
         "codigo_probeta": codigo_probeta,
         "tipo_geometria": tipo_geometria,
         "nro_vacuolas": nro_vacuolas,
-        "tension_dc": tension_dc,
+        "asimetrica": asimetrica,
         "diametros": diametros,
+        "set_impulsos": set_impulsos,
+        "tension_sec_kv": tension_sec_kv,
     }
 
 
@@ -391,6 +389,8 @@ def inferir_diametros(probeta_data=None, codigo_probeta=None):
     if isinstance(probeta_data, dict):
         # 1. Campo explícito 'diametros'
         d_val = probeta_data.get("diametros")
+        if isinstance(d_val, list) and d_val:
+            return "-".join(f"{float(d):g}mm" for d in d_val)
         if d_val and str(d_val).strip():
             return str(d_val).strip()
 
@@ -402,11 +402,11 @@ def inferir_diametros(probeta_data=None, codigo_probeta=None):
                 if isinstance(v, dict):
                     d = v.get("diametro_mm") or v.get("d_mm") or v.get("diametro")
                     if d is not None:
-                        partes.append(f"{d}mm")
+                        partes.append(f"{float(d):g}mm")
                 elif isinstance(v, (int, float, str)):
                     s = str(v).strip()
                     if not s.lower().endswith("mm"):
-                        s = f"{s}mm"
+                        s = f"{float(s):g}mm"
                     partes.append(s)
             if partes:
                 return "-".join(partes)
@@ -414,14 +414,46 @@ def inferir_diametros(probeta_data=None, codigo_probeta=None):
         if not codigo_probeta:
             codigo_probeta = probeta_data.get("codigo")
 
-    # 3. Formato numérico legado en codigo_probeta (ej. 3V224 -> 2mm-2mm-4mm)
+    # 3. Formato nuevo en codigo_probeta (ej. 3v_2mm3mm3.5mm_0 -> 2mm-3mm-3.5mm)
     if codigo_probeta:
-        m = re.search(r"^[1-4]V([2-4]+)", str(codigo_probeta), re.IGNORECASE)
+        m = RE_PRINCIPAL.match(str(codigo_probeta).strip())
         if m:
-            digitos = m.group(1)
-            return "-".join([f"{d}mm" for d in digitos])
+            raw_tokens = RE_DIAM_TOKEN.findall(m.group("diams"))
+            if raw_tokens:
+                return "-".join(f"{float(x):g}mm" for x in raw_tokens)
 
     return "N/D"
+
+
+def normalizar_diametros(texto, nro_vacuolas=None, tipo_geometria=None):
+    """Texto libre de diámetros -> (formato estándar '2mm-2mm-3mm', None) o (None, error).
+
+    Acepta separadores '-', ',', ';', '/' o espacios, con o sin 'mm' (decimales con
+    punto: '2.5'). Si se conocen, valida contra el número de vacuolas y la geometría
+    del código de probeta (monodiametro: todos iguales; mixta: al menos dos distintos).
+    """
+    partes = [p for p in re.split(r"[-,;/\s]+", str(texto or "").lower()) if p]
+    if not partes:
+        return None, "Escriba al menos un diámetro (ej. 2mm-2mm-3mm)."
+    valores = []
+    for p in partes:
+        num = p[:-2] if p.endswith("mm") else p
+        try:
+            d = float(num)
+        except ValueError:
+            return None, f"'{p}' no es un diámetro válido."
+        if d <= 0:
+            return None, f"'{p}' debe ser mayor que 0."
+        valores.append(d)
+    if nro_vacuolas and len(valores) != int(nro_vacuolas):
+        return None, (f"Se indicaron {len(valores)} diámetros, pero la probeta tiene "
+                      f"{nro_vacuolas} vacuolas.")
+    tipo = str(tipo_geometria or "").lower()
+    if tipo == "monodiametro" and len(set(valores)) > 1:
+        return None, "Probeta monodiámetro: todos los diámetros deben ser iguales."
+    if tipo == "mixta" and len(valores) > 1 and len(set(valores)) == 1:
+        return None, "Probeta mixta: debe haber al menos dos diámetros distintos."
+    return "-".join(f"{d:g}mm" for d in valores), None
 
 
 
@@ -432,7 +464,7 @@ def _campos_pendientes(d, prefijo=""):
         ruta = f"{prefijo}{k}"
         if isinstance(v, dict):
             pend += _campos_pendientes(v, ruta + ".")
-        elif v is None or v == "":
+        elif v is None or v == "" or (k == "diametros" and v == []):
             pend.append(ruta)
     return pend
 
@@ -440,7 +472,7 @@ def _campos_pendientes(d, prefijo=""):
 def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
     """Esquema enriquecido, rellenado automáticamente al máximo desde los .h5:
     atributos del osciloscopio, cadencia (SegmentedTimeTag) y, si `analizar`,
-    amplitudes de las señales, polaridad y nivel de trigger estimados."""
+    amplitudes de las señales y nivel de trigger estimados."""
     # Se lee la medición concreta (soporta '<dir>/<stem>' de archivos agrupados)
     fuente = experimento if rutas.canales_presentes(experimento) else carpeta_medicion
     h5_info = extraer_info_h5(fuente)
@@ -482,10 +514,19 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
                       unidad="V", filtro="HP_200MHz"),
     }
 
-    polaridad = imp.get("polaridad", "positiva")
+    partes_exp = [p for p in str(experimento or "").replace("\\", "/").split("/") if p]
+    if partes_exp and partes_exp[-1].lower().endswith((".h5", ".yaml", ".yml")):
+        partes_exp = partes_exp[:-1]
+    if len(partes_exp) >= 2:
+        exp_id = f"{partes_exp[-2]}/{partes_exp[-1]}"
+    else:
+        exp_id = partes_exp[-1] if partes_exp else str(experimento)
+
+    pendiente = h5_info.get("trigger", {}).get("pendiente") or ("positiva" if analizar else None)
+
     datos = {
         "experimento": {
-            "id": experimento,
+            "id": exp_id,
             # Única fecha del experimento: 'Frame/TheFrame.Date' del .h5 de CH1
             # (hora de guardado del archivo ≈ fin de la adquisición)
             "fecha_hora": osc.get("fecha_guardado"),
@@ -494,10 +535,7 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
         },
         "circuito_impulso": {
             "forma_onda_nominal": "1.2/50us",
-            "tension_v_ac_prim": None,
-            "tension_kv_ac_sec": None,
-            "tension_dc_condensador_kv": inf["tension_dc"],
-            "polaridad": polaridad,
+            "tension_kv_ac_sec": inf["tension_sec_kv"],
             "nro_disparos_programados": bt.get("num_segmentos", 50),
             "intervalo_entre_disparos_s": (cad or {}).get("dt_mediana_s", 30.0),
             # Salida del divisor en CH1 (V en el osciloscopio, no kV)
@@ -511,7 +549,8 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
             "nro_capas_total": 4,
             "espesor_capa_mm": 0.48,
             "nro_vacuolas": inf["nro_vacuolas"],
-            "diametros": inf.get("diametros") or "",
+            "diametros": inf.get("diametros") if inf.get("diametros") is not None else [],
+            "set_impulsos": inf.get("set_impulsos"),
             "vacuolas": [],
             "distancias_entre_vacuolas_mm": [],
             "fotos": [],
@@ -530,7 +569,7 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
             # del trigger: pendiente y nivel se miden en la señal de CH1 en t = 0.
             "canal_origen": "ch1",
             "tipo": "flanco",
-            "pendiente": imp.get("polaridad"),
+            "pendiente": pendiente,
             "nivel_v": imp.get("nivel_trigger_estimado_v"),
             "nivel_v_fuente": "medido: mediana de CH1 en t = 0 (.h5)"
             if imp.get("nivel_trigger_estimado_v") is not None else None,
