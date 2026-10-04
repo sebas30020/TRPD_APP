@@ -160,3 +160,25 @@ def n_fallback_t10(carpeta: str) -> int:
     if carpeta not in _T10_FALLBACK_COUNT:
         t10_por_segmento(carpeta)
     return _T10_FALLBACK_COUNT.get(carpeta, 0)
+
+
+# Varios callbacks piden t10 / impulso promedio a la vez al cambiar de medición
+# (servidor con hilos): solo el primero recorre CH1, el resto espera su resultado.
+import datos_h5  # noqa: E402
+
+_t10_por_segmento_directo = t10_por_segmento
+_promedio_impulso_directo = promedio_impulso
+
+
+def t10_por_segmento(carpeta: str) -> np.ndarray:  # noqa: F811
+    """t10 (µs) por segmento (ver _t10_por_segmento_directo), calculado una sola vez."""
+    return datos_h5.calcular_una_vez(_T10_SEG_CACHE, carpeta,
+                                      lambda: _t10_por_segmento_directo(carpeta))
+
+
+def promedio_impulso(carpeta: str) -> tuple[np.ndarray | None, np.ndarray | None]:  # noqa: F811
+    """Promedio de CH1 (ver _promedio_impulso_directo), calculado una sola vez."""
+    if not carpeta or "ch1" not in canales_presentes(carpeta):
+        return None, None
+    return datos_h5.calcular_una_vez(_IMPULSO_CACHE, carpeta,
+                                      lambda: _promedio_impulso_directo(carpeta))

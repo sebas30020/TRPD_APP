@@ -6,7 +6,7 @@ Aplicación autónoma para calibración instrumental de retardos y diagnóstico 
 from __future__ import annotations
 import os
 import sys
-import numpy as np
+import urllib.parse
 from dash import Dash, html, dcc, Input, Output, State, ctx, no_update, ALL
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
@@ -16,20 +16,18 @@ if RAIZ not in sys.path:
 if AQUI not in sys.path:
     sys.path.insert(0, AQUI)
 
+import filtros
 import rutas
+import tema
 from datos import (
+    spec_filtro,
+    obtener_metadata,
     canales_presentes,
-    cargar_segmento,
     umbral_defecto,
     n_segmentos,
-    _muestras,
-    VENTANA_T10,
     listar_subcarpetas,
-    _CHAN_RE,
-    _orden_natural,
-    _dir_medicion,
 )
-from arribo import t_arribo, calibrar_retardo
+from arribo import calibrar_retardo
 from referencia import (
     ancla_por_segmento,
     evaluar_segmento_iec,
@@ -60,6 +58,34 @@ app = Dash(
 
 # Sin carpeta de datos fija: la medición se elige con el explorador de carpetas.
 app.layout = layout([], "")
+
+
+@app.callback(
+    Output("carpeta", "value", allow_duplicate=True),
+    Output("carpeta", "options", allow_duplicate=True),
+    Output("explorador_panel", "hidden", allow_duplicate=True),
+    Output("badge_modo", "children"),
+    Output("enlace_volver", "style"),
+    Input("url", "search"),
+    State("carpeta", "options"),
+    State("enlace_volver", "style"),
+    prevent_initial_call="initial_duplicate",
+)
+def abrir_desde_url(search, opciones, estilo_enlace):
+    """?carpeta=<medición> (lo pone TRPD_APP al abrir la pestaña Calibración)
+    selecciona esa medición; ?embebido=1 oculta el enlace para volver a 8051."""
+    q = urllib.parse.parse_qs((search or "").lstrip("?"))
+    embebido = q.get("embebido", ["0"])[0] == "1"
+    estilo = dict(estilo_enlace or {})
+    estilo["display"] = "none" if embebido else "inline"
+    badge = "Embebido en TRPD_APP" if embebido else "Puerto 8052 · Modo Autónomo"
+    carpeta = q.get("carpeta", [None])[0]
+    if not carpeta or not canales_presentes(carpeta):
+        return no_update, no_update, no_update, badge, estilo
+    opts = list(opciones or [])
+    if not any(o.get("value") == carpeta for o in opts):
+        opts.append({"label": rutas.etiqueta(carpeta), "value": carpeta, "title": carpeta})
+    return carpeta, opts, True, badge, estilo
 
 
 @app.callback(
@@ -139,15 +165,15 @@ def renderizar_explorador(ruta_actual):
                 "textAlign": "left",
                 "backgroundColor": "transparent",
                 "border": "none",
-                "borderBottom": "1px solid #f1f5f9",
+                "borderBottom": f"1px solid {tema.BORDER_SUBTLE}",
                 "padding": "6px 8px",
                 "cursor": "pointer",
                 "fontSize": "13px",
-                "color": "#1e293b",
+                "color": tema.INK,
             },
         ))
     if not filas:
-        filas = [html.Div("(No hay subcarpetas)", style={"color": "#94a3b8", "fontStyle": "italic", "padding": "6px 8px"})]
+        filas = [html.Div("(No hay subcarpetas)", style={"color": tema.MUTED, "fontStyle": "italic", "padding": "6px 8px"})]
     if ruta_actual == rutas.EQUIPO:
         return filas, "Este equipo", True
     return filas, ruta_actual, not rutas.tiene_h5(ruta_actual)
@@ -410,6 +436,7 @@ def actualizar_grafico_impulso(carpeta: str, seg: int):
     State("umbral_ch4", "value"),
     State("tmin_ch4", "value"),
     prevent_initial_call=True,
+    running=[(Output("btn_calcular", "disabled"), True, False)],
 )
 def calcular_retardo_canal(
     n_clicks: int,
@@ -470,6 +497,7 @@ def calcular_retardo_canal(
     Output("iec_store", "data"),
     Input("btn_evaluar_iec", "n_clicks"),
     Input("carpeta", "value"),
+    running=[(Output("btn_evaluar_iec", "disabled"), True, False)],
 )
 def evaluar_conformidad_iec(n_clicks: int | None, carpeta: str):
     """Evalúa la conformidad normativa IEC 60060-1 y estadísticas de ancla."""
@@ -519,12 +547,12 @@ def actualizar_grafico_ancla(carpeta: str, ref: str):
 def actualizar_tabla_resumen(store: dict | None, carpeta: str):
     """Genera la tabla resumen de canales calibrados."""
     if not store:
-        return html.P("Sin canales calibrados en la sesión actual. Pulsa ▶ Calcular Retardo.", style={"color": "#64748b", "fontSize": "13px"})
+        return html.P("Sin canales calibrados en la sesión actual. Pulsa Calcular Retardo.", style={"color": tema.MUTED, "fontSize": "13px"})
 
     sensores_map = {
         "ch2": "HFCT",
-        "ch3": "Antena Vivaldi",
-        "ch4": "Antena Bioinspirada",
+        "ch3": "Antena 1",
+        "ch4": "Antena 2",
     }
     filas = []
     for ch in ["ch2", "ch3", "ch4"]:
@@ -536,33 +564,56 @@ def actualizar_tabla_resumen(store: dict | None, carpeta: str):
             filas.append(html.Tr([
                 html.Td(ch.upper(), style={"fontWeight": "600", "padding": "6px 10px"}),
                 html.Td(sensores_map.get(ch, ch.upper()), style={"padding": "6px 10px"}),
-                html.Td(t_lag_ns, style={"fontWeight": "700", "color": "#1d4ed8", "padding": "6px 10px"}),
+                html.Td(t_lag_ns, style={"fontWeight": "700", "color": tema.ACCENT, "padding": "6px 10px"}),
                 html.Td(sig_ns, style={"padding": "6px 10px"}),
                 html.Td(f"{r.get('n_valid')}/{r.get('n_total')}", style={"padding": "6px 10px"}),
                 html.Td(f"{p.get('umbral_mv', 0):.2f}", style={"padding": "6px 10px"}),
                 html.Td(f"{p.get('distancia_us', 0):.3f}", style={"padding": "6px 10px"}),
                 html.Td(f"{p.get('tmin_us', 0):.3f}", style={"padding": "6px 10px"}),
+                html.Td(filtros.etiqueta(spec_filtro(carpeta, ch)) if carpeta else "—",
+                        style={"padding": "6px 10px"}),
             ]))
 
     if not filas:
-        return html.P("Sin canales calibrados en la sesión actual. Pulsa ▶ Calcular Retardo.", style={"color": "#64748b", "fontSize": "13px"})
+        return html.P("Sin canales calibrados en la sesión actual. Pulsa Calcular Retardo.", style={"color": tema.MUTED, "fontSize": "13px"})
 
-    return html.Table(
+    tabla = html.Table(
         style={"width": "100%", "fontSize": "12px", "borderCollapse": "collapse", "textAlign": "left"},
         children=[
             html.Thead(html.Tr([
-                html.Th("Canal", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
-                html.Th("Sensor", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
-                html.Th("t̄_lag [ns]", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
-                html.Th("σ [ns]", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
-                html.Th("Válidos", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
-                html.Th("u_cal [mV]", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
-                html.Th("Δt [µs]", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
-                html.Th("t_mín [µs]", style={"borderBottom": "2px solid #cbd5e1", "padding": "6px 10px"}),
+                html.Th("Canal", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("Sensor", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("t̄_lag [ns]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("σ [ns]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("Válidos", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("u_cal [mV]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("Δt [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("t_mín [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("Filtro", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
             ])),
             html.Tbody(filas),
         ],
     )
+    aviso = aviso_calibracion_cruda(carpeta)
+    return html.Div([tabla, aviso]) if aviso else tabla
+
+
+def aviso_calibracion_cruda(carpeta: str):
+    """Aviso si metadata.yaml guarda una calibración sin campo 'filtro' por canal:
+    se midió sobre señal cruda y no es coherente con la señal filtrada actual."""
+    bloque = (obtener_metadata(carpeta) or {}).get("calibracion_retardo") if carpeta else None
+    if not isinstance(bloque, dict):
+        return None
+    crudos = [ch.upper() for ch in ["ch2", "ch3", "ch4"]
+              if isinstance(bloque.get(ch), dict) and "filtro" not in bloque[ch]]
+    if not crudos:
+        return None
+    return html.Div(
+        f"La calibración guardada en metadata.yaml para {', '.join(crudos)} se hizo sobre señal "
+        "cruda: recalibrar con los filtros actuales.",
+        style={"color": tema.WARN, "backgroundColor": tema.WARN_BG, "padding": "6px 10px",
+               "borderRadius": "4px", "border": f"1px solid {tema.WARN}", "marginTop": "8px",
+               "fontSize": "12px"})
 
 
 @app.callback(
@@ -572,7 +623,7 @@ def actualizar_tabla_resumen(store: dict | None, carpeta: str):
 def actualizar_panel_iec(store: dict | None):
     """Muestra el estado de conformidad normativa IEC 60060-1."""
     if not store:
-        return html.P("Cargando diagnóstico IEC...", style={"color": "#64748b", "fontSize": "13px"})
+        return html.P("Cargando diagnóstico IEC...", style={"color": tema.MUTED, "fontSize": "13px"})
 
     iec = store.get("resumen_iec", {})
     delta = store.get("delta", {})
@@ -584,7 +635,7 @@ def actualizar_panel_iec(store: dict | None):
     conforme = iec.get("conforme", False)
     fuera = iec.get("fuera_tolerancia", 0)
 
-    color_conf = "#16a34a" if conforme else "#e11d48"
+    color_conf = tema.OK if conforme else tema.ERROR
     texto_conf = "Lote Conforme con IEC 60060-1 (1.2/50 µs)" if conforme else f"Atención: {fuera} disparos fuera de tolerancia"
 
     return html.Div([
@@ -612,6 +663,7 @@ def actualizar_panel_iec(store: dict | None):
     State("fuente_calibracion", "value"),
     State("referencia", "value"),
     prevent_initial_call=True,
+    running=[(Output("btn_guardar", "disabled"), True, False)],
 )
 def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente: str, ref: str):
     """Persiste los retardos calculados en metadata.yaml de la carpeta seleccionada."""
@@ -620,8 +672,8 @@ def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente:
 
     canales_validos = {ch: store[ch] for ch in ["ch2", "ch3", "ch4"] if ch in store}
     if not canales_validos:
-        return html.Div("⚠️ No hay canales calculados para guardar. Pulsa primero ▶ Calcular Retardo.",
-                        style={"color": "#b45309", "backgroundColor": "#fef3c7", "padding": "8px 12px", "borderRadius": "4px"})
+        return html.Div("No hay canales calculados para guardar. Pulsa primero Calcular Retardo.",
+                        style={"color": tema.WARN, "backgroundColor": tema.WARN_BG, "padding": "8px 12px", "borderRadius": "4px", "border": f"1px solid {tema.WARN}"})
 
     info_ancla = None
     if ref == "origen_virtual_IEC60060":
@@ -632,16 +684,17 @@ def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente:
         fuente=fuente or "calibrar_app",
         referencia_impulso=ref,
         info_ancla=info_ancla,
+        filtros={ch: filtros.texto(spec_filtro(carpeta, ch)) for ch in canales_validos},
     )
     ok, msg = guardar_calibracion_metadata(carpeta, bloque)
     if ok:
         return html.Div(
-            f"✅ {msg} · Bloque calibracion_retardo actualizado exitosamente con referencia '{ref}'.",
-            style={"color": "#15803d", "backgroundColor": "#dcfce7", "padding": "8px 12px", "borderRadius": "4px", "fontWeight": "600"}
+            f"{msg} · Bloque calibracion_retardo actualizado exitosamente con referencia '{ref}'.",
+            style={"color": tema.OK, "backgroundColor": tema.OK_BG, "padding": "8px 12px", "borderRadius": "4px", "fontWeight": "600", "border": f"1px solid {tema.OK}"}
         )
     return html.Div(
-        f"❌ {msg}",
-        style={"color": "#b91c1c", "backgroundColor": "#fee2e2", "padding": "8px 12px", "borderRadius": "4px"}
+        f"{msg}",
+        style={"color": tema.ERROR, "backgroundColor": tema.ERROR_BG, "padding": "8px 12px", "borderRadius": "4px", "border": f"1px solid {tema.ERROR}"}
     )
 
 

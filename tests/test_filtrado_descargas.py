@@ -214,7 +214,7 @@ def test_actualizar_badge_filtro_callback(monkeypatch):
     # Con 2 seleccionadas
     dis_excl, txt_excl, dis_undo, dis_res, badge = actualizar_badge_filtro(sel=[2, 4], excl_dict={}, p=p)
     assert dis_excl is False
-    assert txt_excl == "🚫 Quitar 2 seleccionadas"
+    assert txt_excl == "Quitar 2 seleccionadas"
 
     # Con 3 exclusiones en 2 pasos
     excl_data = {
@@ -264,9 +264,16 @@ def test_calcular_fila_densidad_con_y_sin_exclusiones():
 
     fila_base = calcular_fila_densidad(carpeta, canal, umbral, dist, tmin, t_lag_us=0.0, excluidos=None)
     assert fila_base["specimen"] != ""
-    assert fila_base["vmax_media"] != "-"
+    # La tabla (formato Tabla 1) usa V̄_pp y promedios condicionados a N_PD = N_cav
+    assert "vpp_media" in fila_base and "n_coinc" in fila_base
 
-    # Excluir el índice 0
+    # Excluir el índice 0: un peak menos en la distribución
     fila_exc = calcular_fila_densidad(carpeta, canal, umbral, dist, tmin, t_lag_us=0.0, excluidos=[0])
     assert fila_exc["id"] == fila_base["id"]
-    assert fila_exc["vmax_media"] != "-"
+    n_segs = app.n_segmentos(carpeta)
+    for fila in (fila_base, fila_exc):
+        assert sum(int(x) for x in fila["distribucion"].strip("[]").split(",")) == n_segs
+    tot_base = sum(app.contar_peaks(carpeta, canal, umbral, dist, tmin)[1])
+    tot_exc = sum(app.contar_peaks(carpeta, canal, umbral, dist, tmin, excluidos=[0])[1])
+    if tot_base:
+        assert tot_exc == tot_base - 1

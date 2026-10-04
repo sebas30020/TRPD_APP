@@ -145,8 +145,8 @@ def test_5_persistencia_calibrar_app():
             "referencia": "t10_CH1_por_segmento",
             "referencia_impulso": "t10",
             "ch2": {"sensor": "HFCT", "t_lag_ns": 12.400, "sigma_ns": 0.850, "n_valid": 50, "n_total": 50},
-            "ch3": {"sensor": "Antena Vivaldi", "t_lag_ns": 8.120, "sigma_ns": 0.420, "n_valid": 49, "n_total": 50},
-            "ch4": {"sensor": "Antena Bioinspirada", "t_lag_ns": 15.650, "sigma_ns": 1.100, "n_valid": 50, "n_total": 50},
+            "ch3": {"sensor": "Antena 1", "t_lag_ns": 8.120, "sigma_ns": 0.420, "n_valid": 49, "n_total": 50},
+            "ch4": {"sensor": "Antena 2", "t_lag_ns": 15.650, "sigma_ns": 1.100, "n_valid": 50, "n_total": 50},
         }
         ok, msg = persistencia.guardar_calibracion_metadata(CARPETA_TEST, bloque_prueba)
         assert ok, f"Error al guardar: {msg}"

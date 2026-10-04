@@ -5,6 +5,7 @@ y permite leer registros completos (ventana=None) para IEC 60060-1.
 """
 
 from __future__ import annotations
+import copy
 import functools
 import os
 import re
@@ -18,6 +19,8 @@ RAIZ_REPO = os.path.abspath(os.path.join(AQUI, os.pardir))
 if RAIZ_REPO not in sys.path:
     sys.path.insert(0, RAIZ_REPO)
 
+import datos_h5  # noqa: E402  (lectura de .h5 y cachés, compartida con app.py)
+import filtros  # noqa: E402  (filtros digitales por canal, compartidos con app.py)
 import rutas  # noqa: E402  (resolución de rutas compartida con app.py)
 
 # No hay carpeta de datos fija: las mediciones se eligen con el explorador de
@@ -34,13 +37,13 @@ _orden_natural = rutas.orden_natural
 
 
 def _ruta(carpeta: str, canal: str) -> str | None:
-    """Resuelve la ruta absoluta al archivo .h5 del canal."""
-    return rutas.ruta_canal(carpeta, canal)
+    """Resuelve la ruta absoluta al archivo .h5 del canal (cacheado)."""
+    return datos_h5.ruta_canal(carpeta, canal)
 
 
 def canales_presentes(carpeta: str) -> list[str]:
-    """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden."""
-    return rutas.canales_presentes(carpeta)
+    """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden (cacheado)."""
+    return datos_h5.canales_presentes(carpeta)
 
 
 def listar_subcarpetas(ruta: str) -> list[tuple[str, str, bool]]:
@@ -48,36 +51,13 @@ def listar_subcarpetas(ruta: str) -> list[tuple[str, str, bool]]:
     return rutas.listar_subcarpetas(ruta)
 
 
-def _meta(carpeta: str, canal: str) -> dict:
-    """Lee metadatos de escala y número de segmentos del archivo HDF5."""
-    with h5py.File(_ruta(carpeta, canal), "r") as f:
-        chan = list(f["Waveforms"].keys())[0]
-        ch = f["Waveforms/" + chan]
-        return {
-            "chan": chan,
-            "yinc": float(ch.attrs["YInc"]),
-            "yorg": float(ch.attrs["YOrg"]),
-            "xinc": float(ch.attrs["XInc"]),
-            "xorg": float(ch.attrs["XOrg"]),
-            "nsegs": int(ch.attrs["NumSegments"]),
-        }
-
-
-_META_CACHE: dict[str, dict] = {}
-
-
 def meta_medicion(carpeta: str) -> dict[str, dict]:
-    """Devuelve {canal: meta} cacheado."""
-    if carpeta not in _META_CACHE:
-        _META_CACHE[carpeta] = {c: _meta(carpeta, c) for c in canales_presentes(carpeta)}
-    return _META_CACHE[carpeta]
+    """Devuelve {canal: meta} cacheado (datos_h5)."""
+    return datos_h5.meta_medicion(carpeta)
 
 
 def n_segmentos(carpeta: str) -> int:
-    metas = meta_medicion(carpeta)
-    if not metas:
-        return 0
-    return min(m["nsegs"] for m in metas.values())
+    return datos_h5.n_segmentos(carpeta)
 
 
 def dt_segundos(carpeta: str, canal: str) -> float:
@@ -98,47 +78,47 @@ def n_pre_muestras(carpeta: str, canal: str, guarda_us: float = 1.0) -> int:
     return max(100, min(n_pre, 10000))
 
 
-def _cargar_segmento_leer(carpeta: str, canal: str, seg: int, ventana: tuple[float, float] | None = VENTANA_T10):
-    m = meta_medicion(carpeta)[canal]
-    with h5py.File(_ruta(carpeta, canal), "r") as f:
-        dset = f[f"Waveforms/{m['chan']}/{m['chan']} Seg{seg}Data"]
-        n = dset.shape[0]
-        if ventana is None:
-            i0, i1 = 0, n
-        else:
-            i0 = int(np.ceil((ventana[0] * 1e-6 - m["xorg"]) / m["xinc"]))
-            i1 = int(np.floor((ventana[1] * 1e-6 - m["xorg"]) / m["xinc"])) + 1
-            i0, i1 = max(i0, 0), min(i1, n)
-            if i1 <= i0:
-                return np.array([]), np.array([])
-        raw = dset[i0:i1]
-    v = (raw.astype(np.float64) * m["yinc"] + m["yorg"]) * 1e3  # milivoltios
-    t = (m["xorg"] + np.arange(i0, i1) * m["xinc"]) * 1e6      # microsegundos
-    return t, v
+def _cargar_segmento_leer(carpeta: str, canal: str, seg: int, ventana: tuple[float, float] | None = VENTANA_T10,
+                          spec: tuple | None = None):
+    """Igual que app._cargar_segmento_leer (lectura sin caché, datos_h5.leer_crudo)."""
+    return datos_h5.leer_crudo(carpeta, canal, seg, ventana, spec)
 
 
-@functools.lru_cache(maxsize=6)
-def _cargar_segmento_cache(carpeta: str, canal: str, seg: int, ventana: tuple[float, float] | None):
-    t, v = _cargar_segmento_leer(carpeta, canal, seg, ventana)
-    t.flags.writeable = False
-    v.flags.writeable = False
-    return t, v
+def spec_filtro(carpeta: str, canal: str) -> tuple | None:
+    """Filtro digital del canal según metadata.yaml (o el de defecto). CH1 -> None.
+    Usa la metadata cacheada (se relee si el YAML cambia; stat como mucho cada 2 s)."""
+    return filtros.filtro_canal(_metadata_compartida(carpeta), canal)
 
 
-def cargar_segmento(carpeta: str, canal: str, seg: int, ventana: tuple[float, float] | None = VENTANA_T10) -> tuple[np.ndarray, np.ndarray]:
-    """Devuelve (t_us, v_mv) para un canal y segmento recortado a la ventana dada."""
-    return _cargar_segmento_cache(carpeta, canal, seg, tuple(ventana) if ventana is not None else None)
+def cargar_segmento(carpeta: str, canal: str, seg: int, ventana: tuple[float, float] | None = VENTANA_T10,
+                    filtrado: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Devuelve (t_us, v_mv) para un canal y segmento recortado a la ventana dada.
+    CH2..CH4 se filtran según metadata (filtros.py); CH1 nunca. Cacheado en datos_h5,
+    compartido con todos los bucles por segmento (antes una LRU de 6 entradas)."""
+    spec = spec_filtro(carpeta, canal) if filtrado and canal != "ch1" else None
+    return datos_h5.cargar(carpeta, canal, seg, tuple(ventana) if ventana is not None else None, spec)
 
 
 def _dir_medicion(carpeta: str) -> str | None:
-    return rutas.dir_medicion(carpeta)
+    return datos_h5.dir_medicion(carpeta)
 
 
-def obtener_metadata(carpeta: str) -> dict:
+def _metadata_compartida(carpeta: str) -> dict:
+    """metadata.yaml cacheado mientras no cambie (objeto compartido: no mutar)."""
     d = _dir_medicion(carpeta)
     if not d:
         return {}
     meta_path = os.path.join(d, "metadata.yaml")
+    return datos_h5.cacheado_por_archivo(meta_path, ("calibrar", carpeta),
+                                         lambda: _leer_metadata(meta_path))
+
+
+def obtener_metadata(carpeta: str) -> dict:
+    """Copia modificable de metadata.yaml ({} si no existe)."""
+    return copy.deepcopy(_metadata_compartida(carpeta))
+
+
+def _leer_metadata(meta_path: str) -> dict:
     if not os.path.isfile(meta_path):
         return {}
     try:
@@ -156,6 +136,7 @@ def guardar_metadata_archivo(carpeta: str, contenido_yaml_str: str) -> tuple[boo
     try:
         with open(meta_path, "w", encoding="utf-8") as f:
             f.write(contenido_yaml_str)
+        datos_h5.invalidar_archivo(meta_path)
         return True, f"Guardado exitoso en {os.path.basename(meta_path)}"
     except Exception as e:
         return False, f"Error al guardar: {e}"

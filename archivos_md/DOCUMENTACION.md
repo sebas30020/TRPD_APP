@@ -183,7 +183,7 @@ _dibujar_impulso_ch1()     |                                     [t_peak, v_peak
 - Archivos por carpeta de medición:
   - `ch1.h5`: Tensión de impulso LI (divisor capacitivo / sincronismo).
   - `ch2.h5`: Corriente de descarga (HFCT, atenuador 30 dB) o sensor reconfigurable.
-  - `ch3.h5`: Radiación electromagnética (antena Vivaldi / UHF) o sensor reconfigurable.
+  - `ch3.h5`: Radiación electromagnética (Antena 1 / UHF) o sensor reconfigurable.
   - `ch4.h5`: Monopolo plano bioinspirado (filtro pasa-altos 200 MHz) o sensor reconfigurable.
   - `metadata.yaml`: Metadatos del ensayo generados por `generate_metadata.py`.
   - `registro_disparos.csv`: Registro de los 50 disparos (Npd, detecciones por canal, observaciones).
@@ -205,6 +205,36 @@ _dibujar_impulso_ch1()     |                                     [t_peak, v_peak
 - **R-D2 · Ventana temporal.** Todo se recorta a `T_MIN..T_MAX` (`-5..30 µs`).
 - **R-D3 · Caché de metadatos.** `meta_medicion` cachea nombre de canal y
   escalas por experimento (`_META_CACHE`).
+
+### 1b. Filtros digitales por canal (`filtros.py`)
+
+Para hablar el mismo idioma que el manuscrito (scripts `old_paper/posiblemente_util/scripts/all_exps_main.py`),
+CH2..CH4 se filtran **en memoria** al cargar cada segmento (`cargar_segmento(..., filtrado=True)`),
+con Butterworth de orden 4 y fase cero (`sosfiltfilt`):
+
+| Canal | Sensor | Filtro por defecto | Paper |
+|---|---|---|---|
+| CH1 | Divisor (impulso) | ninguno aquí (LP 20 MHz propio del impulso, §2) | LP 10 MHz |
+| CH2 | HFCT | HP 5 MHz | HP 5 MHz |
+| CH3 | Antena 1 | HP 200 MHz | sin filtro (Vivaldi) — se filtra por decisión del grupo |
+| CH4 | Antena 2 | HP 200 MHz | HP 200 MHz |
+
+- **Configuración:** `metadata.yaml` → `canales.chX.filtro` (`HP_5MHz`, `HP_200MHz`, `LP_10MHz`, `ninguno`).
+  Si la clave no existe se usan los valores por defecto (`filtros.FILTROS_DEFECTO`); `generate_metadata.py`
+  ya los escribe en la plantilla. Un valor `ninguno` explícito desactiva el filtro de ese canal.
+- **Bordes:** se lee la ventana pedida ampliada `MARGEN_US = 1 µs` a cada lado, se filtra y se recorta, de modo
+  que el resultado no depende de la ventana. `fs = 1/XInc` de cada `.h5`; si el corte no cabe bajo Nyquist, el
+  canal queda sin filtrar (aviso por consola).
+- **Interruptor "Filtros del paper"** (`switch_filtros`, barra de controles, activo por defecto): alterna toda la
+  app (gráfico de señales, umbrales por defecto, captura/peaks, ventanas 70 ns, FFT, Transformada S, TRPD y tabla de
+  Estadística) entre señal filtrada y cruda. El snapshot `captura_params` guarda `filtrado`; al cambiar el interruptor
+  con una captura hecha, se rehace con los parámetros por defecto de la nueva señal. Las cachés (`_cargar_segmento_cache`,
+  `_CAPTURA_CACHE`, `_ST_SEG_CACHE`) incluyen el filtro en su clave.
+- **Tabla de Estadística:** cada fila guarda `_filtrado`/`_filtro` y bajo la tabla se indica qué filtro tiene cada
+  sensor (y si se mezclan filas filtradas y crudas).
+- **calibrar_app** filtra siempre según la metadata (sin interruptor): el `t_lag` se mide sobre la misma señal que se
+  analiza. Al guardar, `calibracion_retardo.chX.filtro` registra el filtro usado; si una calibración guardada no tiene
+  ese campo, la tabla resumen avisa de que se hizo sobre señal cruda y conviene recalibrar.
 
 ---
 
@@ -254,7 +284,7 @@ Sobre el gráfico principal, la fila de **CH1 muestra la señal promedio filtrad
 ## 2b. Calibración de retardo instrumental y sincronización temporal
 
 ### Justificación física
-El sistema de adquisición captura simultáneamente la tensión de impulso LI (CH1, mediante divisor capacitivo) y las señales de descarga parcial emitidas hacia los sensores (CH2: HFCT, CH3: Antena Vivaldi, CH4: Antena Bioinspirada).
+El sistema de adquisición captura simultáneamente la tensión de impulso LI (CH1, mediante divisor capacitivo) y las señales de descarga parcial emitidas hacia los sensores (CH2: HFCT, CH3: Antena 1, CH4: Antena 2).
 Debido a que cada canal utiliza longitudes de cable coaxial distintas (p. ej. RG-58 vs. doble apantallado), atenuadores, filtros pasa-altos acoplados y antenas con diferentes características de propagación, las señales experimentan un retardo de propagación instrumental intrínseco respecto a CH1.
 
 Para sincronizar con precisión física el patrón TRPD (Time-Resolved Partial Discharge), cada canal detector $c \in \{\text{ch2}, \text{ch3}, \text{ch4}\}$ cuenta con un retardo medio característico $\bar{t}_{\text{lag}, c}$, de modo que el tiempo absoluto de ocurrencia de cada evento de DP se define como:
@@ -303,7 +333,7 @@ calibracion_retardo:
       dist_us: 0.5
       tmin_us: -2.0
     ch3:
-      sensor: "Antena Vivaldi"
+      sensor: "Antena 1"
       t_lag_ns: -5.67
       std_ns: 0.32
       n_puntos: 50
@@ -312,7 +342,7 @@ calibracion_retardo:
       dist_us: 0.2
       tmin_us: -1.0
     ch4:
-      sensor: "Antena Bioinspirada"
+      sensor: "Antena 2"
       t_lag_ns: 8.90
       std_ns: 0.61
       n_puntos: 49
@@ -368,7 +398,7 @@ unificadas:
   se congelan en `captura_params`. Mientras no se pulse el botón, las cruces del
   gráfico principal corresponden a detección en vivo y no son clicables.
 - **R-P5 · Multi-Trigger independiente por sensor.** Cada canal detector (`ch2`: HFCT,
-  `ch3`: Antena Vivaldi, `ch4`: Antena Bioinspirada) cuenta con su propia configuración
+  `ch3`: Antena 1, `ch4`: Antena 2) cuenta con su propia configuración
   de trigger independiente: umbral $u$ (mV), distancia mínima $\Delta t$ (µs) y tiempo
   mínimo $t_{\text{mín}}$ (µs). Las líneas de umbral se representan en el osciloscopio
   con colores distintivos (roja para el canal activo, azul/verde/ámbar para los demás)
@@ -477,20 +507,25 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 ## 7. Gráficos derivados
 
 - **Barras** (`figura_peaks`): nº de peaks por segmento.
-- **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` id="tabla_densidad"):
-  Tabla resumen de caracterización experimental multi-sensor de **10 columnas**:
-  - `Specimen`: código y geometría de la probeta (ej. `2V33H (asimetrica)`).
-  - `Voltage (kV)`: tensión del secundario del transformador de impulso (ej. `10.0 kV`).
-  - `Sensor`: sensor y canal evaluado (ej. `HFCT (CH2)`, `Antena Vivaldi (CH3)`, `Antena Bioinspirada (CH4)`).
-  - `t_lag (ns)`: retardo instrumental aplicado al canal ($\bar{t}_{\text{lag}, c}$), obtenido de la calibración activa o 0.0 ns si no está calibrado.
-  - `N_PD distribution [0, 1, 2, 3, 4, > 4]`: vector con el conteo de disparos/segmentos que registraron exactamente 0, 1, 2, 3, 4 y más de 4 eventos de DP (ej. `[9, 33, 8, 0, 0, 0]`).
-  - `Media de N_PD`: promedio de eventos detectados por disparo ($\bar{N}_{PD}$).
-  - `d (mm)`: diámetro(s) de cavidad(es) de la probeta inferidos del código o leídos de los metadatos (ej. `D1=3 mm, D2=3 mm`).
-  - `V̄_max (V)`: amplitud de pico máxima media de todas las descargas detectadas (expresada en Voltios y con valor en mV).
-  - `V̄_pp (V)`: amplitud peak-to-peak media de las descargas en su ventana de 70 ns (expresada en Voltios y con valor en mV).
-  - `t̄_abs (µs)`: tiempo absoluto medio sincronizado de ocurrencia de las descargas en la probeta, respecto al inicio del impulso al 10 % y corregido por retardo instrumental:
-    $$t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$$
-  Dispone de botón **"⚡ Calcular todos los sensores (CH2..CH4)"** (que procesa cada sensor con su propia configuración calibrada de trigger y su respectivo retardo instrumental), botón **"Limpiar tabla"** y exportación nativa a **CSV**. Almacena su historial en `densidad_store`.
+- **Estadística / Tabla 1** (`tabla_densidad`, tabla HTML generada por `construir_tabla_paper`):
+  Reproduce el formato de la Tabla 1 del manuscrito (cabecera en negrita con subíndices,
+  Specimen / d / Voltage combinados por medición con `rowSpan`, una fila por sensor y
+  líneas horizontales entre mediciones). **8 columnas** (`COLUMNAS_DENSIDAD`):
+  - `Specimen`: solo el nº de vacuolas (`1v`, `3v`, …), de `probeta.nro_vacuolas` o del código de la carpeta.
+  - `d (mm)`: diámetros de las vacuolas (ej. `2, 3, 4`).
+  - `Voltage (kV)`: tensión del secundario leída de la carpeta `<probeta>/<X>kV/` (ej. `17.5`); si la ruta no tiene carpeta kV, `circuito_impulso.tension_kv_ac_sec`.
+  - `Sensor`: nombre corto (`HFCT`, `Antena 1`, `Antena 2`); los nombres antiguos de metadata (Vivaldi / Bioinspirada) se traducen con `nombre_corto_sensor`.
+  - `N_PD distribution [0, 1, 2, 3, 4, > 4]`: disparos con exactamente 0, 1, 2, 3, 4 y más de 4 descargas.
+  - `N_PD = N_cav`: nº de disparos cuyo nº de descargas es igual al nº de cavidades.
+  - `V̄_pp (V)`: media del pico-a-pico (ventana de 70 ns), 3 decimales.
+  - `t̄_abs (µs)`: media de $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)} - \bar{t}_{\text{lag}, c}$, 3 decimales.
+
+  **Promedio condicionado:** `V̄_pp` y `t̄_abs` se promedian solo sobre las descargas de los
+  disparos con $N_{PD} = N_{cav}$ (criterio del paper); si no hay ninguno se muestra `-`. Si no
+  se conoce $N_{cav}$ se promedian todas las descargas activas. Las descargas excluidas
+  manualmente no participan. Filas ordenadas por nº de cavidades, tensión y canal.
+  Botones **"Calcular todos los sensores (CH2..CH4)"**, **"Limpiar tabla"** y **"Exportar CSV"**
+  (`btn_exportar_densidad` → `dcc.Download` `descarga_densidad`). Historial en `densidad_store`.
 - **Patrón TRPD** (`figura_scatter`): Dispone de selector de magnitud con dos modos:
   1. **Modo $V_{\max}$:** Grafica el par $(t_{\text{abs}}, V_{\max})$, representando el pico máximo instantáneo junto con la traza de referencia del impulso en CH1 alineada en $t_{\text{abs}} = 0$.
   2. **Modo $V_{\text{pp}}$:** Grafica el par $(t_{\text{abs}}, V_{\text{pp}})$, donde $V_{\text{pp}}$ es la amplitud peak-to-peak calculada en la ventana normalizada de 70 ns $[-7\text{ ns}, +63\text{ ns}]$ centrada en el peak.
@@ -503,7 +538,7 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
   al peak ($t = 0$). Con 351 muestras en 70 ns se visualiza punto a punto sin submuestreo.
 - **FFT** (`figura_fft`): `scipy.signal.welch(scaling="spectrum")`, **escala
   lineal** (mV²), promediando el espectro de las ventanas seleccionadas.
-  `nperseg = min(len, 256)`, eje en MHz (hasta Nyquist = Fs/2).
+  `nperseg = min(len, 256)`, eje en MHz **recortado a 0–3000 MHz** (`FFT_FMAX_MHZ = 3000`).
 
 ### Límites de cálculo de la FFT
 
@@ -526,9 +561,8 @@ $dt = 2 \times 10^{-4} \text{ µs}$, `antes_us = 0.007`, `desp_us = 0.063`):
 - **Resolución en frecuencia:**
   $$\Delta f = \frac{Fs}{\text{nperseg}} = \frac{5 \times 10^9 \text{ Sa/s}}{256} \approx 19.5312 \text{ MHz por bin}$$
 - **Rango de frecuencia:**
-  De 0 a Nyquist ($Fs / 2 = 2500 \text{ MHz}$).
-  El control `f máx ST` **no** afecta a la FFT; la FFT siempre muestra el rango
-  completo hasta Nyquist.
+  De 0 a **3 GHz** (`FFT_FMAX_MHZ = 3000`): los bins por encima se descartan aunque
+  Nyquist sea mayor (5 GHz a 10 GSa/s). El control `f máx ST` **no** afecta a la FFT.
 - **Escala y nivel de continua:**
   - `scaling="spectrum"` entrega $\text{mV}^2$ (potencia por bin de frecuencia, no
     densidad espectral $\text{mV}^2/\text{Hz}$). Eje vertical lineal.
@@ -561,14 +595,20 @@ Dos escalas, compartiendo la misma función:
 ### Límites de cálculo de la Transformada S
 
 - **Resolución en frecuencia mostrada (fijada por `f máx` y `ST_NFREQ`):**
-  - La cantidad de filas en el mapa de calor no depende de $N$, sino de `ST_NFREQ = 250`
-    y de `f máx` (control `st_fmax`, por defecto `ST_FMAX_MHZ = 2500` MHz).
+  - La cantidad de filas en el mapa de calor no depende de $N$, sino de `ST_NFREQ = 500`
+    y de `f máx` (control `st_fmax`, por defecto y como tope `ST_FMAX_MHZ = 3000` MHz).
+  - **Parámetros de resolución de la imagen** (constantes al inicio de `app.py`):
+    `ST_NFREQ` = filas de frecuencia (vertical); `ST_NT_SEGMENTO` / `ST_NT_VENTANA` =
+    columnas de tiempo (horizontal). Además los mapas usan `zsmooth="best"` (interpolación
+    entre celdas) para no verse pixelados. Coste medido a 10 GSa/s en el segmento
+    ($N = 350\,000$): ~4.6 s/canal con 250×1000 y ~7.7 s/canal con 500×2000.
   - Se definen $j_{\text{max}} = \min(N // 2, \text{round}(f_{\text{máx}} \cdot N \cdot dt))$
     y $js = \text{unique}(\text{round}(\text{linspace}(1, j_{\text{max}}, \min(250, j_{\text{max}}))))$.
-  - Con 250 bins lineales entre 0 y $f_{\text{máx}}$, la separación entre filas es
-    $$\Delta f_{\text{mapa}} \approx \frac{f_{\text{máx}}}{250}$$
-    - Con $f_{\text{máx}} = 2500 \text{ MHz}$ (defecto): $\Delta f \approx 10 \text{ MHz}$ por fila.
-    - Con $f_{\text{máx}} = 500 \text{ MHz}$: $\Delta f \approx 2 \text{ MHz}$ por fila.
+  - Con 500 bins lineales entre 0 y $f_{\text{máx}}$, la separación entre filas es
+    $$\Delta f_{\text{mapa}} \approx \frac{f_{\text{máx}}}{500}$$
+    - Con $f_{\text{máx}} = 3000 \text{ MHz}$ (defecto): $\Delta f \approx 6 \text{ MHz}$ por fila (segmento).
+    - En la ventana de 70 ns la grilla no puede ser más fina que $\Delta f_{\text{FFT}} \approx 14.3$ MHz:
+      hasta 3 GHz hay solo ~210 filas, por lo que ahí la suavidad la aporta `zsmooth`.
   - **Resolución natural de la FFT de fondo vs. grilla visual:**
     La resolución física elemental de la FFT de fondo es $\Delta f_{\text{FFT}} = 1 / (N \cdot dt)$:
     $\sim 14.3 \text{ MHz}$ en la ventana de $70 \text{ ns}$ ($N = 351$) y
@@ -588,20 +628,20 @@ Dos escalas, compartiendo la misma función:
   $\approx 0.029 \text{ MHz}$ en el segmento completo. La fila $f = 0$ almacena el valor constante
   $|\text{media}(x)|$ repetido en todas las columnas de tiempo; no representa resolución temporal.
 - **Límite superior y recorte a Nyquist:**
-  `f máx` se recorta estrictamente a Nyquist ($N // 2$ bins = $2500 \text{ MHz}$ a $5 \text{ GSa/s}$),
-  cualquiera sea el valor que el usuario introduzca en `st_fmax`. Si el campo queda
-  vacío, se toma `ST_FMAX_MHZ = 2500`.
+  `f máx` se limita a **3000 MHz** (`ST_FMAX_MHZ`; el campo `st_fmax` tiene `max=3000` y
+  `transformada_s` aplica además el tope) y, si fuese menor, a Nyquist ($N // 2$ bins).
+  Si el campo queda vacío, se toma `ST_FMAX_MHZ = 3000`.
 - **Resolución temporal y factor de decimado:**
   Las operaciones FFT e IFFT se ejecutan siempre a resolución completa sobre las $N$
   muestras. El resultado se decima exclusivamente al construir la matriz final mediante
   `paso = max(1, N // n_t)`:
-  - **Ventana de 70 ns:** $N = 351$, `ST_NT_VENTANA = 350` $\implies \text{paso} = \max(1, 351 // 350) = 1$.
-    Cada columna dista exactamente $0.2 \text{ ns}$ (resolución nativa punto a punto sin decimado).
-  - **Segmento completo (-5..30 µs = 35 µs):** $N \approx 175\,001$, `ST_NT_SEGMENTO = 1000` $\implies \text{paso} = 175001 // 1000 = 175$.
-    Cada columna dista $175 \times 0.2 \text{ ns} = 35 \text{ ns}$ ($\sim 1001$ columnas de tiempo).
+  - **Ventana de 70 ns** (10 GSa/s): $N = 701$, `ST_NT_VENTANA = 700` $\implies \text{paso} = 1$.
+    Cada columna dista $0.1 \text{ ns}$ (resolución nativa, sin decimado).
+  - **Segmento completo (-5..30 µs = 35 µs):** $N = 350\,000$, `ST_NT_SEGMENTO = 2000` $\implies \text{paso} = 175$.
+    Cada columna dista $175 \times 0.1 \text{ ns} = 17.5 \text{ ns}$ ($2000$ columnas de tiempo).
   - **Consecuencia del decimado:** Se realiza por submuestreo directo (`[::paso]`),
     no por promedio ni por envolvente de máximos. Por tanto, eventos transitorios
-    con duración inferior a $\sim 35 \text{ ns}$ en el segmento completo pueden
+    con duración inferior a $\sim 17.5 \text{ ns}$ en el segmento completo pueden
     caer entre columnas y atenuarse visualmente. El mapa del segmento sirve para
     ubicar intervalos temporales con actividad; para el análisis morfológico fino
     se utiliza la Transformada S de la ventana de $70\text{ ns}$.
@@ -635,22 +675,54 @@ Dos escalas, compartiendo la misma función:
 
 ## 9. Reglas de rendimiento
 
-- **R-PF1.** Trazas grandes en **WebGL** (`go.Scattergl`).
-- **R-PF2.** No mezclar capas SVG con WebGL en gráficos pesados. Excepción única:
-  la traza de **cruces** del trigger (`go.Scatter`, pocos puntos) por fiabilidad
-  de `customdata`.
-- **R-PF3.** Decimar curvas suaves para dibujar (impulso a `IMP_PUNTOS_PLOT = 6000`,
-  ventanas a ~300 puntos); los cálculos van a resolución completa.
-- **R-PF4.** `uirevision` para conservar estado de UI y evitar re-render completo.
-- **R-PF5.** Caches de sesión: `_META_CACHE`, `_IMPULSO_CACHE`,
-  `_IMPULSO_FILT_CACHE`, `_CAPTURA_CACHE` (claves con `umbral` redondeado),
-  `_ST_SEG_CACHE` (clave con `carpeta, segmento, canal, f máx`).
-- **R-PF6.** Las Transformadas S solo se calculan si su pestaña está visible
-  (`tabs_principal`/`tabs_espectro` como `Input`; `no_update` si no coincide):
-  cambiar de segmento/medición mientras se ve "Señales" no dispara el cálculo
-  del segmento completo. El panel "Señales" **no se desmonta** al cambiar de
-  pestaña (se oculta con `hidden`), así se conserva la línea de umbral
-  arrastrada, el zoom y el estado de clic de `grafico`.
+Ver el análisis completo y las mediciones antes/después en `archivos_md/plan_rendimiento_ux.md`
+(`archivos_md/bench_antes.txt`, `archivos_md/bench_despues.txt`; script `scripts_tmp/bench_rendimiento.py`).
+
+- **R-PF1 · Diezmado del gráfico de señales.** `figura()` no envía las 350 001 muestras por canal:
+  `tramo_visible` → `decimar_minmax` (`DEC_BUCKETS = 2000` tramos, se conserva el mínimo y el máximo
+  de cada uno, así ningún pico desaparece) ≈ 4 000 puntos por traza (12.8 MB → 0.28 MB por figura).
+  **Si el tramo visible dura ≤ `SIN_DIEZMADO_US = 1 µs` se envían todas las muestras.**
+- **R-PF2 · Re-diezmado por zoom.** `redecimar_zoom` (Input `grafico.relayoutData`) responde a cada
+  zoom/pan con un `dash.Patch` que solo reemplaza `x/y` de las trazas de señal con el tramo visible
+  (arreglos tipados float32 base64, 130–260 KB); no reconstruye la figura, no pierde zoom ni umbrales.
+  El zoom vigente se guarda en `dcc.Store("rango_x")` (con carpeta y canal) para que un redibujado
+  completo (umbral, segmento, filtro) respete el tramo visible.
+- **R-PF3 · Interacción.** `dcc.Graph("grafico")`: rueda = zoom (`scrollZoom`), doble clic = volver a
+  -5..30 µs, `edits.shapePosition=False` y solo las líneas de umbral (`editable=True`) se arrastran.
+  Cruces de peaks en `Scattergl` (todo WebGL). `sincronizar_parametros_sensores` sale sin tocar el
+  disco si el relayout no trae `shapes[...]`.
+- **R-PF4 · Capa de lectura `datos_h5.py`** (común a `app.py` y `calibrar_app/datos.py`): rutas y
+  canales cacheados, **un `h5py.File` abierto por archivo** (antes uno por segmento leído, ~200 ms en
+  Drive), eje temporal compartido (`eje_t`), LRU de 128 segmentos con solo la tensión,
+  `calcular_una_vez` (varios callbacks simultáneos → un único cálculo) y `cacheado_por_archivo`
+  (metadata.yaml se relee solo si cambia su fecha; stat como mucho cada 2 s). El explorador llama a
+  `datos_h5.limpiar_caches()` al confirmar una carpeta.
+- **R-PF5 · Cachés.** `obtener_metadata` cacheada (devuelve copia); `_CAPTURA_CACHE` LRU de 64 con
+  cálculo único; `_ST_SEG_CACHE` LRU acotada; CH1 se recorre **una sola vez** (`_pasada_ch1`) para
+  `promedio_impulso` y `t10_por_segmento`; `generate_metadata.extraer_info_h5` cacheado por mtime.
+- **R-PF6 · Transformada S por plegado espectral.** Como solo se dibuja una columna cada `paso`
+  muestras, cada fila se calcula con una suma sobre el soporte de la gaussiana y una IFFT de longitud
+  N/paso (antes una IFFT de longitud N); resultado idéntico (error ~1e-8), salida float32 y los 4
+  canales en hilos: segmento completo 34 s / 54 MB → ~4 s / 25 MB. Solo se calcula con su pestaña visible.
+- **R-PF7 · Trabajo justo.** Estadística y panel Metadata solo se calculan con su pestaña visible;
+  al cambiar de medición o canal `captura_params` se limpia y los paneles derivados muestran
+  "Pulse «Calcular peaks»" en lugar de resultados de otra medición.
+- **R-PF8 · Servidor sin dev tools** por defecto (JS minificado, sin sondeo de hot-reload). Para
+  depurar: `set TRPD_DEBUG=1` antes de `run_app.cmd`.
+
+### 9b. Experiencia de uso
+- Spinners (`dcc.Loading`, aparecen tras 300 ms) en todos los gráficos, la tabla de Estadística y
+  el panel Metadata; los botones "Calcular peaks", "Calcular todos los sensores", guardar
+  metadata/diámetros y, en calibrar_app, "Calcular Retardo", "Evaluar IEC" y "Guardar" se
+  deshabilitan mientras calculan (`running=`).
+- Persistencia en el navegador (localStorage): última medición (se restaura al abrir la app si sigue
+  en disco), canal, interruptor de filtros, f máx ST, pestañas, exclusiones de descargas y tabla de
+  Estadística.
+- Atajos (`assets/teclado.js`): ← / → segmento anterior/siguiente; Esc cierra el explorador.
+- La pestaña Calibración abre calibrar_app ya con la medición actual (`?embebido=1&carpeta=...`) y
+  al volver a Análisis se releen los retardos guardados.
+- Errores visibles: si una figura falla se muestra el mensaje en lugar de dejar la anterior.
+- Campos vacíos de Δt/t_mín usan siempre `DIST_DEFECTO_US = 0.035` y `TMIN_DEFECTO_US = 0.15`.
 
 ---
 
@@ -660,11 +732,14 @@ Dos escalas, compartiendo la misma función:
 |---|---|---|
 | `actualizar_segmentos` | `carpeta` | opciones y valor de `segmento` |
 | `sincronizar_parametros_sensores` | `carpeta, grafico.relayoutData` | `umbral_ch{2,3,4}, dist_ch{2,3,4}, tmin_ch{2,3,4}` |
+| `redecimar_zoom` | `grafico.relayoutData` (+State carpeta, segmento, canal, switch_filtros) | `grafico.figure` (Patch), `rango_x.data` |
+| `recordar_carpeta` / `restaurar_carpeta` | `carpeta` / `ultima_carpeta.modified_timestamp` | `ultima_carpeta.data` / `carpeta.value/options`, `explorador_panel.hidden` |
 | `actualizar` | `carpeta, segmento, canal, captura_params` (+State 9 inputs sensores) | `grafico.figure` |
 | `fijar_captura` | `btn.n_clicks` (+State carpeta, canal, 9 inputs sensores) | `captura_params.data` |
 | `calcular_peaks` | `captura_params.data` | `grafico_peaks.figure` |
 | `actualizar_densidad_store` | `captura_params.data, btn_calc_todos_sensores.n_clicks, btn_limpiar_densidad.n_clicks, calibracion_store.data` (+State densidad_store, 9 inputs sensores) | `densidad_store.data` |
-| `sincronizar_tabla_densidad` | `densidad_store.data` | `tabla_densidad.data` |
+| `sincronizar_tabla_densidad` | `densidad_store.data` | `tabla_densidad.children` |
+| `exportar_densidad` | `btn_exportar_densidad.n_clicks` (+State densidad_store) | `descarga_densidad.data` |
 | `actualizar_panel_metadata` | `carpeta, btn_guardar_metadata.n_clicks, btn_guardar_yaml_texto.n_clicks, calibracion_store.data` (+State meta_yaml_text) | Tarjetas, tabla canales y YAML de `panel_metadata` |
 | `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico_vpp_energia.selectedData, grafico_vpp_energia.clickData, grafico.clickData` (+State captura_params) | `seleccion.data` |
 | `actualizar_scatter` | `captura_params.data, seleccion.data, modo_magnitud_trpd.value, calibracion_store.data` | `grafico_scatter.figure, grafico_vpp_energia.figure` |
@@ -684,42 +759,50 @@ Dos escalas, compartiendo la misma función:
 
 ---
 
-## 11. Layout
+## 11. Layout y Sistema de Diseño
 
-- **Barra de controles principales:** Medición (`carpeta`), segmento (`segmento`), trigger activo (`canal`),
-  botón "⚡ Calcular peaks" (`btn`), f máx ST (`st_fmax`).
-- **Barra sub-panel multi-trigger:** Contenedor estilizado con 3 tarjetas identificadas por color:
-  - `CH2 (HFCT)` en azul (`#2563eb`): `umbral_ch2`, `dist_ch2`, `tmin_ch2`.
-  - `CH3 (Vivaldi)` en verde (`#059669`): `umbral_ch3`, `dist_ch3`, `tmin_ch3`.
-  - `CH4 (Bioinspirada)` en ámbar (`#d97706`): `umbral_ch4`, `dist_ch4`, `tmin_ch4`.
-- **Barra y panel de calibración de retardo instrumental:**
-  - **Barra de estado (`barra_calibracion`):** Botón colapsable para desplegar la sección de calibración, píldora de resumen de estado (`cal_status_pill`: "Calibrado (metadata)", "Calibrado (sesión)" o "Sin calibrar") y tres badges por canal (`cal_badge_ch2`, `cal_badge_ch3`, `cal_badge_ch4`) que indican el retardo vigente en nanosegundos (ej. `CH2: 12.3 ns`).
-  - **Panel colapsable (`panel_calibracion_colapsable`):**
-    - Tarjetas de configuración de arribo por sensor: umbral (mV), distancia de guarda para absorción de precursores EMI (µs) y tiempo mínimo (µs).
-    - Selector de canales a calibrar y botón "⚡ Calcular retardo".
-    - Controles manuales (`tlag_manual_ch2`, `tlag_manual_ch3`, `tlag_manual_ch4`) y botón "Aplicar a sesión".
-    - Importador desde catálogo: selector desplegable con mediciones que poseen calibración previa y botón "Importar".
-    - Gráfico diagnóstico interactivo (`grafico_calibracion`): 2 subplots con la dispersión de $t_{\text{lag}}$ por segmento (puntos válidos en verde, descartados por MAD en rojo con cruz) y el histograma con curva gaussiana teórica.
-    - Tabla resumen estadística y botón "💾 Guardar en metadata.yaml".
-- **Stores de sesión:**
-  - `calibracion_store`: diccionario con los retardos aplicados a la sesión `{fuente, canales: {ch: {t_lag_ns, ...}}}`.
-  - `calibracion_resultado`: almacena los datos numéricos brutos del último cálculo de calibración para visualización diagnóstica.
-- **Fila central (2 columnas):**
-  - Columna izquierda: Panel principal con pestañas **Señales** (4 filas ch1..ch4 con líneas de umbral interactivas para ch2, ch3, ch4) /
-    **Transformada S** (4 mapas de calor de segmento completo) / **Metadata**
-    (panel técnico con tarjetas de experimento, circuito LI, probeta, osciloscopio,
-    asignación de sensores por canal, editor/visor YAML y bloque de calibración) — `tabs_principal`.
-  - Columna derecha:
-    - Tarjeta superior: Pestañas **Peaks por segmento** (`grafico_peaks`) /
-      **Densidad de eventos** (`tabla_densidad`, `dash_table.DataTable` resumen de
-      10 columnas: Specimen, Voltage, Sensor, $t_{\text{lag}}$ (ns), $N_{PD}$ dist., Media $N_{PD}$, $d$, $\bar{V}_{\max}$, $\bar{V}_{\text{pp}}$, $\bar{t}_{\text{abs}}$,
-      con botones para calcular todos los sensores con sus respectivos triggers y retardos, limpiar y exportar a CSV) — `tabs_peaks`.
-    - Tarjeta inferior: Pestañas **Patrón TRPD** (`grafico_scatter` en tiempo absoluto $t_{\text{abs}}$ sincronizado con selector radio para alternar entre $V_{\max}$ y $V_{\text{pp}}$, traza de CH1 alineada en $t=0$ y línea vertical de referencia) /
-      **Vpp vs Energía** (`grafico_vpp_energia`) — `tabs_scatter`.
-- **Última fila (2 columnas):**
-  - Columna izquierda: **Ventanas** (`figura_ventanas`), señales superpuestas alineadas en $t = 0$.
-  - Columna derecha: Pestañas **FFT** (`grafico_fft`) / **Transformada S**
-    (`grafico_st_ventana`), ambas aplicadas sobre las señales seleccionadas de la ventana de 1 µs — `tabs_espectro`.
+### 11.1 Sistema de Diseño Unificado (`tema.py` y `assets/styles.css`)
+
+Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado definido en `tema.py` y respaldado por variables `:root` en `assets/styles.css`:
+- **Paleta Neutra y Sobria:** Fondos claros (`BG: #f3f4f6`, `CARD: #ffffff`), bordes sutiles (`BORDER: #d9dee5`, `BORDER_SUBTLE: #eef1f5`), tipografía de alta legibilidad (`INK: #1f2933`, `MUTED: #5f6b7a`, `MUTED_LIGHT: #9aa5b1`) y un único acento primario (`ACCENT: #2f5d8a`).
+- **Estados Semánticos Desaturados:** Conforme (`OK: #3f7d5c`), Advertencia (`WARN: #a8741a`), Error / Exclusión (`ERROR: #a63d3d`).
+- **Paleta de Canales Formal:** `CH1` azul acero (`#4c78a8`), `CH2` ocre apagado (`#d08a2e`), `CH3` verde salvia (`#4f8f6f`), `CH4` púrpura apagado (`#8a5fa0`).
+- **Plantilla Plotly `"trpd"`:** Registrada en `pio.templates["trpd"]`, con fondo blanco, cuadrícula `#e5e7eb`, ejes `#9aa5b1`, tipografía uniforme a 12 px y `colorway` coherente con la paleta de canales.
+- **Tipografía y Controles:** Interfaz plana sin emojis decorativos (⚡ 🗑 💾 🔗), con botones sobrios (`.btn-primary`, `.btn-secondary`, `.btn-danger`, `.btn-warn`), pestañas con borde inferior acentuado (`.tab`, `.tab--selected`) y tarjetas de baja elevación (`.card`).
+
+### 11.2 Estructura de la Interfaz
+
+- **Barra de controles principales:** Medición (`carpeta`), explorador de directorios (`btn_examinar`), segmento (`segmento`), trigger activo (`canal`), botón "Calcular peaks" (`btn`), f máx ST (`st_fmax`).
+- **Barra sub-panel multi-trigger:** Contenedor con 3 bloques por canal sensor:
+  - `CH2 (HFCT)`: `umbral_ch2`, `dist_ch2`, `tmin_ch2`.
+  - `CH3 (Antena 1)`: `umbral_ch3`, `dist_ch3`, `tmin_ch3`.
+  - `CH4 (Antena 2)`: `umbral_ch4`, `dist_ch4`, `tmin_ch4`.
+- **Barra de estado de calibración instrumental:** Píldora de estado global (`cal_badge_estado`), badges por canal (`cal_badge_ch2`, `cal_badge_ch3`, `cal_badge_ch4`), botón "Detalle del retardo" (despliega resumen de sólo lectura de `metadata.yaml`) y botón "Calibración instrumental" (navega directamente a la pestaña de Calibración).
+- **Pestañas Principales (`tabs_principal`):**
+  1. **Análisis (`value="senales"`):**
+     - **Fila superior (2 columnas):**
+       - Columna izquierda: Pestañas de dominio (`tabs_dominio`) con sub-pestaña **Señales** (`panel_senales`, 4 filas ch1..ch4 con líneas de umbral interactivas) y **Transformada S** (`panel_st_segmento`, 4 mapas de calor de segmento completo).
+       - Columna derecha: Tarjeta superior con **Peaks por segmento** (`tabs_peaks`, `grafico_peaks`). Tarjeta inferior con **Patrón TRPD** (`tabs_scatter`, `grafico_scatter` en tiempo absoluto $t_{\text{abs}}$, selector de magnitud $V_{\max}$ / $V_{\text{pp}}$, controles de exclusión de descargas por lazo o disparo y badge de estado del filtro).
+     - **Fila inferior (2 columnas):**
+       - Columna izquierda: **Ventanas** (`figura_ventanas`), formas de onda ventaneadas (70 ns) superpuestas y alineadas en $t = 0$.
+       - Columna derecha: Pestañas **FFT** (`grafico_fft`) y **Transformada S** (`grafico_st_ventana`) de las ventanas seleccionadas (`tabs_espectro`).
+  2. **Estadística (`value="estadistica"`):**
+     - Panel a ancho completo con `tabla_densidad` (tabla HTML con el formato de la Tabla 1 del paper; estilos `.tabla-paper` en `assets/styles.css`).
+     - Columnas: Specimen, d (mm), Voltage (kV), Sensor, $N_{PD}$ distribution, $N_{PD} = N_{cav}$, $\bar{V}_{\text{pp}}$, $\bar{t}_{\text{abs}}$.
+     - Botones: "Calcular todos los sensores (CH2..CH4)" (`btn_calc_todos_sensores`), "Limpiar tabla" (`btn_limpiar_densidad`) y "Exportar CSV" (`btn_exportar_densidad`).
+  3. **Metadata (`value="metadata"`):**
+     - Panel técnico con tarjetas estructuradas: Experimento, Circuito de impulso LI, Probeta (geometría, capas, e inferencia y edición interactiva de diámetros de vacuolas con persistencia), Osciloscopio, Tabla de sensores/canales con retardo instrumental $t_{\text{lag}}$, y editor/visor del archivo `metadata.yaml` crudo.
+  4. **Calibración (`value="calibracion"`):**
+     - Integración diferida de la aplicación de calibración (`calibrar_app`, puerto 8052) mediante `html.Iframe` (`iframe_calibracion`), que sólo carga su contenido al ingresar a la pestaña para no penalizar el tiempo de inicio.
+     - Enlace/botón "Abrir en ventana aparte" con destino `http://127.0.0.1:8052` como alternativa de visualización desacoplada.
+
+- **Stores de sesión en `app.py`:**
+  - `captura_params`: snapshot de parámetros numéricos fijados al pulsar "Calcular peaks".
+  - `seleccion`: índices globales de descargas activas seleccionadas interactivamente.
+  - `descargas_excluidas`: diccionario de exclusiones e historial por canal y medición.
+  - `calibracion_store`: diccionario de retardo instrumental derivado de `metadata.yaml`.
+  - `densidad_store`: conjunto acumulado de filas estadísticas para la tabla de densidad.
+  - `explorador_ruta_actual`: ruta activa en el modal de exploración de carpetas de medición.
 
 ---
 
@@ -728,7 +811,7 @@ Dos escalas, compartiendo la misma función:
 - **Medición sin canal CH1:** La fila de CH1 muestra "no disponible".
 - **`t50` inexistente:** Impulso con cola larga que no llega a descender al 50 % de su valor máximo dentro de la ventana de recorte.
 - **Impulso con baseline alto:** Si no hay cruces de subida claros, `t0_lin` y `tmax_lin` quedan en `None`.
-- **Medición sin calibración previa:** Si `metadata.yaml` no contiene el bloque `calibracion_retardo`, el sistema asigna por defecto $t_{\text{lag}} = 0.0\text{ ns}$ para todos los canales y muestra la etiqueta "Sin calibrar". El patrón TRPD representa $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)}$ y la tabla de densidad refleja `0.0` en `t_lag (ns)`.
+- **Medición sin calibración previa:** Si `metadata.yaml` no contiene el bloque `calibracion_retardo`, el sistema asigna por defecto $t_{\text{lag}} = 0.0\text{ ns}$ para todos los canales y muestra la etiqueta "Sin calibrar". El patrón TRPD representa $t_{\text{abs}} = t_{\text{pd}} - t_{10}^{(k)}$ y $ar{t}_{	ext{abs}}$ de la tabla de estadística no lleva corrección de retardo.
 - **Segmentos sin ruptura en calibración:** Si en una descarga el explosor no cebó o la señal de la antena no superó el umbral, la función `_t_arribo` retorna `None`. Ese segmento se excluye automáticamente del cómputo sin generar excepciones ni contaminar la mediana de los demás segmentos.
 - **Impulsos de CH1 ruidosos o anómalos:** Si un segmento de CH1 presenta perturbaciones que impidan detectar el cruce del 10 %, `t10_por_segmento` utiliza de forma segura el $t_{10}$ del impulso promedio de la medición como *fallback*, garantizando sincronización continua y trazabilidad (`n_fallback_t10`).
 - **Rendimiento desacoplado O(N):** La calibración y ajuste de $t_{\text{lag}}$ operan sobre los vectores numéricos `t_peak` y `t10_seg` en tiempo constante $O(N)$ ($\sim 1\text{ ms}$). Modificar el retardo no re-escanea los archivos HDF5, no invalida la caché de formas de onda $W$ en `_CAPTURA_CACHE`, no altera la selección activa en `seleccion` y conserva la perspectiva de zoom mediante `uirevision`.
@@ -829,7 +912,7 @@ Dos escalas, compartiendo la misma función:
       offset_v: 0.0
       rango_total_v: 4.0
     ch3:
-      sensor: Antena Vivaldi             # Reconfigurable por el usuario
+      sensor: Antena 1                   # Reconfigurable por el usuario
       funcion: UHF Banda ancha
       unidad: V
       filtro: ninguno
@@ -837,7 +920,7 @@ Dos escalas, compartiendo la misma función:
       offset_v: 0.0
       rango_total_v: 4.0
     ch4:
-      sensor: Antena Bioinspirada        # Reconfigurable por el usuario
+      sensor: Antena 2                   # Reconfigurable por el usuario
       funcion: UHF / Resolucion picos frente
       unidad: V
       filtro: HP_200MHz

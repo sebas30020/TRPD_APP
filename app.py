@@ -10,23 +10,29 @@ maximo (|pico| = 1). Selector de segmento. Render con WebGL (Scattergl).
 
 Ejecutar:  python3 app.py   ->  abrir http://127.0.0.1:8051
 """
-import functools
+import base64
+import urllib.parse
+import copy
 import os
 import re
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
-import h5py
 import numpy as np
 import plotly.graph_objects as go
 import scipy.fft as sfft
 import yaml
 from plotly.subplots import make_subplots
 from scipy.signal import find_peaks, butter, sosfiltfilt, welch
-from dash import Dash, dcc, html, dash_table, Input, Output, State, no_update, ctx, ALL
+from dash import Dash, dcc, html, Input, Output, State, no_update, ctx, ALL, Patch
 
 from generate_metadata import (plantilla_metadata, inferir_parametros, inferir_diametros,
-                               normalizar_diametros)
+                               normalizar_diametros, nombre_corto_sensor)
 
+import datos_h5
+import filtros
 import rutas
+import tema
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 # No hay carpeta de datos fija: las mediciones se eligen con el explorador de
@@ -48,106 +54,78 @@ IMP_ORDEN = 4       # orden del Butterworth (fase cero, sosfiltfilt)
 
 # Transformada S: nº de frecuencias (bins lineales entre 0 y f máx) y de
 # columnas de tiempo con que se dibuja cada mapa de calor.
-ST_NFREQ = 250
-ST_NT_VENTANA = 350     # ventana de 70 ns (captura punto a punto)
-ST_NT_SEGMENTO = 1000   # segmento completo (-5..30 µs)
-ST_FMAX_MHZ = 1000      # por defecto a Fs = 1 GSa/s
+# Resolución de la imagen: ST_NFREQ = filas de frecuencia (vertical); ST_NT_* =
+# columnas de tiempo (horizontal). Más filas/columnas = imagen más fina y cálculo
+# más lento (el segmento completo escala ~lineal con ST_NFREQ).
+ST_NFREQ = 500
+ST_NT_VENTANA = 700     # ventana de 70 ns: todas las muestras a 10 GSa/s (sin decimar)
+ST_NT_SEGMENTO = 2000   # segmento completo (-5..30 µs): ~17.5 ns por columna
+ST_FMAX_MHZ = 3000      # f máx por defecto y tope de la Transformada S (3 GHz)
+FFT_FMAX_MHZ = 3000     # la FFT se muestra solo hasta 3 GHz
 
+# Gráfico de señales: diezmado min-max (conserva picos y valles) a DEC_BUCKETS
+# tramos por traza; si el tramo visible dura <= SIN_DIEZMADO_US se envían todas
+# las muestras. Al hacer zoom se recalcula solo el tramo visible.
+DEC_BUCKETS = 2000
+SIN_DIEZMADO_US = 1.0
 
-_CHAN_RE = rutas.CHAN_RE
-_orden_natural = rutas.orden_natural
+URL_CALIBRAR = "http://127.0.0.1:8052"   # calibrar_app (pestaña Calibración)
+
+# Parámetros de detección por defecto cuando un campo queda vacío
+DIST_DEFECTO_US = 0.035
+TMIN_DEFECTO_US = 0.15
 
 
 def _ruta(carpeta, canal):
     """Ruta absoluta al .h5 del canal (la medición es una ruta absoluta en disco)."""
-    return rutas.ruta_canal(carpeta, canal)
+    return datos_h5.ruta_canal(carpeta, canal)
 
 
 def canales_presentes(carpeta):
-    """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden."""
-    return rutas.canales_presentes(carpeta)
+    """Canales (ch1..ch4) cuyo archivo existe para la medición dada, en orden (cacheado)."""
+    return datos_h5.canales_presentes(carpeta)
 
 
 listar_subcarpetas = rutas.listar_subcarpetas
 
 
-def _meta(carpeta, canal):
-    """Lee una sola vez el nombre del canal, escalas y numero de segmentos."""
-    with h5py.File(_ruta(carpeta, canal), "r") as f:
-        chan = list(f["Waveforms"].keys())[0]
-        ch = f["Waveforms/" + chan]
-        return {
-            "chan": chan,
-            "yinc": float(ch.attrs["YInc"]),
-            "yorg": float(ch.attrs["YOrg"]),
-            "xinc": float(ch.attrs["XInc"]),
-            "xorg": float(ch.attrs["XOrg"]),
-            "nsegs": int(ch.attrs["NumSegments"]),
-        }
-
-
-_META_CACHE = {}
-
-
 def meta_medicion(carpeta):
-    """Devuelve {canal: meta} para los canales presentes, cacheado."""
-    if carpeta not in _META_CACHE:
-        _META_CACHE[carpeta] = {c: _meta(carpeta, c) for c in canales_presentes(carpeta)}
-    return _META_CACHE[carpeta]
+    """Devuelve {canal: meta} para los canales presentes, cacheado (datos_h5)."""
+    return datos_h5.meta_medicion(carpeta)
 
 
 def n_segmentos(carpeta):
-    metas = meta_medicion(carpeta)
-    return min(m["nsegs"] for m in metas.values())
+    return datos_h5.n_segmentos(carpeta)
 
 
-def _cargar_segmento_leer(carpeta, canal, seg, ventana=(T_MIN, T_MAX)):
+def _cargar_segmento_leer(carpeta, canal, seg, ventana=(T_MIN, T_MAX), spec=None):
+    """(t_us, v) leídos del disco sin caché (ver datos_h5.leer_crudo)."""
+    return datos_h5.leer_crudo(carpeta, canal, seg, ventana, spec)
+
+
+_SPEC_CACHE = {}
+
+
+def spec_filtro(carpeta, canal):
+    """Filtro digital del canal según metadata.yaml (o el de defecto), cacheado."""
+    clave = (carpeta, canal)
+    if clave not in _SPEC_CACHE:
+        _SPEC_CACHE[clave] = filtros.filtro_canal(obtener_metadata(carpeta), canal)
+    return _SPEC_CACHE[clave]
+
+
+def cargar_segmento(carpeta, canal, seg, ventana=(T_MIN, T_MAX), filtrado=True):
     """Devuelve (t_us, v) para un canal y segmento, recortado a la ventana.
-
-    Sólo se leen del HDF5 las muestras de la ventana (el segmento completo es ~6x
-    mayor que la ventana -5..30 us que usa la app).
-    """
-    m = meta_medicion(carpeta)[canal]
-    with h5py.File(_ruta(carpeta, canal), "r") as f:
-        dset = f[f"Waveforms/{m['chan']}/{m['chan']} Seg{seg}Data"]
-        n = dset.shape[0]
-        if ventana is None:
-            i0, i1 = 0, n
-        else:
-            # Mismos índices que daba la máscara (t >= v0) & (t <= v1).
-            i0 = int(np.ceil((ventana[0] * 1e-6 - m["xorg"]) / m["xinc"]))
-            i1 = int(np.floor((ventana[1] * 1e-6 - m["xorg"]) / m["xinc"])) + 1
-            i0, i1 = max(i0, 0), min(i1, n)
-            if i1 <= i0:
-                return np.array([]), np.array([])
-        raw = dset[i0:i1]
-    v = (raw.astype(np.float64) * m["yinc"] + m["yorg"]) * 1e3  # milivoltios
-    t = (m["xorg"] + np.arange(i0, i1) * m["xinc"]) * 1e6  # microsegundos
-    return t, v
+    Con `filtrado` se aplica el filtro del canal (CH2..CH4; CH1 nunca).
+    Cacheado en datos_h5 (handles reutilizados, eje temporal compartido)."""
+    spec = spec_filtro(carpeta, canal) if filtrado and canal != "ch1" else None
+    return datos_h5.cargar(carpeta, canal, seg, tuple(ventana) if ventana else None, spec)
 
 
-@functools.lru_cache(maxsize=48)
-def _cargar_segmento_cache(carpeta, canal, seg, ventana):
-    t, v = _cargar_segmento_leer(carpeta, canal, seg, ventana)
-    t.flags.writeable = False   # evita que un consumidor mute la copia cacheada
-    v.flags.writeable = False
-    return t, v
+_COLORES_CANALES = tema.COLORES_CANALES
 
 
-def cargar_segmento(carpeta, canal, seg, ventana=(T_MIN, T_MAX)):
-    """Devuelve (t_us, v) para un canal y segmento, recortado a la ventana."""
-    return _cargar_segmento_cache(carpeta, canal, seg, tuple(ventana) if ventana else None)
-
-
-_COLORES_CANALES = {
-    "ch1": "#1f77b4",
-    "ch2": "#2563eb",  # azul
-    "ch3": "#059669",  # verde
-    "ch4": "#d97706",  # naranja
-}
-
-
-def config_sensores_defecto(carpeta):
+def config_sensores_defecto(carpeta, filtrado=True):
     """Genera la configuración de trigger (umbral, dist, tmin) para los canales
     trigger (ch2, ch3, ch4), leyendo de metadata.yaml si existen o calculando valores iniciales."""
     defaults = {
@@ -175,11 +153,62 @@ def config_sensores_defecto(carpeta):
                 cfg[ch]["tmin"] = float(trig_meta["tmin_us"])
 
         if cfg[ch]["umbral"] is None:
-            cfg[ch]["umbral"] = umbral_defecto(carpeta, ch)
+            cfg[ch]["umbral"] = umbral_defecto(carpeta, ch, filtrado=filtrado)
     return cfg
 
 
-def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
+def decimar_minmax(t, v, n_buckets=DEC_BUCKETS):
+    """Diezmado min-max: divide la señal en n_buckets tramos contiguos y conserva,
+    de cada uno, la muestra mínima y la máxima en su orden temporal. Así ningún
+    pico ni valle desaparece del dibujo. Si hay pocas muestras, las devuelve tal cual."""
+    n = v.size
+    if n <= 2 * n_buckets:
+        return t, v
+    largo = int(np.ceil(n / n_buckets))
+    pad = largo * n_buckets - n
+    vv = np.pad(v, (0, pad), mode="edge") if pad else v
+    bloques = vv.reshape(n_buckets, largo)
+    base = np.arange(n_buckets) * largo
+    i_min = np.minimum(base + np.argmin(bloques, axis=1), n - 1)
+    i_max = np.minimum(base + np.argmax(bloques, axis=1), n - 1)
+    idx = np.unique(np.concatenate((i_min, i_max)))   # ordenados en el tiempo
+    return t[idx], v[idx]
+
+
+def tramo_visible(t, v, x0=None, x1=None, n_buckets=DEC_BUCKETS):
+    """Muestras a dibujar en [x0, x1] (µs): crudas si el tramo dura <= SIN_DIEZMADO_US,
+    si no diezmado min-max. Incluye un tramo de margen a cada lado para que el
+    trazo no se corte al borde al hacer pan."""
+    if t.size == 0:
+        return t, v
+    x0 = t[0] if x0 is None else max(float(x0), float(t[0]))
+    x1 = t[-1] if x1 is None else min(float(x1), float(t[-1]))
+    if x1 <= x0:
+        return t[:0], v[:0]
+    margen = (x1 - x0) / n_buckets
+    i0 = max(int(np.searchsorted(t, x0 - margen, side="left")) - 1, 0)
+    i1 = min(int(np.searchsorted(t, x1 + margen, side="right")) + 1, t.size)
+    t, v = t[i0:i1], v[i0:i1]
+    if x1 - x0 <= SIN_DIEZMADO_US:
+        return t, v
+    return decimar_minmax(t, v, n_buckets)
+
+
+def _arreglo_tipado(a):
+    """Arreglo float32 codificado como typed array de plotly ({dtype, bdata} base64),
+    el mismo formato que usa plotly.py al serializar figuras: ~4× más compacto que
+    una lista JSON en los Patch del zoom."""
+    a = np.ascontiguousarray(a, dtype=np.float32)
+    return {"dtype": "f4", "bdata": base64.b64encode(a.tobytes()).decode("ascii")}
+
+
+def _canales_senal(carpeta):
+    """Canales dibujados como traza de señal (ch1 va aparte): su posición es el
+    índice de la traza en figura() y en los Patch de redecimar_zoom."""
+    return [c for c in canales_presentes(carpeta) if c != "ch1"]
+
+
+def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rango_x=None):
     canales = canales_presentes(carpeta)
     fig = make_subplots(
         rows=len(canales), cols=1,
@@ -187,20 +216,22 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
         subplot_titles=[c for c in canales],
     )
     if cfg_sensores is None:
-        cfg_sensores = config_sensores_defecto(carpeta)
+        cfg_sensores = config_sensores_defecto(carpeta, filtrado=filtrado)
 
     t_trig = v_trig = None
     for i, c in enumerate(canales, start=1):
         fig.update_yaxes(title_text="mV", row=i, col=1)
         if c == "ch1":
             continue  # CH1 muestra la señal promedio filtrada (se dibuja aparte)
-        t, v = cargar_segmento(carpeta, c, seg)
+        t, v = cargar_segmento(carpeta, c, seg, filtrado=filtrado)
         if c == canal:
             t_trig, v_trig = t, v
+        color_traza = _COLORES_CANALES.get(c, tema.ACCENT)
+        td, vd = tramo_visible(t, v, *(rango_x or (None, None)))
         fig.add_trace(
             go.Scattergl(
-                x=t.astype(np.float32), y=v.astype(np.float32),
-                mode="lines", name=c, line=dict(width=0.7),
+                x=td.astype(np.float32), y=vd.astype(np.float32), uid=f"sig-{c}",
+                mode="lines", name=c, line=dict(color=color_traza, width=0.9),
                 hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>" + c + "</extra>",
             ),
             row=i, col=1,
@@ -212,13 +243,13 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
             fila = canales.index(ch) + 1
             u_ch = cfg_sensores.get(ch, {}).get("umbral")
             if u_ch is None:
-                u_ch = umbral_defecto(carpeta, ch, seg)
+                u_ch = umbral_defecto(carpeta, ch, seg, filtrado=filtrado)
             es_activo = (ch == canal)
-            color_linea = "#dc2626" if es_activo else _COLORES_CANALES.get(ch, "#666")
+            color_linea = tema.LINEA_ACTIVO if es_activo else _COLORES_CANALES.get(ch, tema.MUTED)
             ancho_linea = 2.0 if es_activo else 1.3
             dash_linea = "dash" if es_activo else "dot"
             fig.add_hline(
-                y=u_ch, row=fila, col=1,
+                y=u_ch, row=fila, col=1, editable=True,   # solo los umbrales se arrastran
                 line=dict(color=color_linea, width=ancho_linea, dash=dash_linea),
             )
 
@@ -242,9 +273,9 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
             customdata = None
 
         fig.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=tp, y=vp, mode="markers", name=f"peaks {canal.upper()}", customdata=customdata,
-                marker=dict(symbol="x", color="black", size=9, line=dict(width=1)),
+                marker=dict(symbol="x", color=tema.LINEA_ACTIVO, size=9, line=dict(width=1.5)),
                 hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak</extra>",
                 showlegend=False,
             ),
@@ -257,24 +288,22 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None):
     fig.update_xaxes(title_text="Tiempo [µs]", row=len(canales), col=1)
     fig.update_xaxes(range=[T_MIN, T_MAX])
     fig.update_layout(
+        template="trpd",
         height=850, showlegend=False, margin=dict(t=70, r=20),
         title=f"{carpeta} — Segmento {seg}",
-        plot_bgcolor="white", paper_bgcolor="white",
+        hovermode="closest", hoverdistance=20, dragmode="zoom",
         uirevision=f"{carpeta}-{canal}",
-        # Las ediciones a mano de shapes (barras arrastradas) persisten mientras
-        # editrevision no cambie; al depender de los umbrales, un valor escrito en
-        # "Configuración Multi-Trigger" prevalece sobre la posición arrastrada.
         editrevision=f"{carpeta}-{canal}-" + "-".join(
             str(cfg_sensores.get(ch, {}).get("umbral")) for ch in TRIGGERS),
     )
     return fig
 
 
-def umbral_defecto(carpeta, canal="ch4", seg=1):
+def umbral_defecto(carpeta, canal="ch4", seg=1, filtrado=True):
     """Umbral por defecto: 50% del |pico| del canal trigger en el segmento dado."""
     if canal not in canales_presentes(carpeta):
         return 0.0
-    _, v = cargar_segmento(carpeta, canal, seg)
+    _, v = cargar_segmento(carpeta, canal, seg, filtrado=filtrado)
     return 0.5 * float(np.max(np.abs(v))) if v.size else 0.0
 
 
@@ -377,41 +406,40 @@ def parsear_lista_disparos(texto_o_num, n_max_segs=None):
     return sorted(segs)
 
 
-def contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=None):
+def contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=None, filtrado=True):
     """Nº de peaks válidos (con ventana completa de 70 ns) del canal trigger por segmento,
     omitiendo los índices de descargas excluidas si se proporcionan."""
-    cap = capturar(carpeta, canal, umbral, dist_us, tmin)
+    cap = capturar(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado)
     n_segs = n_segmentos(carpeta)
     segs = list(range(1, n_segs + 1))
-    excl_set = set(excluidos or [])
-    if cap["seg"].size:
-        if excl_set:
-            activos = [i for i in range(cap["seg"].size) if i not in excl_set]
-            segs_activos = cap["seg"][activos] if activos else np.array([])
-            conteos = {s: int(np.sum(segs_activos == s)) for s in segs}
-        else:
-            conteos = {s: int(np.sum(cap["seg"] == s)) for s in segs}
-    else:
-        conteos = {s: 0 for s in segs}
-    return segs, [conteos[s] for s in segs]
+    seg_arr = np.asarray(cap["seg"], dtype=int)
+    if excluidos:
+        activo = np.ones(seg_arr.size, dtype=bool)
+        idx = np.fromiter((i for i in excluidos if 0 <= i < seg_arr.size), dtype=int)
+        activo[idx] = False
+        seg_arr = seg_arr[activo]
+    seg_arr = seg_arr[(seg_arr >= 1) & (seg_arr <= n_segs)]
+    conteos = np.bincount(seg_arr, minlength=n_segs + 1)[1:n_segs + 1]
+    return segs, [int(c) for c in conteos]
 
 
 def figura_peaks(segs, cuentas, umbral, canal):
-    fig = go.Figure(go.Bar(x=segs, y=cuentas, marker_color="#636efa"))
+    fig = go.Figure(go.Bar(x=segs, y=cuentas, marker_color=tema.ACCENT))
     fig.update_layout(
+        template="trpd",
         title=f"Peaks {canal.upper()} por segmento (umbral = {umbral:.4g} mV)",
         xaxis_title="Segmento", yaxis_title="N° de peaks",
         height=415, margin=dict(t=50, r=20),
-        plot_bgcolor="white", paper_bgcolor="white",
     )
     return fig
 
 
-_CAPTURA_CACHE = {}
+_CAPTURA_CACHE = OrderedDict()
+CAPTURAS_EN_CACHE = 64
 
 
 def capturar(carpeta, canal, umbral, dist_us, tmin,
-             antes_us=VENTANA_PD_ANTES_US, desp_us=VENTANA_PD_DESP_US):
+             antes_us=VENTANA_PD_ANTES_US, desp_us=VENTANA_PD_DESP_US, filtrado=True):
     """Detecta los peaks del canal trigger y extrae, alrededor de cada uno, una
     ventana de 70 ns (10% antes = 7 ns / 90% después = 63 ns), alineada al peak (t=0).
 
@@ -426,18 +454,22 @@ def capturar(carpeta, canal, umbral, dist_us, tmin,
       seg    : segmento de origen de cada ventana
       dt_us  : paso de muestreo (µs)
     """
+    spec = spec_filtro(carpeta, canal) if filtrado else None
     key = (carpeta, canal, round(umbral, 6) if umbral is not None else None,
-           dist_us, tmin, antes_us, desp_us)
-    if key in _CAPTURA_CACHE:
-        return _CAPTURA_CACHE[key]
+           dist_us, tmin, antes_us, desp_us, spec)
+    return datos_h5.calcular_una_vez(
+        _CAPTURA_CACHE, key,
+        lambda: _capturar(carpeta, canal, umbral, dist_us, tmin, antes_us, desp_us, filtrado),
+        maxsize=CAPTURAS_EN_CACHE)
+
+
+def _capturar(carpeta, canal, umbral, dist_us, tmin, antes_us, desp_us, filtrado):
     dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6 if canal in canales_presentes(carpeta) else 0.0
     if canal not in canales_presentes(carpeta):
         res = {"t_rel": np.array([]), "W": np.empty((0, 0)),
                "t_peak": np.array([]), "v_peak": np.array([]), "vpp": np.array([]),
                "seg": np.array([]), "t10_seg": np.array([]),
-               "t_peak_borde": np.array([]), "v_peak_borde": np.array([]),
-               "seg_borde": np.array([]), "dt_us": dt_us}
-        _CAPTURA_CACHE[key] = res
+               "dt_us": dt_us}
         return res
     n_antes = int(round(antes_us / dt_us))
     n_desp = int(round(desp_us / dt_us))
@@ -445,7 +477,7 @@ def capturar(carpeta, canal, umbral, dist_us, tmin,
     t_rel = np.arange(-n_antes, n_desp + 1) * dt_us
     W, tpk, vpk, segs = [], [], [], []
     for s in range(1, n_segmentos(carpeta) + 1):
-        t, v = cargar_segmento(carpeta, canal, s)
+        t, v = cargar_segmento(carpeta, canal, s, filtrado=filtrado)
         if tmin is not None:
             mask = t >= tmin
             t, v = t[mask], v[mask]
@@ -469,10 +501,8 @@ def capturar(carpeta, canal, umbral, dist_us, tmin,
         "t_peak": np.array(tpk), "v_peak": np.array(vpk), "vpp": vpp_arr,
         "seg": seg_arr,
         "t10_seg": t10_seg,
-        "t_peak_borde": np.array([]), "v_peak_borde": np.array([]),
-        "seg_borde": np.array([]), "dt_us": dt_us,
+        "dt_us": dt_us,
     }
-    _CAPTURA_CACHE[key] = res
     return res
 
 
@@ -525,16 +555,38 @@ def _idx_cruces(datos, n):
     return sorted(set(idx)) if idx else None
 
 
+def _fig_vacia(mensaje, altura=430):
+    """Figura sin datos con un mensaje centrado (estados vacíos)."""
+    fig = go.Figure()
+    fig.update_layout(
+        template="trpd", height=altura, margin=dict(t=50, r=20),
+        annotations=[dict(text=mensaje, xref="paper", yref="paper", x=0.5, y=0.5,
+                          showarrow=False, font=dict(size=13, color=tema.MUTED))],
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+    )
+    return fig
+
+
+def _fig_error(titulo, exc, altura=430):
+    """Figura que muestra un error en lugar de dejar la figura anterior sin avisar.
+    El detalle completo va a la consola del servidor."""
+    import traceback
+    traceback.print_exc()
+    fig = _fig_vacia(f"⚠ {titulo}: {type(exc).__name__}: {exc}", altura)
+    fig.update_annotations(font=dict(color=tema.ERROR))
+    return fig
+
+
 def _fig_sin_seleccion(canal):
     """Figura vacía con aviso cuando no hay puntos elegidos en los scatters."""
     fig = go.Figure()
     fig.update_layout(
+        template="trpd",
         height=430, margin=dict(t=50, r=20),
-        plot_bgcolor="white", paper_bgcolor="white",
         annotations=[dict(
             text="Selecciona señales en los scatters o en las cruces del trigger",
             xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
-            font=dict(size=13, color="#888"),
+            font=dict(size=13, color=tema.MUTED),
         )],
         xaxis=dict(visible=False), yaxis=dict(visible=False),
     )
@@ -556,16 +608,16 @@ def figura_ventanas(cap, sel, canal):
     fig = go.Figure()
     fig.add_trace(go.Scattergl(
         x=np.concatenate(xs), y=np.concatenate(ys), mode="lines",
-        line=dict(color="#EF553B", width=0.7), opacity=0.5,
+        line=dict(color=tema.SCATTER_PUNTOS, width=0.8), opacity=0.5,
         hoverinfo="skip", showlegend=False,
     ))
-    fig.add_vline(x=0, line=dict(color="#333", width=1, dash="dash"),
+    fig.add_vline(x=0, line=dict(color=tema.LINEA_ACTIVO, width=1, dash="dash"),
                   annotation_text="peak", annotation_position="top")
     fig.update_layout(
+        template="trpd",
         title=f"Señales {canal.upper()} — {len(sel)} seleccionadas",
         xaxis_title="Tiempo relativo al peak [µs]", yaxis_title="mV",
         height=430, margin=dict(t=50, r=20),
-        plot_bgcolor="white", paper_bgcolor="white",
     )
     return fig
 
@@ -583,48 +635,74 @@ def figura_fft(cap, sel, canal):
         fs = 1.0 / (cap["dt_us"] * 1e-6)  # Hz
         nperseg = min(W.shape[1], 256)
         f, Pxx = welch(W[filas], fs=fs, nperseg=nperseg, scaling="spectrum", axis=-1)
+        hasta = f <= FFT_FMAX_MHZ * 1e6
         fig.add_trace(go.Scattergl(
-            x=f / 1e6, y=Pxx.mean(axis=0), mode="lines", line=dict(color="#1f77b4", width=1),
+            x=f[hasta] / 1e6, y=Pxx.mean(axis=0)[hasta], mode="lines", line=dict(color=tema.ACCENT, width=1.2),
             hovertemplate="f=%{x:.1f} MHz<br>%{y:.3g} mV²<extra></extra>", showlegend=False,
         ))
     fig.update_layout(
+        template="trpd",
         title=f"FFT (Welch) {canal.upper()} — {n} señales",
         xaxis_title="Frecuencia [MHz]", yaxis_title="Espectro [mV²]",
+        xaxis_range=[0, FFT_FMAX_MHZ],
         height=430, margin=dict(t=50, r=20),
-        plot_bgcolor="white", paper_bgcolor="white",
     )
     return fig
 
 
+def _paso_st(N, n_t):
+    """Paso de decimado temporal de la ST: el mayor divisor de N en [p/2, p] con
+    p = N // n_t (plegado exacto); si no hay, p (se recortan < p muestras finales)."""
+    p = max(1, N // max(1, n_t))
+    for d in range(p, max(1, p // 2) - 1, -1):
+        if N % d == 0:
+            return d
+    return p
+
+
 def transformada_s(x, t_us, dt_us, fmax_mhz=ST_FMAX_MHZ, nfreq=ST_NFREQ,
-                    n_t=ST_NT_VENTANA, bloque=16):
+                    n_t=ST_NT_VENTANA, bloque=64):
     """Magnitud de la transformada S (Stockwell) de x, algoritmo rápido vía FFT
     (Stockwell 1996): S_j[n] = IFFT{ X[(m+j) mod N] · exp(-2π²m²/j²) }[n], con
     m = índice de frecuencia centrado (-N/2..N/2-1) y j = índice de frecuencia
     de la fila (bin lineal, f_j = j/(N·dt_us) MHz). La fila f=0 es |media(x)|.
     Un tono de amplitud A da |S| ≈ A/2 en su frecuencia (mismas unidades que x,
-    p.ej. mV). f máx se recorta a Nyquist (N//2). La gaussiana solo se evalúa
-    en su soporte (|m| <= 1.2·j) para evitar aritmética de subnormales, que
-    ralentiza mucho el cálculo cuando f máx es baja.
+    p.ej. mV). f máx se limita a ST_FMAX_MHZ y a Nyquist (N//2).
+
+    Plegado espectral: solo se dibuja una columna cada `paso` muestras, y
+    s[paso·k] = (1/paso)·IFFT_L{ Σ_r Y[q + r·L] } con L = N/paso, de modo que cada
+    fila cuesta una suma sobre el soporte de la gaussiana (|m| <= 1.2·j, fuera de
+    él vale < 1e-12) más una IFFT de longitud L, en vez de una IFFT de longitud N.
+    Resultado idéntico al cálculo directo (error ~1e-8 relativo). Si `paso` no
+    divide a N se descartan las últimas (< paso) muestras.
 
     Devuelve (t_dec, f_mhz, A): eje de tiempo decimado a ~n_t puntos (recorte
-    de t_us), eje de frecuencia [MHz] (nfreq+1 filas) y la matriz de magnitud.
+    de t_us), eje de frecuencia [MHz] (nfreq+1 filas) y la matriz de magnitud
+    (float32).
     """
-    N = x.size
+    fmax_mhz = min(float(fmax_mhz or ST_FMAX_MHZ), ST_FMAX_MHZ)   # nunca más de 3 GHz
+    paso = _paso_st(x.size, n_t)
+    N = (x.size // paso) * paso
+    L = N // paso
+    x = np.asarray(x[:N], dtype=np.float64)
     X = sfft.fft(x, workers=-1)
-    m = sfft.fftfreq(N) * N
     jmax = max(1, min(N // 2, int(round(fmax_mhz * 1e6 * N * dt_us * 1e-6))))
     js = np.unique(np.linspace(1, jmax, min(nfreq, jmax)).round().astype(int))
-    paso = max(1, N // n_t)
-    t_dec = t_us[::paso]
-    A = np.empty((js.size + 1, t_dec.size))
+    t_dec = t_us[:N:paso]
+    A = np.empty((js.size + 1, L), dtype=np.float32)
     A[0, :] = abs(float(x.mean()))
+    m_min, m_max = -(N // 2), (N - 1) // 2          # rango de fftfreq(N)·N
     for a in range(0, js.size, bloque):
         jb = js[a:a + bloque]
-        idx = (np.arange(N)[None, :] + jb[:, None]) % N
-        soporte = np.abs(m)[None, :] <= 1.2 * jb[:, None]
-        G = np.where(soporte, np.exp(-2 * np.pi ** 2 * m[None, :] ** 2 / jb[:, None] ** 2), 0.0)
-        A[a + 1:a + 1 + jb.size] = np.abs(sfft.ifft(X[idx] * G, axis=1, workers=-1))[:, ::paso]
+        F = np.empty((jb.size, L), dtype=np.complex128)
+        for k, j in enumerate(jb):
+            sop = int(np.ceil(1.2 * j))
+            m = np.arange(max(-sop, m_min), min(sop, m_max) + 1)
+            val = X[(m + j) % N] * np.exp(-2 * np.pi ** 2 * (m / j) ** 2)
+            q = (m % N) % L
+            F[k] = (np.bincount(q, weights=val.real, minlength=L)
+                    + 1j * np.bincount(q, weights=val.imag, minlength=L))
+        A[a + 1:a + 1 + jb.size] = np.abs(sfft.ifft(F, axis=1, workers=-1)) / paso
     f_mhz = np.concatenate(([0.0], js / (N * dt_us)))
     return t_dec, f_mhz, A
 
@@ -643,36 +721,38 @@ def figura_st_ventana(cap, sel, canal, fmax_mhz=ST_FMAX_MHZ):
         acc = A if acc is None else acc + A
     fig = go.Figure()
     fig.add_trace(go.Heatmap(
-        x=t_dec, y=f_mhz, z=acc / n, colorscale="Viridis",
+        x=t_dec, y=f_mhz, z=acc / n, colorscale=tema.COLORMAP_ST, zsmooth="best",
         colorbar=dict(title="mV"),
         hovertemplate="t=%{x:.4f} µs<br>f=%{y:.1f} MHz<br>%{z:.3g} mV<extra></extra>",
     ))
     fig.add_vline(x=0, line=dict(color="white", width=1, dash="dash"),
                   annotation_text="peak", annotation_position="top")
     fig.update_layout(
+        template="trpd",
         title=f"Transformada S {canal.upper()} — {n} señales (promedio |S|)",
         xaxis_title="Tiempo relativo al peak [µs]", yaxis_title="Frecuencia [MHz]",
         height=430, margin=dict(t=50, r=20),
-        plot_bgcolor="white", paper_bgcolor="white",
     )
     return fig
 
 
-_ST_SEG_CACHE = {}
+_ST_SEG_CACHE = OrderedDict()
+ST_SEGMENTOS_EN_CACHE = 8    # ~16 MB por entrada (4 canales × 501×2000 float32)
 
 
-def st_segmento(carpeta, seg, canal, fmax_mhz=ST_FMAX_MHZ):
-    """Transformada S del segmento completo (-5..30 µs) de un canal, con su
-    señal cruda (cargar_segmento; también para CH1). Cacheada por sesión."""
-    key = (carpeta, seg, canal, fmax_mhz)
-    if key not in _ST_SEG_CACHE:
-        t, v = cargar_segmento(carpeta, canal, seg)
+def st_segmento(carpeta, seg, canal, fmax_mhz=ST_FMAX_MHZ, filtrado=True):
+    """Transformada S del segmento completo (-5..30 µs) de un canal, con la
+    misma señal que el gráfico (cargar_segmento; CH1 sin filtro). Cacheada por sesión."""
+    key = (carpeta, seg, canal, fmax_mhz, filtrado)
+
+    def calcular():
+        t, v = cargar_segmento(carpeta, canal, seg, filtrado=filtrado)
         dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6
-        _ST_SEG_CACHE[key] = transformada_s(v, t, dt_us, fmax_mhz, ST_NFREQ, ST_NT_SEGMENTO)
-    return _ST_SEG_CACHE[key]
+        return transformada_s(v, t, dt_us, fmax_mhz, ST_NFREQ, ST_NT_SEGMENTO)
+    return datos_h5.calcular_una_vez(_ST_SEG_CACHE, key, calcular, maxsize=ST_SEGMENTOS_EN_CACHE * 4)
 
 
-def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ):
+def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ, filtrado=True):
     """Transformada S del segmento completo, una fila por canal (ch1..ch4),
     eje temporal compartido con la fila de figura()."""
     canales = canales_presentes(carpeta)
@@ -681,11 +761,15 @@ def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ):
         rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.04,
         subplot_titles=canales,
     )
-    for i, c in enumerate(canales, start=1):
-        t_dec, f_mhz, A = st_segmento(carpeta, seg, c, fmax_mhz)
+    # Los canales son independientes: FFT/IFFT y bincount liberan el GIL, así que
+    # calcularlos en hilos reduce ~2.5× el tiempo (11 s -> ~4 s con 4 canales).
+    with ThreadPoolExecutor(max_workers=max(1, n)) as ex:
+        resultados = list(ex.map(
+            lambda c: st_segmento(carpeta, seg, c, fmax_mhz, filtrado=filtrado), canales))
+    for i, (c, (t_dec, f_mhz, A)) in enumerate(zip(canales, resultados), start=1):
         fig.add_trace(
             go.Heatmap(
-                x=t_dec, y=f_mhz, z=A, colorscale="Viridis",
+                x=t_dec, y=f_mhz, z=A, colorscale=tema.COLORMAP_ST, zsmooth="best",
                 colorbar=dict(title="mV", len=0.85 / n, y=1 - (i - 0.5) / n, thickness=14),
                 hovertemplate="t=%{x:.4f} µs<br>f=%{y:.1f} MHz<br>%{z:.3g} mV<extra>" + c + "</extra>",
             ),
@@ -695,9 +779,9 @@ def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ):
     fig.update_xaxes(title_text="Tiempo [µs]", row=n, col=1)
     fig.update_xaxes(range=[T_MIN, T_MAX])
     fig.update_layout(
+        template="trpd",
         height=850, margin=dict(t=70, r=20),
         title=f"{carpeta} — Segmento {seg} — Transformada S",
-        plot_bgcolor="white", paper_bgcolor="white",
     )
     return fig
 
@@ -705,14 +789,22 @@ def figura_st_segmento(carpeta, seg, fmax_mhz=ST_FMAX_MHZ):
 
 def _dir_medicion(carpeta):
     """Encuentra el directorio físico que contiene los archivos de la medición."""
-    return rutas.dir_medicion(carpeta) or os.path.abspath(carpeta)
+    return datos_h5.dir_medicion(carpeta) or os.path.abspath(carpeta)
 
 
 def obtener_metadata(carpeta):
-    """Carga metadata.yaml si existe en la carpeta de medición; de lo contrario,
-    genera la estructura enriquecida en memoria a partir de los HDF5 y parámetros inferidos."""
+    """metadata.yaml de la medición (o la plantilla generada si no existe), como copia
+    que el llamador puede modificar. Cacheada mientras no cambie el archivo."""
     if not carpeta:
         return {}
+    meta_path = os.path.join(_dir_medicion(carpeta), "metadata.yaml")
+    return copy.deepcopy(datos_h5.cacheado_por_archivo(
+        meta_path, ("app", carpeta), lambda: _leer_metadata(carpeta)))
+
+
+def _leer_metadata(carpeta):
+    """Lee metadata.yaml si existe en la carpeta de medición; de lo contrario,
+    genera la estructura enriquecida en memoria a partir de los HDF5 y parámetros inferidos."""
     d = _dir_medicion(carpeta)
     meta_path = os.path.join(d, "metadata.yaml")
     if os.path.isfile(meta_path):
@@ -749,6 +841,9 @@ def guardar_metadata_archivo(carpeta, contenido_yaml_str):
         yaml.safe_load(contenido_yaml_str)  # validar sintaxis YAML
         with open(meta_path, "w", encoding="utf-8") as f:
             f.write(contenido_yaml_str)
+        datos_h5.invalidar_archivo(meta_path)
+        for clave in [k for k in _SPEC_CACHE if k[0] == carpeta]:
+            del _SPEC_CACHE[clave]   # el filtro de cada canal puede haber cambiado
         return True, f"Guardado exitoso en {os.path.basename(meta_path)}"
     except Exception as e:
         return False, f"Error al guardar: {e}"
@@ -776,123 +871,195 @@ def guardar_diametros(carpeta, texto):
 
 COLUMNAS_DENSIDAD = [
     {"name": "Specimen", "id": "specimen"},
+    {"name": "d (mm)", "id": "diametro"},
     {"name": "Voltage (kV)", "id": "voltage"},
     {"name": "Sensor", "id": "sensor"},
     {"name": "N_PD distribution [0, 1, 2, 3, 4, > 4]", "id": "distribucion"},
-    {"name": "Media de N_PD", "id": "media_npd"},
-    {"name": "d (mm)", "id": "diametro"},
-    {"name": "V̄_max (V)", "id": "vmax_media"},
+    {"name": "N_PD = N_cav", "id": "n_coinc"},
     {"name": "V̄_pp (V)", "id": "vpp_media"},
-    {"name": "t_lag (ns)", "id": "tlag"},
     {"name": "t̄_abs (µs)", "id": "tabs_media"},
 ]
 
 
-def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, excluidos=None):
-    """Calcula la fila de la tabla de densidad para la medición y canal dados,
-    inspirada en la tabla experimental de resumen (Specimen, Voltage, Sensor,
-    N_PD distribution [0, 1, 2, 3, 4, > 4], Media de N_PD, d (mm), V̄_max (V), V̄_pp (V), t_lag (ns), t̄_abs (µs)).
+def _tension_kv(carpeta, meta):
+    """Tensión (kV) de la medición: carpeta '<X>kV' de la ruta y, si no hay,
+    circuito_impulso.tension_kv_ac_sec del metadata.yaml. None si no se conoce."""
+    kv = inferir_parametros(carpeta).get("tension_sec_kv")
+    if kv is None:
+        kv = (meta.get("circuito_impulso") or {}).get("tension_kv_ac_sec")
+    try:
+        return float(kv) if kv is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, excluidos=None,
+                           filtrado=True):
+    """Fila de la tabla de estadística con el formato de la Tabla 1 del paper:
+    Specimen (Nv), d (mm), Voltage (kV), Sensor, N_PD distribution [0, 1, 2, 3, 4, > 4],
+    N_PD = N_cav, V̄_pp (V) y t̄_abs (µs).
+
+    V̄_pp y t̄_abs se promedian solo sobre las descargas de los disparos con
+    N_PD == N_cav (si no se conoce N_cav, sobre todas las descargas activas).
     Si se proporciona `excluidos`, omite dichos índices globales del cálculo."""
     meta = obtener_metadata(carpeta)
-    prob = meta.get("probeta", {})
-    circ = meta.get("circuito_impulso", {})
-    canales_cfg = meta.get("canales", {})
+    prob = meta.get("probeta") or {}
+    inf = inferir_parametros(carpeta)
 
-    codigo_prob = prob.get("codigo") or ""
-    tipo_geom = prob.get("tipo_geometria") or ""
-    if codigo_prob and tipo_geom:
-        specimen = f"{codigo_prob} ({tipo_geom})"
-    elif codigo_prob:
-        specimen = codigo_prob
-    else:
-        specimen = prob.get("descripcion") or "Pressboard"
+    n_cav = prob.get("nro_vacuolas") or inf.get("nro_vacuolas")
+    try:
+        n_cav = int(n_cav) if n_cav is not None else None
+    except (TypeError, ValueError):
+        n_cav = None
+    specimen = f"{n_cav}v" if n_cav else (prob.get("codigo") or "-")
 
-    v_sec = circ.get("tension_kv_ac_sec")
-    if v_sec is not None:
-        voltage = f"{v_sec} kV"
-    else:
-        inf = inferir_parametros(carpeta)
-        voltage = f"{inf['tension_sec_kv']} kV" if inf.get("tension_sec_kv") else "-"
+    diam = inferir_diametros(prob, prob.get("codigo") or inf.get("codigo_probeta"))
+    diametro = "-" if diam == "N/D" else ", ".join(
+        x[:-2] if x.lower().endswith("mm") else x for x in str(diam).split("-"))
 
-    sens_info = canales_cfg.get(canal, {})
-    sens_nom = sens_info.get("sensor") or canal.upper()
-    sensor = f"{sens_nom} ({canal.upper()})"
+    voltage_kv = _tension_kv(carpeta, meta)
+    voltage = f"{voltage_kv:g}" if voltage_kv is not None else "-"
 
-    cap = capturar(carpeta, canal, umbral, dist_us, tmin)
+    sens_info = (meta.get("canales") or {}).get(canal) or {}
+    sensor = nombre_corto_sensor(sens_info.get("sensor"), canal)
+
+    cap = capturar(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado)
     n_total = cap["t_peak"].size
     excl_set = set(excluidos or [])
     activos = [i for i in range(n_total) if i not in excl_set]
 
-    segs, cuentas = contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=excl_set)
+    segs, cuentas = contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=excl_set,
+                                 filtrado=filtrado)
     cuentas_arr = np.asarray(cuentas)
-
     if cuentas_arr.size > 0:
-        c0 = int(np.sum(cuentas_arr == 0))
-        c1 = int(np.sum(cuentas_arr == 1))
-        c2 = int(np.sum(cuentas_arr == 2))
-        c3 = int(np.sum(cuentas_arr == 3))
-        c4 = int(np.sum(cuentas_arr == 4))
-        c_mas = int(np.sum(cuentas_arr > 4))
-        distribucion = f"[{c0}, {c1}, {c2}, {c3}, {c4}, {c_mas}]"
-        media_npd = f"{np.mean(cuentas_arr):.2f}"
+        c = [int(np.sum(cuentas_arr == k)) for k in range(5)] + [int(np.sum(cuentas_arr > 4))]
+        distribucion = "[" + ", ".join(str(x) for x in c) + "]"
     else:
         distribucion = "[0, 0, 0, 0, 0, 0]"
-        media_npd = "0.00"
 
-    diametro = inferir_diametros(prob, codigo_prob)
-
-    todos_vp = cap["v_peak"][activos] if activos else np.array([])
-    todos_vpp = cap["vpp"][activos] if activos else np.array([])
-
-    if todos_vp.size > 0:
-        vp_mean_mv = float(np.mean(np.abs(todos_vp)))
-        vp_mean_v = vp_mean_mv / 1000.0
-        vmax_str = f"{vp_mean_v:.4f} V ({vp_mean_mv:.1f} mV)"
+    if n_cav:
+        n_coinc = str(int(np.sum(cuentas_arr == n_cav))) if cuentas_arr.size else "0"
+        segs_ok = {s for s, k in zip(segs, cuentas) if k == n_cav}
+        idx = [i for i in activos if int(cap["seg"][i]) in segs_ok]
     else:
-        vmax_str = "-"
+        n_coinc = "-"
+        idx = activos
 
-    if todos_vpp.size > 0:
-        vpp_mean_mv = float(np.mean(todos_vpp))
-        vpp_mean_v = vpp_mean_mv / 1000.0
-        vpp_str = f"{vpp_mean_v:.4f} V ({vpp_mean_mv:.1f} mV)"
+    if idx:
+        vpp_media = f"{float(np.mean(cap['vpp'][idx])) / 1000.0:.3f}"
+        tabs_media = f"{float(np.mean(t_abs_captura(cap, t_lag_us)[idx])):.3f}"
     else:
-        vpp_str = "-"
-
-    t_abs_arr = t_abs_captura(cap, t_lag_us)
-    t_abs_activos = t_abs_arr[activos] if activos else np.array([])
-    if t_abs_activos.size > 0:
-        tabs_mean = float(np.mean(t_abs_activos))
-        tabs_str = f"{tabs_mean:.3f} µs"
-    else:
-        tabs_str = "-"
+        vpp_media = tabs_media = "-"
 
     return {
         "id": f"{carpeta}_{canal}",
         "specimen": specimen,
+        "diametro": diametro,
         "voltage": voltage,
         "sensor": sensor,
         "distribucion": distribucion,
-        "media_npd": media_npd,
-        "diametro": diametro,
-        "vmax_media": vmax_str,
-        "vpp_media": vpp_str,
-        "tlag": f"{(t_lag_us or 0.0)*1e3:.2f}",
-        "tabs_media": tabs_str,
+        "n_coinc": n_coinc,
+        "vpp_media": vpp_media,
+        "tabs_media": tabs_media,
         "_carpeta": carpeta,
         "_canal": canal,
+        "_n_cav": n_cav,
+        "_voltage_kv": voltage_kv,
+        "_filtrado": bool(filtrado),
+        "_filtro": filtros.etiqueta(spec_filtro(carpeta, canal)) if filtrado else "sin filtro",
     }
 
 
+def _cabecera_tabla_paper():
+    """Cabecera con la notación de la Tabla 1 (subíndices y barra de media)."""
+    return html.Tr([
+        html.Th("Specimen"),
+        html.Th("d (mm)"),
+        html.Th("Voltage (kV)"),
+        html.Th("Sensor"),
+        html.Th(["N", html.Sub("PD"), " distribution", html.Br(), "[0, 1, 2, 3, 4, > 4]"]),
+        html.Th(["N", html.Sub("PD"), " = N", html.Sub("cav")]),
+        html.Th(["V̄", html.Sub("pp"), " (V)"]),
+        html.Th(["t̄", html.Sub("abs"), " (µs)"]),
+    ])
 
-_IMPULSO_CACHE = {}
+
+def construir_tabla_paper(filas):
+    """Tabla HTML con el formato de la Tabla 1 del paper: Specimen, d (mm) y
+    Voltage combinados (rowSpan) por medición; una fila por sensor."""
+    if not filas:
+        return html.Div("Sin datos: pulse 'Calcular todos los sensores'.",
+                        className="tabla-paper-vacia")
+    orden_ch = {"ch2": 0, "ch3": 1, "ch4": 2}
+    grupos = {}
+    for f in filas:
+        grupos.setdefault(f.get("_carpeta"), []).append(f)
+
+    def clave_grupo(item):
+        f0 = item[1][0]
+        n, v = f0.get("_n_cav"), f0.get("_voltage_kv")
+        return (n is None, n or 0, v is None, v or 0.0, str(item[0]))
+
+    cuerpo = []
+    for _, grupo in sorted(grupos.items(), key=clave_grupo):
+        grupo = sorted(grupo, key=lambda f: orden_ch.get(f.get("_canal"), 9))
+        span = len(grupo)
+        for k, f in enumerate(grupo):
+            celdas = []
+            if k == 0:
+                celdas += [
+                    html.Td(f.get("specimen"), rowSpan=span, className="tp-specimen"),
+                    html.Td(f.get("diametro"), rowSpan=span),
+                    html.Td(f.get("voltage"), rowSpan=span),
+                ]
+            celdas += [
+                html.Td(f.get("sensor")),
+                html.Td(f.get("distribucion"), className="tp-distribucion"),
+                html.Td(f.get("n_coinc")),
+                html.Td(f.get("vpp_media")),
+                html.Td(f.get("tabs_media")),
+            ]
+            cuerpo.append(html.Tr(celdas, className="tp-inicio-grupo" if k == 0 else None))
+    tabla = html.Table([html.Thead(_cabecera_tabla_paper()), html.Tbody(cuerpo)],
+                       className="tabla-paper")
+    return html.Div([tabla, html.Div(nota_filtros_tabla(filas), className="tabla-paper-nota")])
 
 
-def promedio_impulso(carpeta):
-    """Señal de impulso de referencia: promedio de CH1 sobre todos los segmentos."""
-    if "ch1" not in canales_presentes(carpeta):
-        return None, None
-    if carpeta not in _IMPULSO_CACHE:
-        acc, t0, cnt = None, None, 0
+def nota_filtros_tabla(filas):
+    """Nota al pie con los filtros digitales aplicados a cada sensor de la tabla."""
+    por_sensor = {}
+    for f in sorted(filas, key=lambda f: str(f.get("_canal"))):
+        por_sensor.setdefault(f.get("sensor"), set()).add(f.get("_filtro") or "sin filtro")
+    if all(not f.get("_filtrado", True) for f in filas):
+        return "Señal sin filtrar."
+    partes = [f"{s}: {' / '.join(sorted(v))}" for s, v in por_sensor.items()]
+    mezcla = len({bool(f.get("_filtrado", True)) for f in filas}) > 1
+    return ("Filtros digitales (Butterworth orden 4, fase cero) — " + " · ".join(partes)
+            + (". Atención: la tabla mezcla filas con y sin filtro." if mezcla else "."))
+
+
+def csv_tabla_densidad(filas):
+    """CSV de la tabla (columnas visibles de COLUMNAS_DENSIDAD, sin claves internas)."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([c["name"] for c in COLUMNAS_DENSIDAD])
+    for f in filas or []:
+        w.writerow([f.get(c["id"], "") for c in COLUMNAS_DENSIDAD])
+    return buf.getvalue()
+
+
+
+_PASADA_CH1 = {}
+
+
+def _pasada_ch1(carpeta):
+    """Lee cada segmento de CH1 UNA vez y devuelve (t0, promedio, t10_por_seg),
+    con t10_por_seg[k] = t10 del segmento k+1 o None si no se pudo calcular.
+    Lo usan promedio_impulso y t10_por_segmento (antes recorrían CH1 por separado)."""
+    def calcular():
+        acc, t0, cnt, t10s = None, None, 0, []
         for s in range(1, n_segmentos(carpeta) + 1):
             t, v = cargar_segmento(carpeta, "ch1", s)
             if acc is None:
@@ -900,8 +1067,23 @@ def promedio_impulso(carpeta):
             if v.shape == acc.shape:
                 acc += v
                 cnt += 1
-        _IMPULSO_CACHE[carpeta] = (t0, acc / cnt if cnt else acc)
-    return _IMPULSO_CACHE[carpeta]
+            if v.size == 0:
+                t10s.append(None)
+                continue
+            sf = _filtrar_impulso(carpeta, v)
+            i_pico = int(np.argmax(sf))
+            vmax = float(sf[i_pico])
+            t10s.append(_cruce_subida(t, sf, 0.10 * vmax, i_pico) if vmax > 0 else None)
+        return t0, (acc / cnt if cnt else acc), t10s
+    return datos_h5.calcular_una_vez(_PASADA_CH1, carpeta, calcular)
+
+
+def promedio_impulso(carpeta):
+    """Señal de impulso de referencia: promedio de CH1 sobre todos los segmentos."""
+    if "ch1" not in canales_presentes(carpeta):
+        return None, None
+    t0, prom, _ = _pasada_ch1(carpeta)
+    return t0, prom
 
 
 _IMPULSO_FILT_CACHE = {}
@@ -920,13 +1102,10 @@ def impulso_filtrado(carpeta):
     El filtro se aplica una sola vez por experimento y el resultado queda en
     caché de sesión para no recalcularlo en cada render. Devuelve (t_us, s).
     """
-    if carpeta not in _IMPULSO_FILT_CACHE:
+    def calcular():
         t, v = promedio_impulso(carpeta)
-        if t is None:
-            _IMPULSO_FILT_CACHE[carpeta] = (None, None)
-        else:
-            _IMPULSO_FILT_CACHE[carpeta] = (t, _filtrar_impulso(carpeta, v))
-    return _IMPULSO_FILT_CACHE[carpeta]
+        return (None, None) if t is None else (t, _filtrar_impulso(carpeta, v))
+    return datos_h5.calcular_una_vez(_IMPULSO_FILT_CACHE, carpeta, calcular)
 
 
 def _cruce_subida(t, s, thr, i_pico):
@@ -990,44 +1169,32 @@ def t10_por_segmento(carpeta):
 
     Si falla en un segmento, usa el t10 del impulso promedio. Sin CH1: ceros.
     """
-    if carpeta in _T10_SEG_CACHE:
-        return _T10_SEG_CACHE[carpeta]
+    return datos_h5.calcular_una_vez(_T10_SEG_CACHE, carpeta, lambda: _t10_por_segmento(carpeta))
 
+
+def _t10_por_segmento(carpeta):
     nsegs = n_segmentos(carpeta) if ("ch1" in canales_presentes(carpeta)) else 0
     if nsegs == 0 or ("ch1" not in canales_presentes(carpeta)):
         arr = np.zeros(nsegs, dtype=np.float64)
         arr.flags.writeable = False
-        _T10_SEG_CACHE[carpeta] = arr
         _T10_FALLBACK_COUNT[carpeta] = 0
         return arr
 
     T_prom = tiempos_impulso(carpeta)
     t10_fallback = T_prom["t10"] if (T_prom and T_prom.get("t10") is not None) else 0.0
 
+    t10s = _pasada_ch1(carpeta)[2]
     t10_arr = np.empty(nsegs, dtype=np.float64)
     n_fb = 0
-    for s in range(1, nsegs + 1):
-        t, v = cargar_segmento(carpeta, "ch1", s)
-        if v.size == 0:
-            t10_arr[s - 1] = t10_fallback
-            n_fb += 1
-            continue
-        sf = _filtrar_impulso(carpeta, v)
-        i_pico = int(np.argmax(sf))
-        vmax = float(sf[i_pico])
-        if vmax <= 0:
-            t10_val = None
-        else:
-            t10_val = _cruce_subida(t, sf, 0.10 * vmax, i_pico)
-
+    for k in range(nsegs):
+        t10_val = t10s[k] if k < len(t10s) else None
         if t10_val is None:
-            t10_arr[s - 1] = t10_fallback
+            t10_arr[k] = t10_fallback
             n_fb += 1
         else:
-            t10_arr[s - 1] = t10_val
+            t10_arr[k] = t10_val
 
     t10_arr.flags.writeable = False
-    _T10_SEG_CACHE[carpeta] = t10_arr
     _T10_FALLBACK_COUNT[carpeta] = n_fb
     return t10_arr
 
@@ -1154,13 +1321,13 @@ def lag_canal(cal, carpeta, canal):
 
 # Líneas verticales de tiempos: (clave, etiqueta, color).
 _IMP_LINEAS = [
-    ("t10", "t10 (10%)", "#2ca02c"),
-    ("t30", "t30 (30%)", "#2ca02c"),
-    ("t90", "t90 (90%)", "#2ca02c"),
-    ("t50", "t50 (50% cola)", "#9467bd"),
-    ("t_pico", "t_pico", "#ff7f0e"),
-    ("t0_lin", "t0_lin", "#d62728"),
-    ("tmax_lin", "tmax_lin", "#d62728"),
+    ("t10", "t10 (10%)", tema.LINEA_T10),
+    ("t30", "t30 (30%)", tema.LINEA_T30_T90),
+    ("t90", "t90 (90%)", tema.LINEA_T30_T90),
+    ("t50", "t50 (50% cola)", tema.LINEA_T50),
+    ("t_pico", "t_pico", tema.WARN),
+    ("t0_lin", "t0_lin", tema.LINEA_O1),
+    ("tmax_lin", "tmax_lin", tema.LINEA_O1),
 ]
 
 
@@ -1184,7 +1351,7 @@ def _dibujar_impulso_ch1(fig, carpeta, fila):
         go.Scattergl(
             x=t[::paso], y=s[::paso], mode="lines",
             name=f"CH1 impulso (LP {IMP_FCORTE/1e6:.0f} MHz)",
-            line=dict(color="#1f77b4", width=1.6),
+            line=dict(color=_COLORES_CANALES["ch1"], width=1.6),
             hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>impulso</extra>",
             showlegend=False,
         ),
@@ -1197,7 +1364,7 @@ def _dibujar_impulso_ch1(fig, carpeta, fila):
             go.Scattergl(
                 x=[T["t0_lin"], T["tmax_lin"]], y=[0.0, T["vmax"]],
                 mode="lines", name="recta 30–90",
-                line=dict(color="#d62728", width=1, dash="dash"),
+                line=dict(color=tema.LINEA_O1, width=1, dash="dash"),
                 hoverinfo="skip", showlegend=False,
             ),
             row=fila, col=1,
@@ -1218,15 +1385,15 @@ def _dibujar_impulso_ch1(fig, carpeta, fila):
             yref=f"y{fila} domain" if fila > 1 else "y domain",
             x=0.995, y=0.97, xanchor="right", yanchor="top",
             text="<br>".join(resumen), showarrow=False, align="left",
-            font=dict(size=10), bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="#ccc", borderwidth=1,
+            font=dict(size=10, color=tema.INK), bgcolor="rgba(255,255,255,0.9)",
+            bordercolor=tema.BORDER, borderwidth=1,
         )
 
 
 def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="vmax",
                    t_abs=None, t10_ref=None, t_lag_us=0.0, calibrado=False, excluidos=None):
     # Peaks SIEMPRE como curva 0 (la selección mapea por pointNumber o customdata).
-    # La referencia CH1 y el resaltado amarillo van como trazas extra.
+    # La referencia CH1 y el resaltado van como trazas extra.
     n = cap["t_peak"].size
     excl_set = set(excluidos or [])
     activos = [i for i in range(n) if i not in excl_set]
@@ -1253,7 +1420,7 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
     fig.add_trace(go.Scattergl(
         x=x_act, y=y_act, mode="markers", name=traza_nombre,
         customdata=cd_act,
-        marker=dict(color="#EF553B", size=6, opacity=0.6),
+        marker=dict(color=tema.SCATTER_PUNTOS, size=6, opacity=0.6),
         hovertemplate="t_abs=%{x:.4f} µs (%{customdata[4]:.2f} ns)<br>t_osc=%{customdata[2]:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<br>Seg %{customdata[3]:.0f}<extra>" + canal.upper() + "</extra>",
     ))
     if t_ref is not None and v_ref is not None and v_ref.size:
@@ -1266,22 +1433,23 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
         nombre = "CH1 promedio (forma normalizada)"
         htmpl = "t_abs=%{x:.4f} µs<br>%{customdata:.1%} de la cresta CH1<extra>CH1</extra>"
         fig.add_trace(go.Scattergl(x=x_ref, y=y_r, customdata=cd_ref, mode="lines",
-                                   name=nombre, line=dict(color="#999", width=1),
+                                   name=nombre, line=dict(color=tema.MUTED_LIGHT, width=1),
                                    opacity=0.6, hovertemplate=htmpl))
-        fig.add_vline(x=0, line=dict(color="#2ca02c", width=1, dash="dot"),
+        fig.add_vline(x=0, line=dict(color=tema.LINEA_T10, width=1, dash="dot"),
                       annotation_text="t10", annotation_position="top")
     h = [i for i in (highlight or []) if 0 <= i < n and i not in excl_set]
     if h and y_val.size > 0:
         fig.add_trace(go.Scattergl(
             x=x[h], y=y_val[h], mode="markers", name="sel",
-            marker=dict(color="#FFD400", size=11, line=dict(color="black", width=1)),
+            marker=dict(color=tema.SCATTER_SEL, size=10, line=dict(color="white", width=1.5)),
             hoverinfo="skip", showlegend=False,
         ))
     fig.update_layout(
+        template="trpd",
         xaxis_title="Tiempo relativo al impulso t_abs [µs] (t10 = 0)", yaxis_title=y_label,
         height=415, margin=dict(t=40, r=20), showlegend=True, dragmode="select",
         legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0.5, xanchor="center"),
-        plot_bgcolor="white", paper_bgcolor="white", uirevision=uirev,
+        uirevision=uirev,
     )
     return fig
 
@@ -1289,16 +1457,17 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
 app = Dash(__name__)
 app.title = "Análisis de Vacuolas"
 
-_TAB = {"className": "tab", "selected_className": "tab--selected"}
+_TAB = tema.TAB_PROPS
 
 app.layout = html.Div(
     className="app",
     children=[
-        dcc.Store(id="umbral"),
+        dcc.Store(id="rango_x"),            # zoom vigente del gráfico de señales
         dcc.Store(id="captura_params"),
         dcc.Store(id="seleccion", data=[]),
-        dcc.Store(id="descargas_excluidas", data={}),
-        dcc.Store(id="densidad_store", data=[]),
+        dcc.Store(id="descargas_excluidas", data={}, storage_type="local"),
+        dcc.Store(id="densidad_store", data=[], storage_type="local"),
+        dcc.Store(id="ultima_carpeta", storage_type="local"),
         dcc.Store(id="calibracion_store"),
         dcc.Store(id="explorador_ruta_actual", data=rutas.ruta_inicial()),
         html.Div(
@@ -1315,23 +1484,19 @@ app.layout = html.Div(
                 dcc.Dropdown(
                     id="carpeta",
                     options=[], value=None, clearable=False,
-                    placeholder="Elija una carpeta con 📂 Examinar…", style={"width": "260px"},
+                    placeholder="Elija una carpeta con Examinar…", style={"width": "260px"},
                 ),
-                html.Button("📂 Examinar…", id="btn_examinar", n_clicks=0,
-                            style={"backgroundColor": "#475569", "color": "white", "border": "none",
-                                   "borderRadius": "4px", "padding": "5px 10px", "cursor": "pointer",
-                                   "fontSize": "13px"}),
+                html.Button("Examinar…", id="btn_examinar", n_clicks=0,
+                            style=tema.ESTILO_BOTON_SECONDARY),
                 html.Label("Segmento:"),
-                html.Button("◀", id="segmento_prev", n_clicks=0,
-                            style={"backgroundColor": "#64748b", "color": "white", "border": "none",
-                                   "borderRadius": "4px", "padding": "2px 10px", "cursor": "pointer"}),
+                html.Button("◀", id="segmento_prev", n_clicks=0, title="Segmento anterior (tecla ←)",
+                            style=tema.ESTILO_BOTON_STEPPER),
                 dcc.Input(id="segmento", type="number", min=1, max=1, step=1, value=1,
                           debounce=True, style={"width": "64px", "textAlign": "center"}),
                 html.Span(id="segmento_total", children="/ 1",
-                          style={"fontSize": "12px", "color": "#64748b"}),
-                html.Button("▶", id="segmento_next", n_clicks=0,
-                            style={"backgroundColor": "#64748b", "color": "white", "border": "none",
-                                   "borderRadius": "4px", "padding": "2px 10px", "cursor": "pointer"}),
+                          style={"fontSize": "12px", "color": tema.MUTED}),
+                html.Button("▶", id="segmento_next", n_clicks=0, title="Segmento siguiente (tecla →)",
+                            style=tema.ESTILO_BOTON_STEPPER),
                 html.Label("Trigger activo:"),
                 dcc.Dropdown(
                     id="canal",
@@ -1341,33 +1506,43 @@ app.layout = html.Div(
                         {"label": "CH4", "value": "ch4"},
                     ],
                     value="ch4", clearable=False, style={"width": "120px"},
+                    persistence=True, persistence_type="local",
                 ),
-                html.Button("⚡ Calcular peaks", id="btn", n_clicks=0,
-                            style={"backgroundColor": "#2563eb", "color": "white", "fontWeight": "600"}),
+                html.Button("Calcular peaks", id="btn", n_clicks=0,
+                            style=tema.ESTILO_BOTON_PRIMARY),
+                html.Div(
+                    dcc.Checklist(
+                        id="switch_filtros",
+                        options=[{"label": " Filtros del paper", "value": "on"}],
+                        value=["on"], inline=True,
+                        persistence=True, persistence_type="local",
+                    ),
+                    title=("Butterworth orden 4, fase cero: CH2 HP 5 MHz · CH3 HP 200 MHz · "
+                           "CH4 HP 200 MHz (configurable en metadata: canales.chX.filtro)"),
+                ),
                 html.Label("f máx ST (MHz):"),
-                dcc.Input(id="st_fmax", type="number", value=ST_FMAX_MHZ, min=1,
-                          step="any", debounce=True, style={"width": "80px"}),
+                html.Span(dcc.Input(id="st_fmax", type="number", value=ST_FMAX_MHZ, min=1, max=ST_FMAX_MHZ,
+                                    step="any", debounce=True, style={"width": "80px"},
+                                    persistence=True, persistence_type="local"),
+                          title="Frecuencia máxima de la Transformada S (tope 3000 MHz)"),
             ],
         ),
         html.Div(
             id="explorador_panel",
             hidden=False,
             style={
-                "margin": "0 12px 10px 12px",
-                "padding": "12px",
-                "backgroundColor": "#f8fafc",
-                "border": "1px solid #cbd5e1",
-                "borderRadius": "6px",
+                **tema.ESTILO_CARD,
+                "margin": "0 0 12px 0",
+                "backgroundColor": tema.BG,
             },
             children=[
                 html.Div(
                     style={"display": "flex", "alignItems": "center", "gap": "10px", "marginBottom": "10px"},
                     children=[
-                        html.Button("⬆ Subir", id="explorador_subir", n_clicks=0,
-                                    style={"backgroundColor": "#64748b", "color": "white", "border": "none",
-                                           "borderRadius": "4px", "padding": "4px 10px", "cursor": "pointer"}),
+                        html.Button("Subir nivel", id="explorador_subir", n_clicks=0,
+                                    style=tema.ESTILO_BOTON_SECONDARY),
                         html.Span(id="explorador_ruta_label", style={"fontWeight": "bold", "fontSize": "13px",
-                                                                     "color": "#1e293b", "wordBreak": "break-all"}),
+                                                                     "color": tema.INK, "wordBreak": "break-all"}),
                     ],
                 ),
                 html.Div(
@@ -1375,9 +1550,9 @@ app.layout = html.Div(
                     style={
                         "maxHeight": "240px",
                         "overflowY": "auto",
-                        "border": "1px solid #e2e8f0",
+                        "border": f"1px solid {tema.BORDER}",
                         "borderRadius": "4px",
-                        "backgroundColor": "#ffffff",
+                        "backgroundColor": tema.CARD,
                         "padding": "6px",
                         "marginBottom": "10px",
                     },
@@ -1386,10 +1561,9 @@ app.layout = html.Div(
                     style={"display": "flex", "gap": "10px"},
                     children=[
                         html.Button("Seleccionar esta carpeta", id="explorador_confirmar", disabled=True, n_clicks=0,
-                                    style={"backgroundColor": "#2563eb", "color": "white", "fontWeight": "600",
-                                           "border": "none", "borderRadius": "4px", "padding": "6px 14px", "cursor": "pointer"}),
+                                    style=tema.ESTILO_BOTON_PRIMARY),
                         html.Button("Cancelar", id="explorador_cancelar", n_clicks=0,
-                                    style={"backgroundColor": "#94a3b8", "color": "white",
+                                    style={"backgroundColor": tema.MUTED_LIGHT, "color": "white",
                                            "border": "none", "borderRadius": "4px", "padding": "6px 14px", "cursor": "pointer"}),
                     ],
                 ),
@@ -1398,28 +1572,28 @@ app.layout = html.Div(
         html.Div(
             style={
                 "display": "flex", "gap": "10px", "alignItems": "center",
-                "padding": "6px 12px", "backgroundColor": "#f8fafc",
-                "border": "1px solid #e2e8f0", "borderRadius": "6px",
-                "margin": "0 12px 10px 12px", "flexWrap": "wrap",
+                "padding": "8px 12px", "backgroundColor": tema.BG,
+                "border": f"1px solid {tema.BORDER}", "borderRadius": "6px",
+                "margin": "0 0 12px 0", "flexWrap": "wrap",
             },
             children=[
-                html.Span("🎯 Configuración Multi-Trigger:",
-                          style={"fontSize": "11px", "fontWeight": "bold", "color": "#1e293b", "marginRight": "4px"}),
+                html.Span("Configuración Multi-Trigger:",
+                          style={"fontSize": "11px", "fontWeight": "bold", "color": tema.INK, "marginRight": "4px"}),
                 # CH2
                 html.Div(
                     style={
                         "display": "flex", "alignItems": "center", "gap": "6px",
-                        "padding": "4px 8px", "backgroundColor": "white",
-                        "border": "1px solid #bfdbfe", "borderLeft": "4px solid #2563eb",
+                        "padding": "4px 8px", "backgroundColor": tema.CARD,
+                        "border": f"1px solid {tema.BORDER}", "borderLeft": f"4px solid {tema.COLORES_CANALES['ch2']}",
                         "borderRadius": "4px", "fontSize": "11px",
                     },
                     children=[
-                        html.Span("CH2:", style={"fontWeight": "bold", "color": "#1d4ed8"}),
-                        html.Span("u (mV):"),
+                        html.Span("CH2:", style={"fontWeight": "bold", "color": tema.COLORES_CANALES["ch2"]}),
+                        html.Span("u (mV):", title="Umbral de detección de peaks (mV); también se ajusta arrastrando la línea del gráfico"),
                         dcc.Input(id="umbral_ch2", debounce=True, type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
-                        html.Span("Δt (µs):"),
+                        html.Span("Δt (µs):", title="Distancia mínima entre peaks consecutivos (µs)"),
                         dcc.Input(id="dist_ch2", debounce=True, type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
-                        html.Span("t_mín (µs):"),
+                        html.Span("t_mín (µs):", title="Se ignoran los peaks anteriores a este instante (µs)"),
                         dcc.Input(id="tmin_ch2", debounce=True, type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
@@ -1427,17 +1601,17 @@ app.layout = html.Div(
                 html.Div(
                     style={
                         "display": "flex", "alignItems": "center", "gap": "6px",
-                        "padding": "4px 8px", "backgroundColor": "white",
-                        "border": "1px solid #a7f3d0", "borderLeft": "4px solid #059669",
+                        "padding": "4px 8px", "backgroundColor": tema.CARD,
+                        "border": f"1px solid {tema.BORDER}", "borderLeft": f"4px solid {tema.COLORES_CANALES['ch3']}",
                         "borderRadius": "4px", "fontSize": "11px",
                     },
                     children=[
-                        html.Span("CH3:", style={"fontWeight": "bold", "color": "#047857"}),
-                        html.Span("u (mV):"),
+                        html.Span("CH3:", style={"fontWeight": "bold", "color": tema.COLORES_CANALES["ch3"]}),
+                        html.Span("u (mV):", title="Umbral de detección de peaks (mV); también se ajusta arrastrando la línea del gráfico"),
                         dcc.Input(id="umbral_ch3", debounce=True, type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
-                        html.Span("Δt (µs):"),
+                        html.Span("Δt (µs):", title="Distancia mínima entre peaks consecutivos (µs)"),
                         dcc.Input(id="dist_ch3", debounce=True, type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
-                        html.Span("t_mín (µs):"),
+                        html.Span("t_mín (µs):", title="Se ignoran los peaks anteriores a este instante (µs)"),
                         dcc.Input(id="tmin_ch3", debounce=True, type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
@@ -1445,17 +1619,17 @@ app.layout = html.Div(
                 html.Div(
                     style={
                         "display": "flex", "alignItems": "center", "gap": "6px",
-                        "padding": "4px 8px", "backgroundColor": "white",
-                        "border": "1px solid #fde68a", "borderLeft": "4px solid #d97706",
+                        "padding": "4px 8px", "backgroundColor": tema.CARD,
+                        "border": f"1px solid {tema.BORDER}", "borderLeft": f"4px solid {tema.COLORES_CANALES['ch4']}",
                         "borderRadius": "4px", "fontSize": "11px",
                     },
                     children=[
-                        html.Span("CH4:", style={"fontWeight": "bold", "color": "#b45309"}),
-                        html.Span("u (mV):"),
+                        html.Span("CH4:", style={"fontWeight": "bold", "color": tema.COLORES_CANALES["ch4"]}),
+                        html.Span("u (mV):", title="Umbral de detección de peaks (mV); también se ajusta arrastrando la línea del gráfico"),
                         dcc.Input(id="umbral_ch4", debounce=True, type="number", step=0.1, style={"width": "65px", "fontSize": "11px", "padding": "2px"}),
-                        html.Span("Δt (µs):"),
+                        html.Span("Δt (µs):", title="Distancia mínima entre peaks consecutivos (µs)"),
                         dcc.Input(id="dist_ch4", debounce=True, type="number", step=0.005, min=0, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
-                        html.Span("t_mín (µs):"),
+                        html.Span("t_mín (µs):", title="Se ignoran los peaks anteriores a este instante (µs)"),
                         dcc.Input(id="tmin_ch4", debounce=True, type="number", step=0.005, style={"width": "50px", "fontSize": "11px", "padding": "2px"}),
                     ],
                 ),
@@ -1465,43 +1639,25 @@ app.layout = html.Div(
         html.Div(
             style={
                 "display": "flex", "gap": "10px", "alignItems": "center",
-                "padding": "6px 12px", "backgroundColor": "#f8fafc",
-                "border": "1px solid #e2e8f0", "borderRadius": "6px",
-                "margin": "0 12px 10px 12px", "flexWrap": "wrap",
+                "padding": "8px 12px", "backgroundColor": tema.BG,
+                "border": f"1px solid {tema.BORDER}", "borderRadius": "6px",
+                "margin": "0 0 12px 0", "flexWrap": "wrap",
             },
             children=[
-                html.Span("⏱ Retardo instrumental:",
-                          style={"fontSize": "11px", "fontWeight": "bold", "color": "#1e293b", "marginRight": "4px"}),
+                html.Span("Retardo instrumental:",
+                          style={"fontSize": "11px", "fontWeight": "bold", "color": tema.INK, "marginRight": "4px"}),
                 html.Span(
                     id="cal_badge_estado",
-                    style={
-                        "display": "inline-block", "fontSize": "11px", "padding": "2px 8px",
-                        "borderRadius": "10px", "fontWeight": "600",
-                        "backgroundColor": "#fef3c7", "color": "#92400e",
-                    },
+                    style=tema.BADGE_WARN,
                     children="Sin calibrar — retardo 0 ns",
                 ),
-                html.Span(id="cal_badge_ch2", style={
-                    "display": "inline-block", "fontSize": "11px", "padding": "2px 6px",
-                    "backgroundColor": "white", "border": "1px solid #bfdbfe",
-                    "borderLeft": "4px solid #2563eb", "borderRadius": "3px", "fontWeight": "600",
-                }, children="CH2: 0.00 ns"),
-                html.Span(id="cal_badge_ch3", style={
-                    "display": "inline-block", "fontSize": "11px", "padding": "2px 6px",
-                    "backgroundColor": "white", "border": "1px solid #a7f3d0",
-                    "borderLeft": "4px solid #059669", "borderRadius": "3px", "fontWeight": "600",
-                }, children="CH3: 0.00 ns"),
-                html.Span(id="cal_badge_ch4", style={
-                    "display": "inline-block", "fontSize": "11px", "padding": "2px 6px",
-                    "backgroundColor": "white", "border": "1px solid #fde68a",
-                    "borderLeft": "4px solid #d97706", "borderRadius": "3px", "fontWeight": "600",
-                }, children="CH4: 0.00 ns"),
-                html.Button("⏱ Detalle del retardo", id="btn_toggle_calibracion", n_clicks=0,
-                            style={"marginLeft": "auto", "fontSize": "11px", "fontWeight": "600",
-                                   "padding": "4px 10px", "backgroundColor": "#f1f5f9",
-                                   "border": "1px solid #cbd5e1", "borderRadius": "4px", "cursor": "pointer"}),
-                html.A("⚡ Abrir calibrar_app (8052)", href="http://127.0.0.1:8052", target="_blank",
-                       style={"fontSize": "11px", "color": "#2563eb", "textDecoration": "none", "fontWeight": "600", "marginLeft": "4px"}),
+                html.Span(id="cal_badge_ch2", style=tema.badge_canal("ch2"), children="CH2: 0.00 ns"),
+                html.Span(id="cal_badge_ch3", style=tema.badge_canal("ch3"), children="CH3: 0.00 ns"),
+                html.Span(id="cal_badge_ch4", style=tema.badge_canal("ch4"), children="CH4: 0.00 ns"),
+                html.Button("Detalle del retardo", id="btn_toggle_calibracion", n_clicks=0,
+                            style={**tema.ESTILO_BOTON_SECONDARY, "marginLeft": "auto", "fontSize": "11px", "padding": "3px 8px"}),
+                html.Button("Calibración instrumental", id="btn_ir_a_calibracion", n_clicks=0,
+                            style={**tema.ESTILO_BOTON_PRIMARY, "fontSize": "11px", "padding": "3px 8px", "marginLeft": "4px"}),
             ],
         ),
         # Panel desplegable de Calibración (solo lectura)
@@ -1509,237 +1665,302 @@ app.layout = html.Div(
             id="panel_calibracion",
             hidden=True,
             style={
-                "margin": "0 12px 12px 12px", "padding": "12px",
-                "backgroundColor": "#ffffff", "border": "1px solid #cbd5e1",
-                "borderRadius": "6px", "boxShadow": "0 1px 3px rgba(0,0,0,0.05)",
+                **tema.ESTILO_CARD,
+                "margin": "0 0 12px 0",
             },
             children=[
                 html.Div(
                     style={"display": "flex", "alignItems": "center", "justifyContent": "space-between", "marginBottom": "6px"},
                     children=[
                         html.Span("Retardo instrumental almacenado en metadata.yaml (solo lectura)",
-                                  style={"fontSize": "13px", "fontWeight": "bold", "color": "#0f172a"}),
+                                  style={"fontSize": "13px", "fontWeight": "bold", "color": tema.INK}),
                     ],
                 ),
                 html.Div(id="cal_detalle"),
-                html.Button("🔄 Recargar desde disco", id="btn_recargar_calibracion", n_clicks=0,
-                            style={"marginTop": "10px", "fontSize": "11px", "fontWeight": "600",
-                                   "padding": "4px 10px", "backgroundColor": "#f1f5f9",
-                                   "border": "1px solid #cbd5e1", "borderRadius": "4px", "cursor": "pointer"}),
+                html.Button("Recargar desde disco", id="btn_recargar_calibracion", n_clicks=0,
+                            style={**tema.ESTILO_BOTON_SECONDARY, "marginTop": "10px"}),
             ],
         ),
+        # Pestañas Principales
         html.Div(
-            className="row",
+            style={"marginBottom": "14px"},
             children=[
-                html.Div(className="col card", children=[
-                    dcc.Tabs(id="tabs_principal", value="senales", children=[
-                        dcc.Tab(label="Señales", value="senales", **_TAB),
-                        dcc.Tab(label="Transformada S", value="st", **_TAB),
-                        dcc.Tab(label="Metadata", value="metadata", **_TAB),
-                    ]),
-                    html.Div(id="panel_senales", children=[
-                        dcc.Graph(
-                            id="grafico",
-                            config={"edits": {"shapePosition": True}, "displaylogo": False},
+                dcc.Tabs(id="tabs_principal", value="senales", persistence=True, persistence_type="local", children=[
+                    dcc.Tab(label="Análisis", value="senales", **_TAB),
+                    dcc.Tab(label="Estadística", value="estadistica", **_TAB),
+                    dcc.Tab(label="Metadata", value="metadata", **_TAB),
+                    dcc.Tab(label="Calibración", value="calibracion", **_TAB),
+                ]),
+            ],
+        ),
+        # Panel 1: Análisis (Señales, Peaks, TRPD, Ventanas, Espectro)
+        html.Div(
+            id="panel_analisis",
+            children=[
+                html.Div(
+                    className="row",
+                    children=[
+                        html.Div(className="col card", children=[
+                            dcc.Tabs(id="tabs_dominio", value="senales", persistence=True, persistence_type="local", children=[
+                                dcc.Tab(label="Señales", value="senales", **_TAB),
+                                dcc.Tab(label="Transformada S", value="st", **_TAB),
+                            ]),
+                            html.Div(id="panel_senales", children=[
+                                dcc.Loading(type="circle", delay_show=300, color=tema.ACCENT, children=dcc.Graph(
+                                    id="grafico",
+                                    # Solo las shapes con editable=True (umbrales) se arrastran;
+                                    # rueda = zoom, doble clic = volver a -5..30 µs.
+                                    config={"displaylogo": False, "scrollZoom": True,
+                                            "doubleClick": "reset",
+                                            "edits": {"shapePosition": False}},
+                                )),
+                            ]),
+                            html.Div(id="panel_st_segmento", hidden=True, children=[
+                                dcc.Loading(dcc.Graph(id="grafico_st_segmento"), type="circle", delay_show=300, color=tema.ACCENT),
+                            ]),
+                        ]),
+                        html.Div(
+                            className="col",
+                            children=[
+                                html.Div(className="card", children=[
+                                    dcc.Tabs(id="tabs_peaks", value="barras", children=[
+                                        dcc.Tab(label="Peaks por segmento", value="barras",
+                                                children=[dcc.Loading(dcc.Graph(id="grafico_peaks"), type="circle", delay_show=300, color=tema.ACCENT)], **_TAB),
+                                    ]),
+                                ]),
+                                html.Div(className="card", children=[
+                                    dcc.Tabs(id="tabs_scatter", value="peaks", children=[
+                                        dcc.Tab(label="Patrón TRPD", value="peaks",
+                                                children=[
+                                                    html.Div(
+                                                        style={
+                                                            "display": "flex", "alignItems": "center", "gap": "6px",
+                                                            "padding": "6px 8px", "backgroundColor": tema.BG,
+                                                            "borderBottom": f"1px solid {tema.BORDER}", "marginBottom": "4px",
+                                                            "flexWrap": "wrap",
+                                                        },
+                                                        children=[
+                                                            html.Span("Magnitud:", style={"fontSize": "11px", "fontWeight": "bold", "color": tema.INK}),
+                                                            dcc.RadioItems(
+                                                                id="modo_magnitud_trpd",
+                                                                options=[
+                                                                    {"label": " Vmax", "value": "vmax"},
+                                                                    {"label": " Vpp", "value": "vpp"},
+                                                                ],
+                                                                value="vmax",
+                                                                inline=True,
+                                                                style={"fontSize": "11px"},
+                                                                inputStyle={"marginRight": "3px"},
+                                                                labelStyle={"marginRight": "8px", "cursor": "pointer", "fontWeight": "500"},
+                                                            ),
+                                                            html.Span("|", style={"color": tema.MUTED_LIGHT, "margin": "0 2px"}),
+                                                            html.Button("Quitar selección", id="btn_excluir_seleccion", n_clicks=0, disabled=True,
+                                                                        style=tema.ESTILO_BOTON_DANGER),
+                                                            html.Button("Deshacer", id="btn_deshacer_exclusion", n_clicks=0, disabled=True,
+                                                                        style=tema.ESTILO_BOTON_WARN),
+                                                            html.Button("Restaurar todo", id="btn_restaurar_descargas", n_clicks=0, disabled=True,
+                                                                        style=tema.ESTILO_BOTON_SECONDARY),
+                                                            html.Span("|", style={"color": tema.MUTED_LIGHT, "margin": "0 2px"}),
+                                                            html.Span("Disparo:", style={"fontSize": "11px", "fontWeight": "bold", "color": tema.INK}),
+                                                            dcc.Input(
+                                                                id="input_excluir_disparo",
+                                                                type="text",
+                                                                placeholder="ej. 5 o 2,4",
+                                                                style={"width": "75px", "fontSize": "11px", "padding": "3px 5px",
+                                                                       "textAlign": "center", "borderRadius": "4px", "border": f"1px solid {tema.BORDER}"}
+                                                            ),
+                                                            html.Button("Excluir", id="btn_excluir_disparo", n_clicks=0,
+                                                                        style=tema.ESTILO_BOTON_DANGER),
+                                                            html.Span(id="badge_filtro_descargas",
+                                                                      style={"fontSize": "11px", "color": tema.MUTED, "fontWeight": "600", "marginLeft": "auto"}),
+                                                        ],
+                                                    ),
+                                                    dcc.Loading(dcc.Graph(id="grafico_scatter"), type="circle", delay_show=300, color=tema.ACCENT),
+                                                ], **_TAB),
+                                    ]),
+                                ]),
+                            ],
                         ),
-                    ]),
-                    html.Div(id="panel_st_segmento", hidden=True, children=[
-                        dcc.Loading(dcc.Graph(id="grafico_st_segmento")),
-                    ]),
-                    html.Div(id="panel_metadata", hidden=True, style={"padding": "10px 4px"}, children=[
+                    ],
+                ),
+                html.Div(
+                    className="row",
+                    children=[
+                        html.Div(className="col card", children=[dcc.Loading(dcc.Graph(id="grafico_ventanas"), type="circle", delay_show=300, color=tema.ACCENT)]),
+                        html.Div(className="col card", children=[
+                            dcc.Tabs(id="tabs_espectro", value="fft", persistence=True, persistence_type="local", children=[
+                                dcc.Tab(label="FFT", value="fft",
+                                        children=[dcc.Loading(dcc.Graph(id="grafico_fft"), type="circle", delay_show=300, color=tema.ACCENT)], **_TAB),
+                                dcc.Tab(label="Transformada S", value="st",
+                                        children=[dcc.Loading(dcc.Graph(id="grafico_st_ventana"), type="circle", delay_show=300, color=tema.ACCENT)], **_TAB),
+                            ]),
+                        ]),
+                    ],
+                ),
+            ],
+        ),
+        # Panel 2: Estadística (Tabla de densidad amplia)
+        html.Div(
+            id="panel_estadistica",
+            hidden=True,
+            children=[
+                html.Div(
+                    className="card",
+                    style={"padding": "14px 16px"},
+                    children=[
+                        html.Div(
+                            style={
+                                "display": "flex", "justifyContent": "space-between",
+                                "alignItems": "center", "marginBottom": "12px",
+                                "flexWrap": "wrap", "gap": "10px",
+                                "borderBottom": f"1px solid {tema.BORDER}", "paddingBottom": "10px",
+                            },
+                            children=[
+                                html.Div([
+                                    html.H3("Densidad y Estadística de Eventos PD", style={"margin": "0 0 4px 0", "fontSize": "16px", "color": tema.INK}),
+                                    html.Span("Resumen estadístico por sensor y medición (distribución de peaks, amplitudes y tiempos de arribo).", style={"fontSize": "13px", "color": tema.MUTED}),
+                                ]),
+                                html.Div(
+                                    style={"display": "flex", "gap": "8px", "alignItems": "center"},
+                                    children=[
+                                        html.Button("Calcular todos los sensores (CH2..CH4)", id="btn_calc_todos_sensores",
+                                                    style=tema.ESTILO_BOTON_PRIMARY),
+                                        html.Button("Limpiar tabla", id="btn_limpiar_densidad",
+                                                    style=tema.ESTILO_BOTON_SECONDARY),
+                                        html.Button("Exportar CSV", id="btn_exportar_densidad",
+                                                    style=tema.ESTILO_BOTON_SECONDARY),
+                                    ],
+                                ),
+                            ],
+                        ),
+                        dcc.Loading(type="circle", delay_show=300, color=tema.ACCENT, children=html.Div(
+                            id="tabla_densidad", className="tabla-paper-contenedor",
+                            children=construir_tabla_paper([]))),
+                        dcc.Download(id="descarga_densidad"),
+                    ],
+                ),
+            ],
+        ),
+        # Panel 3: Metadata
+        html.Div(
+            id="panel_metadata",
+            hidden=True,
+            children=[
+                html.Div(
+                    className="card",
+                    style={"padding": "14px 16px"},
+                    children=[
                         html.Div(
                             style={
                                 "display": "flex", "justifyContent": "space-between",
                                 "alignItems": "center", "marginBottom": "12px", "flexWrap": "wrap",
-                                "gap": "8px", "borderBottom": "1px solid #e2e8f0", "paddingBottom": "8px",
+                                "gap": "8px", "borderBottom": f"1px solid {tema.BORDER}", "paddingBottom": "10px",
                             },
                             children=[
                                 html.Div([
-                                    html.H3(id="meta_titulo", style={"margin": "0 0 4px 0", "fontSize": "15px", "color": "#0f172a"}),
-                                    html.Span(id="meta_badge_estado", style={
-                                        "display": "inline-block", "fontSize": "11px", "padding": "2px 8px",
-                                        "borderRadius": "10px", "fontWeight": "600",
-                                    }),
+                                    html.H3(id="meta_titulo", style={"margin": "0 0 4px 0", "fontSize": "16px", "color": tema.INK}),
+                                    html.Span(id="meta_badge_estado", style=tema.BADGE_NEUTRAL),
                                 ]),
                                 html.Div(style={"display": "flex", "gap": "6px", "alignItems": "center"}, children=[
-                                    html.Button("💾 Guardar metadata.yaml", id="btn_guardar_metadata",
-                                                style={"backgroundColor": "#10b981", "color": "white", "border": "none",
-                                                       "padding": "6px 12px", "borderRadius": "6px", "fontWeight": "600",
-                                                       "cursor": "pointer", "fontSize": "12px"}),
+                                    html.Button("Guardar metadata.yaml", id="btn_guardar_metadata",
+                                                style=tema.ESTILO_BOTON_SUCCESS),
                                 ]),
                             ],
                         ),
                         html.Div(id="meta_msg_feedback", style={"marginBottom": "8px", "fontSize": "12px"}),
                         html.Div(
-                            style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(200px, 1fr))", "gap": "10px", "marginBottom": "12px"},
+                            style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(240px, 1fr))", "gap": "12px", "marginBottom": "14px"},
                             children=[
-                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
-                                    html.H4("🔬 Experimento", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
-                                    html.Div(id="meta_card_experimento", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                html.Div(className="card", style={"padding": "10px 12px"}, children=[
+                                    html.H4("Experimento", style={"margin": "0 0 6px 0", "fontSize": "13px", "color": tema.INK, "borderBottom": f"1px solid {tema.BORDER_SUBTLE}", "paddingBottom": "4px"}),
+                                    dcc.Loading(html.Div(id="meta_card_experimento", style={"fontSize": "12px", "lineHeight": "1.5"}), type="circle", delay_show=300, color=tema.ACCENT),
                                 ]),
-                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
-                                    html.H4("⚡ Circuito de Impulso (LI)", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
-                                    html.Div(id="meta_card_circuito", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                html.Div(className="card", style={"padding": "10px 12px"}, children=[
+                                    html.H4("Circuito de Impulso (LI)", style={"margin": "0 0 6px 0", "fontSize": "13px", "color": tema.INK, "borderBottom": f"1px solid {tema.BORDER_SUBTLE}", "paddingBottom": "4px"}),
+                                    dcc.Loading(html.Div(id="meta_card_circuito", style={"fontSize": "12px", "lineHeight": "1.5"}), type="circle", delay_show=300, color=tema.ACCENT),
                                 ]),
-                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
-                                    html.H4("🧪 Probeta / Espécimen", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
-                                    html.Div(id="meta_card_probeta", style={"fontSize": "11px", "lineHeight": "1.5"}),
-                                    # Diámetros de las vacuolas: el código (ej. 3Vmi) no los incluye.
-                                    html.Div(style={"display": "flex", "gap": "4px", "alignItems": "center",
-                                                    "marginTop": "6px", "fontSize": "11px"}, children=[
+                                html.Div(className="card", style={"padding": "10px 12px"}, children=[
+                                    html.H4("Probeta / Espécimen", style={"margin": "0 0 6px 0", "fontSize": "13px", "color": tema.INK, "borderBottom": f"1px solid {tema.BORDER_SUBTLE}", "paddingBottom": "4px"}),
+                                    dcc.Loading(html.Div(id="meta_card_probeta", style={"fontSize": "12px", "lineHeight": "1.5"}), type="circle", delay_show=300, color=tema.ACCENT),
+                                    html.Div(style={"display": "flex", "gap": "6px", "alignItems": "center", "marginTop": "8px", "fontSize": "12px"}, children=[
                                         dcc.Input(id="meta_input_diametros", type="text",
                                                   placeholder="ej. 2mm-2mm-3mm",
-                                                  style={"flex": "1", "minWidth": "0", "fontSize": "11px", "padding": "2px 4px"}),
-                                        html.Button("💾 Diámetros", id="btn_guardar_diametros",
+                                                  style={"flex": "1", "minWidth": "0", "fontSize": "12px", "padding": "4px 6px", "border": f"1px solid {tema.BORDER}", "borderRadius": "4px"}),
+                                        html.Button("Guardar diámetros", id="btn_guardar_diametros",
                                                     title="Guarda probeta.diametros en metadata.yaml",
-                                                    style={"backgroundColor": "#10b981", "color": "white", "border": "none",
-                                                           "padding": "3px 8px", "borderRadius": "4px", "fontWeight": "600",
-                                                           "cursor": "pointer", "fontSize": "11px"}),
+                                                    style=tema.ESTILO_BOTON_SUCCESS),
                                     ]),
                                 ]),
-                                html.Div(className="card", style={"padding": "8px 10px"}, children=[
-                                    html.H4("📊 Osciloscopio & Adquisición", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b", "borderBottom": "1px solid #f1f5f9", "paddingBottom": "3px"}),
-                                    html.Div(id="meta_card_osc", style={"fontSize": "11px", "lineHeight": "1.5"}),
+                                html.Div(className="card", style={"padding": "10px 12px"}, children=[
+                                    html.H4("Osciloscopio y Adquisición", style={"margin": "0 0 6px 0", "fontSize": "13px", "color": tema.INK, "borderBottom": f"1px solid {tema.BORDER_SUBTLE}", "paddingBottom": "4px"}),
+                                    dcc.Loading(html.Div(id="meta_card_osc", style={"fontSize": "12px", "lineHeight": "1.5"}), type="circle", delay_show=300, color=tema.ACCENT),
                                 ]),
                             ],
                         ),
-                        html.Div(className="card", style={"padding": "8px 10px", "marginBottom": "12px"}, children=[
-                            html.H4("📡 Asignación de Sensores y Canales de Adquisición", style={"margin": "0 0 6px 0", "fontSize": "12px", "color": "#1e293b"}),
-                            html.Div(id="meta_tabla_canales"),
+                        html.Div(className="card", style={"padding": "10px 12px", "marginBottom": "14px"}, children=[
+                            html.H4("Asignación de Sensores y Canales de Adquisición", style={"margin": "0 0 8px 0", "fontSize": "13px", "color": tema.INK}),
+                            dcc.Loading(html.Div(id="meta_tabla_canales"), type="circle", delay_show=300, color=tema.ACCENT),
                         ]),
                         html.Details([
-                            html.Summary("Ver / Editar YAML crudo", style={"cursor": "pointer", "fontSize": "12px", "fontWeight": "600", "color": "#475569", "padding": "4px 0"}),
-                            html.Div(style={"marginTop": "6px"}, children=[
+                            html.Summary("Ver / Editar YAML crudo", style={"cursor": "pointer", "fontSize": "12px", "fontWeight": "600", "color": tema.MUTED, "padding": "4px 0"}),
+                            html.Div(style={"marginTop": "8px"}, children=[
                                 dcc.Textarea(
                                     id="meta_yaml_text",
-                                    style={"width": "100%", "height": "200px", "fontFamily": "monospace",
-                                           "fontSize": "11px", "padding": "6px", "border": "1px solid #cbd5e1",
-                                           "borderRadius": "6px", "boxSizing": "border-box"},
+                                    style={"width": "100%", "height": "240px", "fontFamily": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                                           "fontSize": "12px", "padding": "8px", "border": f"1px solid {tema.BORDER}",
+                                           "borderRadius": "4px", "boxSizing": "border-box"},
                                 ),
-                                html.Div(style={"marginTop": "4px", "textAlign": "right"}, children=[
+                                html.Div(style={"marginTop": "6px", "textAlign": "right"}, children=[
                                     html.Button("Guardar cambios del texto YAML", id="btn_guardar_yaml_texto",
-                                                style={"backgroundColor": "#3b82f6", "color": "white", "border": "none",
-                                                       "padding": "4px 10px", "borderRadius": "4px", "fontWeight": "600",
-                                                       "cursor": "pointer", "fontSize": "11px"}),
+                                                style=tema.ESTILO_BOTON_PRIMARY),
                                 ]),
-                            ]),
-                        ]),
-                    ]),
-                ]),
-                html.Div(
-                    className="col",
-                    children=[
-                        html.Div(className="card", children=[
-                            dcc.Tabs(id="tabs_peaks", value="barras", children=[
-                                dcc.Tab(label="Peaks por segmento", value="barras",
-                                        children=[dcc.Graph(id="grafico_peaks")], **_TAB),
-                                dcc.Tab(label="Densidad de eventos", value="densidad",
-                                        children=[
-                                            html.Div(style={"display": "flex", "gap": "8px", "marginTop": "6px", "marginBottom": "4px", "alignItems": "center", "flexWrap": "wrap"}, children=[
-                                                html.Button("⚡ Calcular todos los sensores (CH2..CH4)", id="btn_calc_todos_sensores",
-                                                            style={"fontSize": "11px", "padding": "4px 8px", "backgroundColor": "#2563eb",
-                                                                   "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}),
-                                                html.Button("🗑 Limpiar tabla", id="btn_limpiar_densidad",
-                                                            style={"fontSize": "11px", "padding": "4px 8px", "backgroundColor": "#64748b",
-                                                                   "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}),
-                                            ]),
-                                            dash_table.DataTable(
-                                                id="tabla_densidad",
-                                                columns=COLUMNAS_DENSIDAD,
-                                                data=[],
-                                                export_format="csv",
-                                                style_table={"overflowX": "auto", "maxHeight": "360px", "marginTop": "4px"},
-                                                style_cell={"textAlign": "center",
-                                                            "padding": "5px 8px",
-                                                            "fontSize": "11px",
-                                                            "fontFamily": "inherit"},
-                                                style_header={"fontWeight": "bold",
-                                                              "backgroundColor": "#f1f5f9",
-                                                              "color": "#1e293b"},
-                                                style_data_conditional=[
-                                                    {"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"},
-                                                    {"if": {"column_id": "sensor"}, "fontWeight": "600"},
-                                                    {"if": {"column_id": "distribucion"}, "fontFamily": "monospace"},
-                                                ],
-                                            ),
-                                        ], **_TAB),
-                            ]),
-                        ]),
-                        html.Div(className="card", children=[
-                            dcc.Tabs(id="tabs_scatter", value="peaks", children=[
-                                dcc.Tab(label="Patrón TRPD", value="peaks",
-                                        children=[
-                                            html.Div(
-                                                style={
-                                                    "display": "flex", "alignItems": "center", "gap": "6px",
-                                                    "padding": "4px 8px", "backgroundColor": "#f8fafc",
-                                                    "borderBottom": "1px solid #e2e8f0", "marginBottom": "4px",
-                                                    "flexWrap": "wrap",
-                                                },
-                                                children=[
-                                                    html.Span("Magnitud:", style={"fontSize": "11px", "fontWeight": "bold", "color": "#334155"}),
-                                                    dcc.RadioItems(
-                                                        id="modo_magnitud_trpd",
-                                                        options=[
-                                                            {"label": " Vmax", "value": "vmax"},
-                                                            {"label": " Vpp", "value": "vpp"},
-                                                        ],
-                                                        value="vmax",
-                                                        inline=True,
-                                                        style={"fontSize": "11px"},
-                                                        inputStyle={"marginRight": "3px"},
-                                                        labelStyle={"marginRight": "8px", "cursor": "pointer", "fontWeight": "500"},
-                                                    ),
-                                                    html.Span("|", style={"color": "#cbd5e1", "margin": "0 1px"}),
-                                                    html.Button("🚫 Quitar selección", id="btn_excluir_seleccion", n_clicks=0, disabled=True,
-                                                                style={"backgroundColor": "#ef4444", "color": "white", "border": "none",
-                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
-                                                                       "fontWeight": "600", "cursor": "pointer"}),
-                                                    html.Button("↩ Deshacer", id="btn_deshacer_exclusion", n_clicks=0, disabled=True,
-                                                                style={"backgroundColor": "#f59e0b", "color": "white", "border": "none",
-                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
-                                                                       "fontWeight": "600", "cursor": "pointer"}),
-                                                    html.Button("🔄 Restaurar todo", id="btn_restaurar_descargas", n_clicks=0, disabled=True,
-                                                                style={"backgroundColor": "#64748b", "color": "white", "border": "none",
-                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
-                                                                       "fontWeight": "600", "cursor": "pointer"}),
-                                                    html.Span("|", style={"color": "#cbd5e1", "margin": "0 1px"}),
-                                                    html.Span("Disparo:", style={"fontSize": "11px", "fontWeight": "bold", "color": "#334155"}),
-                                                    dcc.Input(
-                                                        id="input_excluir_disparo",
-                                                        type="text",
-                                                        placeholder="ej. 5 o 2,4",
-                                                        style={"width": "75px", "fontSize": "11px", "padding": "2px 5px",
-                                                               "textAlign": "center", "borderRadius": "4px", "border": "1px solid #cbd5e1"}
-                                                    ),
-                                                    html.Button("🗑 Excluir", id="btn_excluir_disparo", n_clicks=0,
-                                                                style={"backgroundColor": "#dc2626", "color": "white", "border": "none",
-                                                                       "borderRadius": "4px", "padding": "2px 7px", "fontSize": "11px",
-                                                                       "fontWeight": "600", "cursor": "pointer"}),
-                                                    html.Span(id="badge_filtro_descargas",
-                                                              style={"fontSize": "11px", "color": "#475569", "fontWeight": "600", "marginLeft": "auto"}),
-                                                ],
-                                            ),
-                                            dcc.Graph(id="grafico_scatter"),
-                                        ], **_TAB),
                             ]),
                         ]),
                     ],
                 ),
             ],
         ),
+        # Panel 4: Calibración integrada
         html.Div(
-            className="row",
+            id="panel_calibracion_embed",
+            hidden=True,
             children=[
-                html.Div(className="col card", children=[dcc.Graph(id="grafico_ventanas")]),
-                html.Div(className="col card", children=[
-                    dcc.Tabs(id="tabs_espectro", value="fft", children=[
-                        dcc.Tab(label="FFT", value="fft",
-                                children=[dcc.Graph(id="grafico_fft")], **_TAB),
-                        dcc.Tab(label="Transformada S", value="st",
-                                children=[dcc.Loading(dcc.Graph(id="grafico_st_ventana"))], **_TAB),
-                    ]),
-                ]),
+                html.Div(
+                    className="card",
+                    style={"padding": "14px 16px"},
+                    children=[
+                        html.Div(
+                            style={
+                                "display": "flex", "justifyContent": "space-between",
+                                "alignItems": "center", "marginBottom": "12px",
+                                "flexWrap": "wrap", "gap": "10px",
+                                "borderBottom": f"1px solid {tema.BORDER}", "paddingBottom": "10px",
+                            },
+                            children=[
+                                html.Div([
+                                    html.H3("Calibración de Retardo Instrumental y Conformidad IEC 60060-1", style={"margin": "0 0 4px 0", "fontSize": "16px", "color": tema.INK}),
+                                    html.Span("calibrar_app integrada (puerto 8052). Si la vista no responde, ejecute run_calibrar.cmd.", style={"fontSize": "13px", "color": tema.MUTED}),
+                                ]),
+                                html.Div([
+                                    html.A("Abrir en ventana aparte", href="http://127.0.0.1:8052", target="_blank",
+                                           style={**tema.ESTILO_BOTON_SECONDARY, "textDecoration": "none", "display": "inline-block"}),
+                                ]),
+                            ],
+                        ),
+                        html.Iframe(
+                            id="iframe_calibracion",
+                            src="",
+                            style={
+                                "width": "100%",
+                                "height": "calc(100vh - 220px)",
+                                "minHeight": "650px",
+                                "border": f"1px solid {tema.BORDER}",
+                                "borderRadius": "4px",
+                                "backgroundColor": tema.CARD,
+                            },
+                        ),
+                    ],
+                ),
             ],
         ),
     ],
@@ -1775,6 +1996,8 @@ def toggle_explorador(n_abrir, n_cancelar, n_confirmar, ruta_actual, carpeta_val
         nuevas = rutas.mediciones_en(ruta_actual)
         if not nuevas:
             return no_update, no_update, no_update, no_update
+        # Archivos nuevos o reemplazados en disco: olvidar rutas/handles cacheados
+        datos_h5.limpiar_caches()
         opts = list(opciones or [])
         for m in nuevas:
             if not any(o.get("value") == m for o in opts):
@@ -1814,7 +2037,7 @@ def renderizar_explorador(ruta_actual):
     filas = []
     for nombre, p, tiene_h5 in listar_subcarpetas(ruta_actual):
         filas.append(html.Button(
-            f"{'📁✅ ' if tiene_h5 else '📁 '}{nombre}",
+            f"{'[H5] ' if tiene_h5 else ''}{nombre}",
             id={"type": "explorador_ir", "ruta": p},
             n_clicks=0,
             style={
@@ -1823,18 +2046,49 @@ def renderizar_explorador(ruta_actual):
                 "textAlign": "left",
                 "backgroundColor": "transparent",
                 "border": "none",
-                "borderBottom": "1px solid #f1f5f9",
+                "borderBottom": f"1px solid {tema.BORDER_SUBTLE}",
                 "padding": "6px 8px",
                 "cursor": "pointer",
                 "fontSize": "13px",
-                "color": "#1e293b",
+                "color": tema.INK,
             },
         ))
     if not filas:
-        filas = [html.Div("(No hay subcarpetas)", style={"color": "#94a3b8", "fontStyle": "italic", "padding": "6px 8px"})]
+        filas = [html.Div("(No hay subcarpetas)", style={"color": tema.MUTED_LIGHT, "fontStyle": "italic", "padding": "6px 8px"})]
     if ruta_actual == rutas.EQUIPO:
         return filas, "Este equipo", True
     return filas, ruta_actual, not rutas.tiene_h5(ruta_actual)
+
+
+@app.callback(
+    Output("ultima_carpeta", "data"),
+    Input("carpeta", "value"),
+    prevent_initial_call=True,
+)
+def recordar_carpeta(carpeta):
+    """Guarda en el navegador la última medición abierta."""
+    return carpeta if carpeta else no_update
+
+
+@app.callback(
+    Output("carpeta", "value", allow_duplicate=True),
+    Output("carpeta", "options", allow_duplicate=True),
+    Output("explorador_panel", "hidden", allow_duplicate=True),
+    Input("ultima_carpeta", "modified_timestamp"),
+    State("ultima_carpeta", "data"),
+    State("carpeta", "value"),
+    State("carpeta", "options"),
+    prevent_initial_call="initial_duplicate",
+)
+def restaurar_carpeta(_ts, ultima, actual, opciones):
+    """Al abrir la app, vuelve a la última medición usada si sigue en disco
+    (y entonces no hace falta abrir el explorador)."""
+    if actual or not ultima or not canales_presentes(ultima):
+        return no_update, no_update, no_update
+    opts = list(opciones or [])
+    if not any(o.get("value") == ultima for o in opts):
+        opts.append({"label": rutas.etiqueta(ultima), "value": ultima, "title": ultima})
+    return ultima, opts, True
 
 
 @app.callback(
@@ -1886,15 +2140,19 @@ def mover_segmento(n_prev, n_next, valor, seg_max):
     Output("tmin_ch4", "value"),
     Input("carpeta", "value"),
     Input("grafico", "relayoutData"),
+    Input("switch_filtros", "value"),
     prevent_initial_call=False,
 )
-def sincronizar_parametros_sensores(carpeta, relayout):
+def sincronizar_parametros_sensores(carpeta, relayout, sw_filtros=("on",)):
     try:
         trig = ctx.triggered_id
     except Exception:
         trig = None
 
-    if trig == "grafico" and relayout and carpeta:
+    if trig == "grafico":
+        # Zoom/pan: solo interesa el arrastre de una línea de umbral (shapes[k].y0)
+        if not relayout or not carpeta or not any(k.startswith("shapes[") for k in relayout):
+            return (no_update,) * 9
         cambios = umbrales_desde_relayout(relayout, canales_presentes(carpeta))
         if not cambios:
             return (no_update,) * 9
@@ -1905,7 +2163,7 @@ def sincronizar_parametros_sensores(carpeta, relayout):
 
     if not carpeta:
         return (no_update,) * 9
-    cfg = config_sensores_defecto(carpeta)
+    cfg = config_sensores_defecto(carpeta, filtrado=_filtrado(sw_filtros))
     return (
         round(cfg["ch2"]["umbral"], 4) if cfg["ch2"]["umbral"] is not None else None,
         cfg["ch2"]["dist"], cfg["ch2"]["tmin"],
@@ -1923,7 +2181,7 @@ def sincronizar_parametros_sensores(carpeta, relayout):
     Input("canal", "value"),
     Input("captura_params", "data"),
     # Inputs (no State): editar umbral, Δt o t_mín redibuja la línea de umbral y
-    # las cruces de peaks con la misma configuración que usará "⚡ Calcular peaks".
+    # las cruces de peaks con la misma configuración que usará "Calcular peaks".
     Input("umbral_ch2", "value"),
     Input("dist_ch2", "value"),
     Input("tmin_ch2", "value"),
@@ -1933,31 +2191,104 @@ def sincronizar_parametros_sensores(carpeta, relayout):
     Input("umbral_ch4", "value"),
     Input("dist_ch4", "value"),
     Input("tmin_ch4", "value"),
+    Input("switch_filtros", "value"),
+    State("rango_x", "data"),
 )
-def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4):
+def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_filtros=("on",),
+               rango=None):
     if not carpeta or not seg:
-        return go.Figure()
-
-    cfg_sensores = {
-        "ch2": {"umbral": float(u2) if u2 is not None else None,
-                "dist": float(d2) if d2 is not None else 1.0,
-                "tmin": float(t2) if t2 is not None else 0.0},
-        "ch3": {"umbral": float(u3) if u3 is not None else None,
-                "dist": float(d3) if d3 is not None else 0.5,
-                "tmin": float(t3) if t3 is not None else 0.0},
-        "ch4": {"umbral": float(u4) if u4 is not None else None,
-                "dist": float(d4) if d4 is not None else 0.5,
-                "tmin": float(t4) if t4 is not None else 0.0},
-    }
+        return _fig_vacia("Seleccione una medición con el botón 📁 para ver sus señales.", altura=850)
+    filtrado = _filtrado(sw_filtros)
+    cfg_sensores = _cfg_sensores(u2, d2, t2, u3, d3, t3, u4, d4, t4)
     cap = None
     if (p and p["canal"] == canal and p["carpeta"] == carpeta
+            and p.get("filtrado", True) == filtrado
             and _captura_vigente(p, cfg_sensores.get(canal, {}))):
-        cap = capturar(carpeta, canal, p["umbral"], p["dist"], p["tmin"])
-    return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap)
+        cap = capturar(carpeta, canal, p["umbral"], p["dist"], p["tmin"], filtrado=filtrado)
+    try:
+        return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap,
+                      filtrado=filtrado, rango_x=_rango_vigente(rango, carpeta, canal))
+    except Exception as e:
+        return _fig_error("No se pudo dibujar las señales", e, altura=850)
+
+
+def _rango_desde_relayout(relayout):
+    """(x0, x1) en µs a partir de un relayoutData del gráfico de señales (ejes x
+    compartidos: vale cualquier xaxis*), 'completo' si se pidió autorange, o None
+    si el evento no cambia el eje x (pan vertical, arrastre de umbral, autosize)."""
+    if not relayout:
+        return None
+    for k, val in relayout.items():
+        if k.startswith("xaxis") and k.endswith(".autorange") and val:
+            return "completo"
+        if k.startswith("xaxis") and k.endswith(".range") and isinstance(val, (list, tuple)) and len(val) == 2:
+            return float(val[0]), float(val[1])
+    x0 = next((v for k, v in relayout.items() if k.startswith("xaxis") and k.endswith(".range[0]")), None)
+    x1 = next((v for k, v in relayout.items() if k.startswith("xaxis") and k.endswith(".range[1]")), None)
+    if x0 is not None and x1 is not None:
+        return float(x0), float(x1)
+    return None
+
+
+@app.callback(
+    Output("grafico", "figure", allow_duplicate=True),
+    Output("rango_x", "data"),
+    Input("grafico", "relayoutData"),
+    State("carpeta", "value"),
+    State("segmento", "value"),
+    State("canal", "value"),
+    State("switch_filtros", "value"),
+    prevent_initial_call=True,
+)
+def redecimar_zoom(relayout, carpeta, seg, canal, sw_filtros=("on",)):
+    """Zoom/pan en el gráfico de señales: reenvía solo las trazas de señal con el
+    tramo visible (crudo si dura <= SIN_DIEZMADO_US, diezmado si no). Es un Patch:
+    no se reconstruye la figura ni se pierden zoom ni umbrales."""
+    rango = _rango_desde_relayout(relayout)
+    if rango is None or not carpeta or not seg:
+        return no_update, no_update
+    filtrado = _filtrado(sw_filtros)
+    x0, x1 = (None, None) if rango == "completo" else rango
+    pat = Patch()
+    for i, c in enumerate(_canales_senal(carpeta)):
+        t, v = cargar_segmento(carpeta, c, int(seg), filtrado=filtrado)
+        td, vd = tramo_visible(t, v, x0, x1)
+        pat["data"][i]["x"] = _arreglo_tipado(td)
+        pat["data"][i]["y"] = _arreglo_tipado(vd)
+    guardado = None if rango == "completo" else {"carpeta": carpeta, "canal": canal, "x0": x0, "x1": x1}
+    return pat, guardado
+
+
+def _cfg_sensores(u2, d2, t2, u3, d3, t3, u4, d4, t4, carpeta=None, filtrado=True):
+    """Configuración de detección de los 3 triggers desde los campos de la UI.
+    Campo vacío: Δt = DIST_DEFECTO_US, t_mín = TMIN_DEFECTO_US y umbral None (o,
+    si se da `carpeta`, el umbral por defecto de esa medición)."""
+    def canal(ch, u, d, t):
+        if u is not None:
+            u = float(u)
+        elif carpeta:
+            u = umbral_defecto(carpeta, ch, filtrado=filtrado)
+        return {"umbral": u,
+                "dist": float(d) if d is not None else DIST_DEFECTO_US,
+                "tmin": float(t) if t is not None else TMIN_DEFECTO_US}
+    return {"ch2": canal("ch2", u2, d2, t2), "ch3": canal("ch3", u3, d3, t3),
+            "ch4": canal("ch4", u4, d4, t4)}
+
+
+def _rango_vigente(rango, carpeta, canal):
+    """(x0, x1) del zoom guardado si corresponde a la misma medición y canal."""
+    if rango and rango.get("carpeta") == carpeta and rango.get("canal") == canal:
+        return rango.get("x0"), rango.get("x1")
+    return None
+
+
+def _filtrado(valor):
+    """Estado del interruptor 'Filtros del paper' (dcc.Checklist)."""
+    return "on" in (valor or [])
 
 
 def _captura_vigente(p, cfg_act):
-    """True si el snapshot de "⚡ Calcular peaks" coincide con la configuración
+    """True si el snapshot de "Calcular peaks" coincide con la configuración
     actual del canal activo. Si el usuario editó umbral, Δt o t_mín después de
     capturar, las cruces se muestran en vista previa con los valores nuevos."""
     for clave in ("umbral", "dist", "tmin"):
@@ -1970,31 +2301,81 @@ def _captura_vigente(p, cfg_act):
 
 
 @app.callback(
-    Output("panel_senales", "hidden"),
-    Output("panel_st_segmento", "hidden"),
+    Output("panel_analisis", "hidden"),
+    Output("panel_estadistica", "hidden"),
     Output("panel_metadata", "hidden"),
+    Output("panel_calibracion_embed", "hidden"),
     Input("tabs_principal", "value"),
 )
 def alternar_panel_principal(tab):
-    """Alterna Señales / Transformada S / Metadata sin desmontar `grafico`: así
-    se conserva la posición de la línea de umbral arrastrada, el zoom y los
-    clics en cruces al volver a la pestaña de Señales."""
-    return tab != "senales", tab != "st", tab != "metadata"
+    """Alterna los paneles principales (Análisis, Estadística, Metadata, Calibración)
+    sin desmontar componentes para preservar estado y zooms."""
+    return (
+        tab != "senales",
+        tab != "estadistica",
+        tab != "metadata",
+        tab != "calibracion",
+    )
+
+
+@app.callback(
+    Output("panel_senales", "hidden"),
+    Output("panel_st_segmento", "hidden"),
+    Input("tabs_dominio", "value"),
+)
+def alternar_panel_dominio(tab_dom):
+    """Alterna entre la vista temporal de Señales y la Transformada S del segmento."""
+    return tab_dom != "senales", tab_dom != "st"
 
 
 @app.callback(
     Output("grafico_st_segmento", "figure"),
     Input("tabs_principal", "value"),
+    Input("tabs_dominio", "value"),
     Input("carpeta", "value"),
     Input("segmento", "value"),
     Input("st_fmax", "value"),
+    Input("switch_filtros", "value"),
 )
-def actualizar_st_segmento(tab, carpeta, seg, fmax):
+def actualizar_st_segmento(tab_princ, tab_dom, carpeta, seg, fmax, sw_filtros=("on",)):
     """Transformada S del segmento completo (4 filas ch1..ch4). Solo se
-    calcula si la pestaña está visible."""
-    if tab != "st" or not carpeta or not seg:
+    calcula si la pestaña de análisis y la subpestaña ST están activas."""
+    if tab_princ != "senales" or tab_dom != "st" or not carpeta or not seg:
         return no_update
-    return figura_st_segmento(carpeta, int(seg), fmax or ST_FMAX_MHZ)
+    try:
+        return figura_st_segmento(carpeta, int(seg), fmax or ST_FMAX_MHZ, filtrado=_filtrado(sw_filtros))
+    except Exception as e:
+        return _fig_error("No se pudo calcular la Transformada S", e, altura=850)
+
+
+@app.callback(
+    Output("iframe_calibracion", "src"),
+    Input("tabs_principal", "value"),
+    State("iframe_calibracion", "src"),
+    Input("carpeta", "value"),   # también al restaurar la medición con la pestaña ya abierta
+)
+def diferir_carga_iframe_calibracion(tab, src_actual, carpeta=None):
+    """Carga diferida del iframe de calibración: solo al visitar la pestaña, ya
+    con la medición actual (?carpeta=...) y en modo embebido. Se recarga solo si
+    la medición cambió desde la última visita."""
+    if tab != "calibracion":
+        return no_update
+    url = URL_CALIBRAR
+    if carpeta:
+        url += "/?" + urllib.parse.urlencode({"embebido": 1, "carpeta": carpeta})
+    return url if url != src_actual else no_update
+
+
+@app.callback(
+    Output("tabs_principal", "value"),
+    Input("btn_ir_a_calibracion", "n_clicks"),
+    prevent_initial_call=True,
+)
+def ir_a_pestana_calibracion(n_clicks):
+    """Navega a la pestaña de Calibración al pulsar el botón en la barra superior."""
+    if n_clicks:
+        return "calibracion"
+    return no_update
 
 
 @app.callback(
@@ -2011,23 +2392,35 @@ def actualizar_st_segmento(tab, carpeta, seg, fmax):
     State("umbral_ch4", "value"),
     State("dist_ch4", "value"),
     State("tmin_ch4", "value"),
+    Input("switch_filtros", "value"),
+    Input("carpeta", "value"),
+    Input("canal", "value"),
+    running=[(Output("btn", "disabled"), True, False)],
 )
-def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4):
+def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_filtros=("on",),
+                  _carpeta_in=None, _canal_in=None):
     """Fija el snapshot de parámetros al pulsar el botón. Todos los análisis
-    derivan de aquí, garantizando que scatter y ventanas usan el mismo conjunto."""
+    derivan de aquí, garantizando que scatter y ventanas usan el mismo conjunto.
+    Al cambiar el interruptor de filtros (con una captura ya hecha) se rehace la
+    captura con los parámetros por defecto de la nueva señal, los mismos que
+    sincronizar_parametros_sensores escribe en los campos."""
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if trig in ("carpeta", "canal"):
+        # Otra medición u otro canal: los resultados anteriores ya no corresponden.
+        return None
     if not n_clicks or not carpeta:
         return no_update
-    cfg_sensores = {
-        "ch2": {"umbral": float(u2) if u2 is not None else umbral_defecto(carpeta, "ch2"),
-                "dist": float(d2) if d2 is not None else 1.0,
-                "tmin": float(t2) if t2 is not None else 0.0},
-        "ch3": {"umbral": float(u3) if u3 is not None else umbral_defecto(carpeta, "ch3"),
-                "dist": float(d3) if d3 is not None else 0.5,
-                "tmin": float(t3) if t3 is not None else 0.0},
-        "ch4": {"umbral": float(u4) if u4 is not None else umbral_defecto(carpeta, "ch4"),
-                "dist": float(d4) if d4 is not None else 0.5,
-                "tmin": float(t4) if t4 is not None else 0.0},
-    }
+    filtrado = _filtrado(sw_filtros)
+    if trig == "switch_filtros":
+        cfg_sensores = config_sensores_defecto(carpeta, filtrado=filtrado)
+        cfg_act = cfg_sensores.get(canal, cfg_sensores["ch4"])
+        return {"carpeta": carpeta, "canal": canal, "umbral": cfg_act["umbral"],
+                "dist": cfg_act["dist"], "tmin": cfg_act["tmin"],
+                "cfg_sensores": cfg_sensores, "filtrado": filtrado}
+    cfg_sensores = _cfg_sensores(u2, d2, t2, u3, d3, t3, u4, d4, t4, carpeta=carpeta, filtrado=filtrado)
     cfg_act = cfg_sensores.get(canal, cfg_sensores["ch4"])
     return {
         "carpeta": carpeta,
@@ -2036,6 +2429,7 @@ def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4):
         "dist": cfg_act["dist"],
         "tmin": cfg_act["tmin"],
         "cfg_sensores": cfg_sensores,
+        "filtrado": filtrado,
     }
 
 
@@ -2046,15 +2440,17 @@ def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4):
 )
 def calcular_peaks(p, excl_dict):
     if not p:
-        return no_update
+        return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.", altura=415)
     key = f"{p['carpeta']}|{p['canal']}"
     excl = _obtener_excluidos(excl_dict, key)
-    segs, cuentas = contar_peaks(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], excluidos=excl)
+    segs, cuentas = contar_peaks(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], excluidos=excl,
+                                 filtrado=p.get("filtrado", True))
     if not segs:
-        fig = go.Figure()
-        fig.update_layout(title=f"{p['canal'].upper()} no disponible en esta medición", height=415)
-        return fig
-    return figura_peaks(segs, cuentas, p["umbral"], p["canal"])
+        return _fig_vacia(f"{p['canal'].upper()} no disponible en esta medición", altura=415)
+    try:
+        return figura_peaks(segs, cuentas, p["umbral"], p["canal"])
+    except Exception as e:
+        return _fig_error("No se pudo dibujar el conteo de peaks", e, altura=415)
 
 
 @app.callback(
@@ -2070,13 +2466,20 @@ def toggle_panel_calibracion(n):
     Output("calibracion_store", "data"),
     Input("carpeta", "value"),
     Input("btn_recargar_calibracion", "n_clicks"),
+    Input("tabs_principal", "value"),
+    State("calibracion_store", "data"),
 )
-def cargar_calibracion_store(carpeta, _n):
+def cargar_calibracion_store(carpeta, _n, _tab=None, actual=None):
     """Único poblador de `calibracion_store`: lee `calibracion_retardo` de
-    metadata.yaml (ns -> µs, normalizado al ancla t10)."""
+    metadata.yaml (ns -> µs, normalizado al ancla t10). Al cambiar de pestaña se
+    relee (lo guardado en la pestaña Calibración aparece sin pulsar «Recargar»),
+    pero solo se propaga si cambió."""
     if not carpeta:
         return no_update
-    return calibracion_desde_metadata(carpeta)
+    nuevo = calibracion_desde_metadata(carpeta)
+    if actual is not None and nuevo == actual:
+        return no_update
+    return nuevo
 
 
 @app.callback(
@@ -2092,7 +2495,7 @@ def mostrar_detalle_calibracion(cal):
         return html.Div(
             f"Sin bloque calibracion_retardo en metadata.yaml para {carpeta}{msg_extra} — retardo 0 ns. "
             f"Calcular en calibrar_app (puerto 8052).",
-            style={"color": "#64748b", "fontSize": "12px", "padding": "8px 0"}
+            style={"color": tema.MUTED, "fontSize": "12px", "padding": "8px 0"}
         )
 
     fuente = cal.get("fuente") or "N/D"
@@ -2114,8 +2517,8 @@ def mostrar_detalle_calibracion(cal):
 
     sensores_nombres = {
         "ch2": "HFCT",
-        "ch3": "Antena Vivaldi",
-        "ch4": "Antena Bioinspirada",
+        "ch3": "Antena 1",
+        "ch4": "Antena 2",
     }
 
     filas = []
@@ -2135,7 +2538,7 @@ def mostrar_detalle_calibracion(cal):
         filas.append(html.Tr([
             html.Td(ch.upper(), style={"fontWeight": "600", "padding": "4px 8px"}),
             html.Td(b_ch.get("sensor") or sensores_nombres.get(ch, ch.upper()), style={"padding": "4px 8px"}),
-            html.Td(t_lag_ns, style={"fontWeight": "700", "color": "#1d4ed8", "padding": "4px 8px"}),
+            html.Td(t_lag_ns, style={"fontWeight": "700", "color": tema.ACCENT, "padding": "4px 8px"}),
             html.Td(sigma_ns, style={"padding": "4px 8px"}),
             html.Td(val_str, style={"padding": "4px 8px"}),
             html.Td(u_str, style={"padding": "4px 8px"}),
@@ -2143,25 +2546,26 @@ def mostrar_detalle_calibracion(cal):
             html.Td(tm_str, style={"padding": "4px 8px"}),
         ]))
 
+    th_style = {"borderBottom": f"2px solid {tema.BORDER}", "padding": "4px 8px"}
     tabla = html.Table(
         style={"width": "100%", "fontSize": "11px", "borderCollapse": "collapse", "textAlign": "left", "marginTop": "8px"},
         children=[
             html.Thead(html.Tr([
-                html.Th("Canal", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
-                html.Th("Sensor", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
-                html.Th("t̄_lag [ns]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
-                html.Th("σ [ns]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
-                html.Th("Válidos", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
-                html.Th("u_cal [mV]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
-                html.Th("Δt [µs]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
-                html.Th("t_mín [µs]", style={"borderBottom": "2px solid #cbd5e1", "padding": "4px 8px"}),
+                html.Th("Canal", style=th_style),
+                html.Th("Sensor", style=th_style),
+                html.Th("t̄_lag [ns]", style=th_style),
+                html.Th("σ [ns]", style=th_style),
+                html.Th("Válidos", style=th_style),
+                html.Th("u_cal [mV]", style=th_style),
+                html.Th("Δt [µs]", style=th_style),
+                html.Th("t_mín [µs]", style=th_style),
             ])),
             html.Tbody(filas),
         ],
     )
 
     return html.Div([
-        html.Div(" · ".join(cabecera_partes), style={"fontSize": "11px", "color": "#475569", "fontWeight": "600", "marginBottom": "6px"}),
+        html.Div(" · ".join(cabecera_partes), style={"fontSize": "11px", "color": tema.MUTED, "fontWeight": "600", "marginBottom": "6px"}),
         tabla,
     ])
 
@@ -2177,19 +2581,13 @@ def mostrar_detalle_calibracion(cal):
     Input("calibracion_store", "data"),
 )
 def badges_calibracion(cal):
-    base_style = {
-        "display": "inline-block", "fontSize": "11px", "padding": "2px 8px",
-        "borderRadius": "10px", "fontWeight": "600",
-    }
     if not cal or not cal.get("calibrado"):
         st_txt = "Sin calibrar — retardo 0 ns"
-        st_style = {**base_style, "backgroundColor": "#fef3c7", "color": "#92400e"}
-        return st_txt, st_style, "CH2: 0.00 ns", "CH3: 0.00 ns", "CH4: 0.00 ns"
+        return st_txt, tema.BADGE_WARN, "CH2: 0.00 ns", "CH3: 0.00 ns", "CH4: 0.00 ns"
 
     fuente = cal.get("fuente") or "actual"
     fecha = cal.get("fecha") or ""
     st_txt = f"Calibrado · {fuente}" + (f" · {fecha}" if fecha else "")
-    st_style = {**base_style, "backgroundColor": "#d1fae5", "color": "#065f46"}
 
     chs = cal.get("canales", {})
     def fmt_ch(ch):
@@ -2199,7 +2597,7 @@ def badges_calibracion(cal):
             return f"{ch.upper()}: {ns:.2f} ns"
         return f"{ch.upper()}: 0 ns (sin cal.)"
 
-    return st_txt, st_style, fmt_ch("ch2"), fmt_ch("ch3"), fmt_ch("ch4")
+    return st_txt, tema.BADGE_OK, fmt_ch("ch2"), fmt_ch("ch3"), fmt_ch("ch4")
 
 
 @app.callback(
@@ -2219,16 +2617,22 @@ def badges_calibracion(cal):
     State("dist_ch4", "value"),
     State("tmin_ch4", "value"),
     State("calibracion_store", "data"),
+    Input("tabs_principal", "value"),
     prevent_initial_call=True,
+    running=[(Output("btn_calc_todos_sensores", "disabled"), True, False)],
 )
 def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
-                              u2, d2, t2, u3, d3, t3, u4, d4, t4, cal_store):
+                              u2, d2, t2, u3, d3, t3, u4, d4, t4, cal_store, tab="estadistica"):
+    """Filas de la tabla de Estadística. La fila de la captura vigente solo se
+    calcula con la pestaña Estadística visible (al entrar en ella se pone al día)."""
     try:
         trig = ctx.triggered_id
     except Exception:
         trig = None
     if trig == "btn_limpiar_densidad":
         return []
+    if tab != "estadistica" and trig in ("captura_params", "descargas_excluidas", "tabs_principal"):
+        return no_update
 
     filas = list(data_actual) if data_actual else []
     def _upsert(fila):
@@ -2253,21 +2657,21 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
                 cfg_ch = cfg_p.get(ch) or cfg_inputs.get(ch, {})
                 u_ch = cfg_ch.get("umbral")
                 if u_ch is None:
-                    u_ch = umbral_defecto(carpeta, ch)
-                dist_ch = cfg_ch.get("dist") or 1.0
-                tmin_ch = cfg_ch.get("tmin") if cfg_ch.get("tmin") is not None else 0.0
+                    u_ch = umbral_defecto(carpeta, ch, filtrado=p.get("filtrado", True))
+                dist_ch = cfg_ch.get("dist") or DIST_DEFECTO_US
+                tmin_ch = cfg_ch.get("tmin") if cfg_ch.get("tmin") is not None else TMIN_DEFECTO_US
                 t_lag = lag_canal(cal_store, carpeta, ch)
                 excl_ch = _obtener_excluidos(excl_dict, f"{carpeta}|{ch}")
                 f = calcular_fila_densidad(carpeta, ch, float(u_ch), float(dist_ch), float(tmin_ch),
-                                           t_lag_us=t_lag, excluidos=excl_ch)
+                                           t_lag_us=t_lag, excluidos=excl_ch, filtrado=p.get("filtrado", True))
                 _upsert(f)
         return filas
 
-    if trig in ("captura_params", "descargas_excluidas") and p:
+    if trig in ("captura_params", "descargas_excluidas", "tabs_principal") and p:
         t_lag = lag_canal(cal_store, p["carpeta"], p["canal"])
         excl_ch = _obtener_excluidos(excl_dict, f"{p['carpeta']}|{p['canal']}")
         f = calcular_fila_densidad(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"],
-                                   t_lag_us=t_lag, excluidos=excl_ch)
+                                   t_lag_us=t_lag, excluidos=excl_ch, filtrado=p.get("filtrado", True))
         _upsert(f)
         return filas
 
@@ -2275,11 +2679,23 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
 
 
 @app.callback(
-    Output("tabla_densidad", "data"),
+    Output("tabla_densidad", "children"),
     Input("densidad_store", "data"),
 )
 def sincronizar_tabla_densidad(data):
-    return data or []
+    return construir_tabla_paper(data or [])
+
+
+@app.callback(
+    Output("descarga_densidad", "data"),
+    Input("btn_exportar_densidad", "n_clicks"),
+    State("densidad_store", "data"),
+    prevent_initial_call=True,
+)
+def exportar_densidad(n, data):
+    if not n or not data:
+        return no_update
+    return dcc.send_string(csv_tabla_densidad(data), "tabla_densidad.csv")
 
 
 @app.callback(
@@ -2301,45 +2717,47 @@ def sincronizar_tabla_densidad(data):
     Input("calibracion_store", "data"),
     State("meta_yaml_text", "value"),
     State("meta_input_diametros", "value"),
+    Input("tabs_principal", "value"),
+    running=[(Output("btn_guardar_metadata", "disabled"), True, False),
+             (Output("btn_guardar_yaml_texto", "disabled"), True, False),
+             (Output("btn_guardar_diametros", "disabled"), True, False)],
 )
 def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, n_guardar_diam, cal_store,
-                              yaml_txt_state, diam_txt):
+                              yaml_txt_state, diam_txt, tab="metadata"):
     if not carpeta:
         return "", "", {}, "", "", "", "", "", "", "", ""
     try:
         trig = ctx.triggered_id
     except Exception:
         trig = None
+    # Solo se construye con la pestaña Metadata visible (al entrar en ella se pone al día)
+    if tab != "metadata" and not str(trig or "").startswith("btn_guardar"):
+        return (no_update,) * 11
     msg_fb = ""
 
     if trig == "btn_guardar_diametros":
         ok, msg = guardar_diametros(carpeta, diam_txt)
-        color = "#10b981" if ok else "#ef4444"
+        color = tema.OK if ok else tema.ERROR
         msg_fb = html.Span(msg, style={"color": color, "fontWeight": "600"})
         if not ok:
             # Se conserva lo escrito para que el usuario lo corrija.
             return (no_update,) * 3 + (msg_fb,) + (no_update,) * 7
     elif trig == "btn_guardar_yaml_texto" and yaml_txt_state:
         ok, msg = guardar_metadata_archivo(carpeta, yaml_txt_state)
-        color = "#10b981" if ok else "#ef4444"
+        color = tema.OK if ok else tema.ERROR
         msg_fb = html.Span(msg, style={"color": color, "fontWeight": "600"})
     elif trig == "btn_guardar_metadata":
         meta_act = obtener_metadata(carpeta)
         meta_clean = {k: v for k, v in meta_act.items() if not k.startswith("_")}
         meta_str = yaml.safe_dump(meta_clean, sort_keys=False, allow_unicode=True)
         ok, msg = guardar_metadata_archivo(carpeta, meta_str)
-        color = "#10b981" if ok else "#ef4444"
+        color = tema.OK if ok else tema.ERROR
         msg_fb = html.Span(msg, style={"color": color, "fontWeight": "600"})
 
     meta = obtener_metadata(carpeta)
     existe = meta.get("_existe_en_disco", False)
     badge_txt = "Archivo en disco: metadata.yaml" if existe else "Autogenerado desde HDF5 (no guardado)"
-    badge_style = {
-        "display": "inline-block", "fontSize": "11px", "padding": "2px 8px",
-        "borderRadius": "10px", "fontWeight": "600",
-        "backgroundColor": "#d1fae5" if existe else "#fef3c7",
-        "color": "#065f46" if existe else "#92400e",
-    }
+    badge_style = tema.BADGE_OK if existe else tema.BADGE_WARN
 
     exp = meta.get("experimento", {})
     circ = meta.get("circuito_impulso", {})
@@ -2394,21 +2812,25 @@ def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, n_guardar_diam,
             html.Td(cfg.get("funcion", "-"), style={"padding": "4px 8px"}),
             html.Td(f"{cfg.get('escala_v_div', '-')} V/div" if cfg.get("escala_v_div") else "-", style={"padding": "4px 8px"}),
             html.Td(cfg.get("unidad", "V"), style={"padding": "4px 8px"}),
-            html.Td(cfg.get("filtro", "-") if cfg.get("filtro") else f"-{cfg.get('atenuacion_db')} dB" if cfg.get("atenuacion_db") else "-", style={"padding": "4px 8px"}),
+            html.Td(" · ".join(x for x in (
+                filtros.etiqueta(filtros.filtro_canal(meta, c)) if c != "ch1" else None,
+                f"-{cfg.get('atenuacion_db')} dB" if cfg.get("atenuacion_db") else None) if x) or "-",
+                style={"padding": "4px 8px"}),
             html.Td(t_lag_str, style={"padding": "4px 8px"}),
         ]))
 
+    th_ch_style = {"textAlign": "left", "padding": "4px 8px", "borderBottom": f"1px solid {tema.BORDER}"}
     tabla_ch = html.Table(
         style={"width": "100%", "borderCollapse": "collapse", "fontSize": "11px", "marginTop": "4px"},
         children=[
             html.Thead(html.Tr([
-                html.Th("Canal", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
-                html.Th("Sensor", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
-                html.Th("Función", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
-                html.Th("Escala V/div", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
-                html.Th("Unidad", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
-                html.Th("Filtro / Atenuación", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
-                html.Th("t_lag (ns)", style={"textAlign": "left", "padding": "4px 8px", "borderBottom": "1px solid #cbd5e1"}),
+                html.Th("Canal", style=th_ch_style),
+                html.Th("Sensor", style=th_ch_style),
+                html.Th("Función", style=th_ch_style),
+                html.Th("Escala V/div", style=th_ch_style),
+                html.Th("Unidad", style=th_ch_style),
+                html.Th("Filtro / Atenuación", style=th_ch_style),
+                html.Th("t_lag (ns)", style=th_ch_style),
             ])),
             html.Tbody(filas_ch),
         ],
@@ -2461,7 +2883,7 @@ def set_seleccion(_cap_in, sel_pk, click_pk, click_g, n_exc, n_undo, n_res, n_di
         return []  # limpiar selección
     if not p:
         return no_update
-    n = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])["W"].shape[0]
+    n = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))["W"].shape[0]
     key = f"{p['carpeta']}|{p['canal']}"
     excl = set(_obtener_excluidos(excl_dict, key))
     activos = [i for i in range(n) if i not in excl]
@@ -2508,7 +2930,8 @@ def gestionar_exclusiones_descargas(n_exc, n_undo, n_res, n_disp, n_sub,
     curr_hist = [dict(h) for h in _obtener_historial(excl_dict, key)]
 
     if trig == "btn_excluir_seleccion" and sel:
-        nuevos = [int(i) for i in sel if i not in set(curr_excl)]
+        ya = set(curr_excl)
+        nuevos = [int(i) for i in sel if i not in ya]
         if nuevos:
             curr_hist.append({"tipo": "lazo", "indices": nuevos, "desc": f"{len(nuevos)} descargas"})
             curr_excl = sorted(set(curr_excl).union(nuevos))
@@ -2517,13 +2940,14 @@ def gestionar_exclusiones_descargas(n_exc, n_undo, n_res, n_disp, n_sub,
         return no_update, no_update
 
     if trig in ("btn_excluir_disparo", "input_excluir_disparo"):
-        cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+        cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
         n_segs = n_segmentos(p["carpeta"])
         segs = parsear_lista_disparos(val_disparo, n_segs)
         if segs and cap["seg"].size:
             segs_set = set(segs)
             indices_segs = [int(i) for i, s in enumerate(cap["seg"]) if s in segs_set]
-            nuevos = [i for i in indices_segs if i not in set(curr_excl)]
+            ya = set(curr_excl)
+            nuevos = [i for i in indices_segs if i not in ya]
             if nuevos:
                 curr_hist.append({
                     "tipo": "disparo",
@@ -2568,9 +2992,9 @@ def gestionar_exclusiones_descargas(n_exc, n_undo, n_res, n_disp, n_sub,
 )
 def actualizar_badge_filtro(sel, excl_dict, p):
     if not p:
-        return True, "🚫 Quitar selección", True, True, ""
+        return True, "Quitar selección", True, True, ""
     n_sel = len(sel) if sel else 0
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
     n_total = cap["t_peak"].size
     key = f"{p['carpeta']}|{p['canal']}"
     excl = set(_obtener_excluidos(excl_dict, key))
@@ -2578,16 +3002,16 @@ def actualizar_badge_filtro(sel, excl_dict, p):
     n_excl = len(excl.intersection(range(n_total)))
     n_act = max(0, n_total - n_excl)
 
-    btn_txt = f"🚫 Quitar {n_sel} seleccionada{'s' if n_sel != 1 else ''}" if n_sel > 0 else "🚫 Quitar selección"
+    btn_txt = f"Quitar {n_sel} seleccionada{'s' if n_sel != 1 else ''}" if n_sel > 0 else "Quitar selección"
     btn_disabled = (n_sel == 0)
     btn_undo_disabled = (len(hist) == 0)
     btn_reset_disabled = (n_excl == 0 and len(hist) == 0)
 
     if n_excl > 0:
         pasos_txt = f" en {len(hist)} paso{'s' if len(hist) != 1 else ''}" if len(hist) > 1 else ""
-        badge = f"📊 {n_act}/{n_total} activas ({n_excl} excluida{'s' if n_excl != 1 else ''}{pasos_txt})"
+        badge = f"{n_act}/{n_total} activas ({n_excl} excluida{'s' if n_excl != 1 else ''}{pasos_txt})"
     else:
-        badge = f"📊 {n_total} descargas activas"
+        badge = f"{n_total} descargas activas"
 
     return btn_disabled, btn_txt, btn_undo_disabled, btn_reset_disabled, badge
 
@@ -2602,10 +3026,10 @@ def actualizar_badge_filtro(sel, excl_dict, p):
 )
 def actualizar_scatter(p, sel, modo_trpd, cal, excl_dict):
     """Scatter de Patrón TRPD, con los puntos seleccionados en
-    amarillo (venga la selección del scatter o de las cruces del trigger)."""
+    resaltados (venga la selección del scatter o de las cruces del trigger)."""
     if not p:
-        return no_update
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+        return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.", altura=415)
+    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
     t_ref, v_ref = promedio_impulso(p["carpeta"])
     modo = modo_trpd or "vmax"
     t_lag = lag_canal(cal, p["carpeta"], p["canal"])
@@ -2618,22 +3042,25 @@ def actualizar_scatter(p, sel, modo_trpd, cal, excl_dict):
     # uirevision estable dentro de una captura: al pintar el amarillo no se
     # pierde zoom ni la caja de selección; cambia al hacer una captura nueva, cambiar modo o exclusiones.
     rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}|{len(excl)}"
-    return figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo,
-                          t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado,
-                          excluidos=excl)
+    try:
+        return figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo,
+                              t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado,
+                              excluidos=excl)
+    except Exception as e:
+        return _fig_error("No se pudo dibujar el patrón TRPD", e, altura=415)
 
 
 @app.callback(
     Output("grafico_ventanas", "figure"),
     Output("grafico_fft", "figure"),
     Input("seleccion", "data"),
-    State("captura_params", "data"),
+    Input("captura_params", "data"),
 )
 def actualizar_temporal(sel, p):
     """Ventanas y FFT de SOLO las señales seleccionadas (store `seleccion`)."""
     if not p:
-        return no_update, no_update
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+        return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición."), _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.")
+    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
     sel = sel or []
     return figura_ventanas(cap, sel, p["canal"]), figura_fft(cap, sel, p["canal"])
 
@@ -2643,14 +3070,16 @@ def actualizar_temporal(sel, p):
     Input("seleccion", "data"),
     Input("tabs_espectro", "value"),
     Input("st_fmax", "value"),
-    State("captura_params", "data"),
+    Input("captura_params", "data"),
 )
 def actualizar_st_ventana(sel, tab, fmax, p):
     """Transformada S de la ventana de 70 ns (solo si su pestaña está visible),
     promediando SOLO las señales seleccionadas (store `seleccion`)."""
-    if tab != "st" or not p:
+    if tab != "st":
         return no_update
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"])
+    if not p:
+        return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.")
+    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
     return figura_st_ventana(cap, sel or [], p["canal"], fmax or ST_FMAX_MHZ)
 
 
@@ -2667,4 +3096,7 @@ def seleccionar_segmento(click):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False, dev_tools_props_check=False, host="127.0.0.1", port=8051)
+    # Sin dev tools por defecto (bundles minificados, sin sondeo de hot-reload).
+    # Para depurar: set TRPD_DEBUG=1 antes de arrancar.
+    depurar = os.environ.get("TRPD_DEBUG") == "1"
+    app.run(debug=depurar, use_reloader=False, dev_tools_props_check=False, host="127.0.0.1", port=8051)

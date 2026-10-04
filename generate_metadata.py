@@ -31,6 +31,7 @@ Ejecutar (ruta absoluta o relativa al directorio actual):
   - --completar: rellena solo los campos ausentes o vacíos, conservando lo escrito a mano.
   - --forzar: reemplaza el metadata.yaml completo.
 """
+import copy
 import datetime
 import os
 import re
@@ -41,6 +42,7 @@ import numpy as np
 import yaml
 
 import rutas
+from filtros import FILTROS_DEFECTO
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 
@@ -101,7 +103,28 @@ def _r(x, n=4):
     return None if x is None or not np.isfinite(x) else round(float(x), n)
 
 
+_CACHE_INFO = {}
+
+
 def extraer_info_h5(carpeta_medicion):
+    """extraer_info_h5 cacheado por (ruta, fecha de modificación) de cada .h5:
+    la app pide la plantilla varias veces por medición y antes reabría los 4
+    archivos en Google Drive cada vez. Devuelve una copia modificable."""
+    clave = []
+    for ch in rutas.CANALES:
+        p = rutas.ruta_canal(carpeta_medicion, ch)
+        if p:
+            try:
+                clave.append((p, os.path.getmtime(p)))
+            except OSError:
+                clave.append((p, None))
+    clave = tuple(clave)
+    if clave not in _CACHE_INFO:
+        _CACHE_INFO[clave] = _extraer_info_h5(carpeta_medicion)
+    return copy.deepcopy(_CACHE_INFO[clave])
+
+
+def _extraer_info_h5(carpeta_medicion):
     """Extrae metadatos de hardware, escalas, base de tiempo y marcas temporales
     (atributos de los .h5, sin leer las señales).
 
@@ -298,7 +321,7 @@ def analizar_senales(carpeta_medicion):
     return res
 
 
-RE_KV = re.compile(r"^(\d+(?:\.\d+)?)kV$", re.IGNORECASE)
+RE_KV = re.compile(r"^(\d+(?:[.,]\d+)?)\s*kV$", re.IGNORECASE)
 RE_PRINCIPAL = re.compile(
     r"^(?P<n>[1-9])[vV](?P<h>[hH])?_(?P<diams>(?:\d+(?:\.\d+)?mm)+)_(?P<set>\d+)$"
 )
@@ -331,12 +354,14 @@ def inferir_parametros(experimento):
             "tension_sec_kv": None,
         }
 
-    m_kv = RE_KV.match(partes[-1])
+    # Nivel de tensión: el componente 'XkV' más profundo de la ruta (admite
+    # '<probeta>/<XkV>/<stem>' de archivos agrupados). Independiente del código.
     cand_principal = None
-    if m_kv:
-        tension_sec_kv = float(m_kv.group(1))
-        if len(partes) >= 2:
-            cand_principal = partes[-2]
+    i_kv = next((i for i in range(len(partes) - 1, -1, -1) if RE_KV.match(partes[i])), None)
+    if i_kv is not None:
+        tension_sec_kv = float(RE_KV.match(partes[i_kv]).group(1).replace(",", "."))
+        if i_kv >= 1:
+            cand_principal = partes[i_kv - 1]
     else:
         m_direct = RE_PRINCIPAL.match(partes[-1])
         if m_direct:
@@ -369,9 +394,6 @@ def inferir_parametros(experimento):
                     tipo_geometria = "monodiametro"
                 else:
                     tipo_geometria = "mixta"
-
-    if not codigo_probeta:
-        tension_sec_kv = None
 
     return {
         "codigo_probeta": codigo_probeta,
@@ -423,6 +445,21 @@ def inferir_diametros(probeta_data=None, codigo_probeta=None):
                 return "-".join(f"{float(x):g}mm" for x in raw_tokens)
 
     return "N/D"
+
+
+SENSORES_DEFECTO = {"ch2": "HFCT", "ch3": "Antena 1", "ch4": "Antena 2"}
+# Nombres antiguos que pueden quedar en metadata.yaml ya escritos
+_SENSORES_LEGADO = {"antena vivaldi": "Antena 1", "vivaldi": "Antena 1",
+                    "antena bioinspirada": "Antena 2", "bioinspirada": "Antena 2"}
+
+
+def nombre_corto_sensor(nombre, canal):
+    """Nombre corto del sensor para tablas: traduce los nombres antiguos
+    (Vivaldi / Bioinspirada) y, sin nombre, usa el de defecto del canal."""
+    n = str(nombre or "").strip()
+    if not n:
+        return SENSORES_DEFECTO.get(str(canal).lower(), str(canal).upper())
+    return _SENSORES_LEGADO.get(n.lower(), n)
 
 
 def normalizar_diametros(texto, nro_vacuolas=None, tipo_geometria=None):
@@ -507,11 +544,12 @@ def plantilla_metadata(experimento, carpeta_medicion, analizar=True):
     ch_config = {
         "ch1": _canal("ch1", sensor="Divisor capacitivo", funcion="Tension LI / Sincronismo",
                       unidad="kV", atenuacion_db=0),
-        "ch2": _canal("ch2", sensor="HFCT", funcion="Corriente PD", unidad="V", atenuacion_db=30),
-        "ch3": _canal("ch3", sensor="Antena Vivaldi", funcion="UHF Banda ancha", unidad="V",
-                      filtro="ninguno"),
-        "ch4": _canal("ch4", sensor="Antena Bioinspirada", funcion="UHF / Resolucion picos frente",
-                      unidad="V", filtro="HP_200MHz"),
+        "ch2": _canal("ch2", sensor="HFCT", funcion="Corriente PD", unidad="V", atenuacion_db=30,
+                      filtro=FILTROS_DEFECTO["ch2"]),
+        "ch3": _canal("ch3", sensor="Antena 1", funcion="UHF Banda ancha", unidad="V",
+                      filtro=FILTROS_DEFECTO["ch3"]),
+        "ch4": _canal("ch4", sensor="Antena 2", funcion="UHF / Resolucion picos frente",
+                      unidad="V", filtro=FILTROS_DEFECTO["ch4"]),
     }
 
     partes_exp = [p for p in str(experimento or "").replace("\\", "/").split("/") if p]
@@ -603,7 +641,7 @@ def completar_metadata(existente, nuevo):
 
 
 def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
-                               referencia_impulso="t10", info_ancla=None):
+                               referencia_impulso="t10", info_ancla=None, filtros=None):
     """Bloque 'calibracion_retardo' para metadata.yaml.
 
     resultados: dict {ch: dict de calibrar_retardo o {'t_lag_us','sigma_us','n_valid','n_total','params'}}.
@@ -616,8 +654,8 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
 
     default_sensores = {
         "ch2": "HFCT",
-        "ch3": "Antena Vivaldi",
-        "ch4": "Antena Bioinspirada",
+        "ch3": "Antena 1",
+        "ch4": "Antena 2",
     }
     sensores = sensores or {}
 
@@ -656,6 +694,9 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
                 "distancia_us": round(float(params["distancia_us"]), 4) if params.get("distancia_us") is not None else None,
                 "tmin_us": round(float(params["tmin_us"]), 4) if params.get("tmin_us") is not None else None,
             }
+            if filtros and ch in filtros:
+                # Filtro digital con que se midió el arribo (ver filtros.py)
+                bloque[ch]["filtro"] = filtros[ch]
 
     return bloque
 
@@ -674,6 +715,14 @@ def _actualizar_desde_h5(datos, nuevo):
     for k, v in nuevo["trigger"].items():
         if v is not None:
             trig[k] = v
+
+
+def _actualizar_desde_ruta(datos, experimento):
+    """La tensión del secundario se lee de la carpeta '<X>kV' de la ruta: si existe,
+    siempre manda sobre lo escrito en el YAML."""
+    kv = inferir_parametros(experimento)["tension_sec_kv"]
+    if kv is not None:
+        datos.setdefault("circuito_impulso", {})["tension_kv_ac_sec"] = kv
 
 
 def _guardar_yaml(datos, destino):
@@ -706,6 +755,7 @@ def generar(experimento, forzar=False, completar=False, analizar=True):
             datos = yaml.safe_load(f) or {}
         datos = completar_metadata(datos, nuevo)
         _actualizar_desde_h5(datos, nuevo)
+        _actualizar_desde_ruta(datos, carpeta)
         datos.setdefault("generado_automaticamente", {})
         datos["generado_automaticamente"]["fecha"] = datetime.date.today().isoformat()
         datos["generado_automaticamente"]["campos_pendientes"] = _campos_pendientes(

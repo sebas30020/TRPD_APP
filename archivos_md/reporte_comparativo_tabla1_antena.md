@@ -114,3 +114,10 @@ Existe una discrepancia directa entre el texto del manuscrito y el código con e
    La diferencia temporal de apenas $+2.2\text{ ns}$ ($+0.11\%$) se debe a que la app aplica la norma internacional **IEC 60060-1** con interpolación sub-muestra continua, superando la discretización cruda que empleaba el script antiguo.
 3. **Clarificación sobre la Tensión:**  
    La diferencia de $\sim 6.5\%$ en la amplitud de tensión ($0.978\text{ V}$ en la app vs. $0.914\text{ V}$ en el paper) se debe a un filtro digital pasa-altos a 200 MHz ejecutado en el código fuente histórico que no fue reportado en el manuscrito. La app reporta la amplitud física directa sin dicho recorte artificial.
+
+---
+
+> **Nota (2026-10-04):** TRPD_APP aplica ahora los filtros digitales del código original (`filtros.py`):
+> HP 5 MHz en CH2 y HP 200 MHz en CH3/CH4 (Butterworth orden 4, fase cero), activables con el interruptor
+> "Filtros del paper". Con ello queda incorporada la **Causa 2** (filtro pasa-altos de 200 MHz no documentado);
+> las cifras de este informe corresponden a la señal sin filtrar. Ver `archivos_md/plan_filtros_paper.md`.

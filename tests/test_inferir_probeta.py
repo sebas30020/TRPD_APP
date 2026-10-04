@@ -51,6 +51,23 @@ def test_inferir_parametros_nueva_jerarquia():
     assert res["diametros"] == [2, 3, 3.5]
 
 
+def test_tension_desde_carpeta_kv():
+    # Archivos agrupados: '<probeta>/<XkV>/<stem>'
+    res = inferir_parametros("M/1v_2mm_0/17.5kV/medA")
+    assert res["tension_sec_kv"] == 17.5
+    assert res["codigo_probeta"] == "1v_2mm_0"
+    # Variantes del nombre de la carpeta
+    assert inferir_parametros("M/1v_2mm_0/17,5kV")["tension_sec_kv"] == 17.5
+    assert inferir_parametros("M/1v_2mm_0/17.5 kV")["tension_sec_kv"] == 17.5
+    assert inferir_parametros("M/1v_2mm_0/22.57kV")["tension_sec_kv"] == 22.57
+    assert inferir_parametros("M/1v_2mm_0/10KV")["tension_sec_kv"] == 10.0
+    # La tensión no depende de que el código de probeta sea válido
+    res = inferir_parametros("M/carpeta_rara/30kV")
+    assert res["tension_sec_kv"] == 30.0 and res["codigo_probeta"] is None
+    assert inferir_parametros("Mediciones/3V224/30kV")["tension_sec_kv"] == 30.0
+    assert inferir_parametros("3v_2mm3mm_0/10kV")["tension_sec_kv"] == 10.0
+
+
 def test_inferir_parametros_nombres_invalidos():
     rutas_invalidas = [
         "Mediciones/invalido",
@@ -61,6 +78,7 @@ def test_inferir_parametros_nombres_invalidos():
         "carpeta_aleatoria",
         "",
     ]
+    con_kv = {"Mediciones/3V224/30kV", "3v_2mm3mm_0/10kV"}
     for ruta in rutas_invalidas:
         res = inferir_parametros(ruta)
         assert res["nro_vacuolas"] is None, ruta
@@ -68,7 +86,8 @@ def test_inferir_parametros_nombres_invalidos():
         assert res["tipo_geometria"] is None, ruta
         assert res["diametros"] is None, ruta
         assert res["set_impulsos"] is None, ruta
-        assert res["tension_sec_kv"] is None, ruta
+        if ruta not in con_kv:
+            assert res["tension_sec_kv"] is None, ruta
         assert res["codigo_probeta"] is None, ruta
 
 

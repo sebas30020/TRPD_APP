@@ -1,6 +1,9 @@
 """
 Preprocesado: filtro paso-alto de 5 MHz al canal 2.
 
+Nota: la app ya aplica este filtro (y HP 200 MHz a CH3/CH4) en memoria al cargar
+cada segmento (ver filtros.py); este script solo genera un archivo filtrado aparte.
+
 Lee ch2.h5, aplica un Butterworth paso-alto (fase cero) a cada segmento sobre la
 senal completa, y escribe un archivo extra `ch2_hp5MHz.h5` con la MISMA estructura
 que los originales (mismos nombres de grupo/dataset), pero con los datos ya en

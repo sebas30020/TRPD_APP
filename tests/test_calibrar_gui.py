@@ -296,7 +296,7 @@ def test_callback_grafico_dispersion_selector_canal():
 
     fig3 = actualizar_grafico_dispersion(store_ejemplo, canal="ch3")
     assert isinstance(fig3, go.Figure)
-    assert "CH3" in fig3.layout.annotations[0].text or "Vivaldi" in fig3.layout.annotations[0].text
+    assert "CH3" in fig3.layout.annotations[0].text or "Antena 1" in fig3.layout.annotations[0].text
 
 
 

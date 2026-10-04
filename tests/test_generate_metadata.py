@@ -134,7 +134,8 @@ def test_generar_completar_conserva_lo_manual(medicion):
     gm.generar(medicion, completar=True)
     datos = yaml.safe_load(open(destino, encoding="utf-8"))
     assert datos["experimento"]["temperatura_c"] == 21.5
-    assert datos["circuito_impulso"]["tension_kv_ac_sec"] == 15.0
+    # La carpeta '10kV' manda sobre la tensión escrita a mano
+    assert datos["circuito_impulso"]["tension_kv_ac_sec"] == 10.0
     assert "polaridad" not in datos["circuito_impulso"]
     assert datos["cadencia"]["clase"] == "cada_1min"
     assert "experimento.temperatura_c" not in datos["generado_automaticamente"]["campos_pendientes"]
@@ -190,3 +191,19 @@ def test_trigger_sin_senales_es_ch1(medicion):
     assert trig["canal_origen"] == "ch1"
     assert trig["posicion_horizontal_pct"] == pytest.approx(9.78, abs=0.01)
     assert trig["nivel_v"] is None and trig["pendiente"] is None
+
+
+def test_actualizar_desde_ruta():
+    datos = {"circuito_impulso": {"tension_kv_ac_sec": 15.0}}
+    gm._actualizar_desde_ruta(datos, "x/m_sin_kv")          # sin carpeta kV: se respeta
+    assert datos["circuito_impulso"]["tension_kv_ac_sec"] == 15.0
+    gm._actualizar_desde_ruta(datos, "x/3v_2mm2mm4mm_0/11kV")
+    assert datos["circuito_impulso"]["tension_kv_ac_sec"] == 11.0
+
+
+def test_nombre_corto_sensor():
+    assert gm.nombre_corto_sensor("Antena Vivaldi", "ch3") == "Antena 1"
+    assert gm.nombre_corto_sensor("Antena Bioinspirada", "ch4") == "Antena 2"
+    assert gm.nombre_corto_sensor(None, "ch2") == "HFCT"
+    assert gm.nombre_corto_sensor("", "ch4") == "Antena 2"
+    assert gm.nombre_corto_sensor("Sonda X", "ch3") == "Sonda X"

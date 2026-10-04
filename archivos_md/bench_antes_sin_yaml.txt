@@ -1,0 +1,26 @@
+
+=== 1v_2mm_0\17.5kV
+primera carga (cfg+figura+cal): 3.59 s
+  figura principal: 12.85 MB, trazas=6, puntos señal=[350000, 350000, 350000]
+cambio de segmento: 0.25 s (12.76 MB)
+capturar frío: 1.12 s  (20 descargas)
+capturar caliente: 0.000 s
+calcular_fila_densidad ch2: 0.90 s
+ventanas: 0.01 s, 0.18 MB
+fft: 0.00 s, 0.00 MB
+st_ventana: 0.13 s, 1.92 MB
+ST segmento: 33.2 s, 54.1 MB
+
+=== 3v_2mm3mm4mm_1\13kV
+primera carga (cfg+figura+cal): 2.07 s
+  figura principal: 12.85 MB, trazas=6, puntos señal=[350000, 350000, 350000]
+cambio de segmento: 0.17 s (12.86 MB)
+capturar frío: 0.71 s  (3 descargas)
+capturar caliente: 0.000 s
+calcular_fila_densidad ch2: 0.69 s
+ventanas: 0.00 s, 0.03 MB
+fft: 0.01 s, 0.00 MB
+st_ventana: 0.02 s, 1.89 MB
+ST segmento: 32.8 s, 54.1 MB
+
+5 capturas simultáneas: 1.73 s, find_peaks ejecutado 100 veces (1 captura = 20)

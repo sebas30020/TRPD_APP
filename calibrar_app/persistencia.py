@@ -30,8 +30,10 @@ def bloque_calibracion_retardo(
     fecha: str | None = None,
     referencia_impulso: str = "t10",
     info_ancla: dict | None = None,
+    filtros: dict | None = None,
 ) -> dict:
-    """Construye el bloque 'calibracion_retardo' para metadata.yaml."""
+    """Construye el bloque 'calibracion_retardo' para metadata.yaml.
+    `filtros` ({canal: 'HP_5MHz', ...}) registra el filtro digital usado por canal."""
     return generate_metadata.bloque_calibracion_retardo(
         resultados=resultados,
         fuente=fuente,
@@ -39,6 +41,7 @@ def bloque_calibracion_retardo(
         fecha=fecha,
         referencia_impulso=referencia_impulso,
         info_ancla=info_ancla,
+        filtros=filtros,
     )
 
 

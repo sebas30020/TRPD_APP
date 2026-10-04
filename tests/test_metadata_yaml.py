@@ -57,8 +57,8 @@ def test_v6_roundtrip_legado(backup_metadata):
         "criterio": "primer_cruce_umbral",
         "referencia": "t10_CH1_por_segmento",
         "ch2": {"sensor": "HFCT", "t_lag_ns": 15.250, "sigma_ns": 0.500, "n_valid": 50, "n_total": 50},
-        "ch3": {"sensor": "Antena Vivaldi", "t_lag_ns": 9.100, "sigma_ns": 0.350, "n_valid": 48, "n_total": 50},
-        "ch4": {"sensor": "Antena Bioinspirada", "t_lag_ns": 20.400, "sigma_ns": 0.800, "n_valid": 50, "n_total": 50},
+        "ch3": {"sensor": "Antena 1", "t_lag_ns": 9.100, "sigma_ns": 0.350, "n_valid": 48, "n_total": 50},
+        "ch4": {"sensor": "Antena 2", "t_lag_ns": 20.400, "sigma_ns": 0.800, "n_valid": 50, "n_total": 50},
     }
     ok, msg = persistencia.guardar_calibracion_metadata(CARPETA_TEST, bloque_legado)
     assert ok, f"Error al guardar: {msg}"
@@ -84,7 +84,7 @@ def test_v6_roundtrip_o1_sin_ancla(backup_metadata):
         "criterio": "primer_cruce_umbral",
         "referencia": "origen_virtual_IEC60060_por_segmento",
         "referencia_impulso": "origen_virtual_IEC60060",
-        "ch4": {"sensor": "Antena Bioinspirada", "t_lag_ns": 275.500, "sigma_ns": 1.200, "n_valid": 50, "n_total": 50},
+        "ch4": {"sensor": "Antena 2", "t_lag_ns": 275.500, "sigma_ns": 1.200, "n_valid": 50, "n_total": 50},
     }
     ok, msg = persistencia.guardar_calibracion_metadata(CARPETA_TEST, bloque_o1_huerfano)
     assert ok, f"Error al guardar: {msg}"
@@ -116,7 +116,7 @@ def test_v6_roundtrip_o1_con_ancla(backup_metadata):
         "criterio": "primer_cruce_umbral",
         "referencia_impulso": "origen_virtual_IEC60060",
         "ancla": ancla,
-        "ch4": {"sensor": "Antena Bioinspirada", "t_lag_ns": 275.400, "sigma_ns": 1.100, "n_valid": 50, "n_total": 50},
+        "ch4": {"sensor": "Antena 2", "t_lag_ns": 275.400, "sigma_ns": 1.100, "n_valid": 50, "n_total": 50},
     }
     bloque_full = persistencia.bloque_calibracion_retardo(
         resultados={"ch4": {"t_lag_us": 0.275400, "sigma_us": 0.0011, "n_valid": 50, "n_total": 50, "params": {}}},

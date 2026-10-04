@@ -47,7 +47,7 @@ def _datos_sinteticos(monkeypatch):
     v = np.zeros_like(t)
     v[[1000, 2000, 3000]] = 20.0
     monkeypatch.setattr(app, "canales_presentes", lambda carpeta: ["ch2", "ch3", "ch4"])
-    monkeypatch.setattr(app, "cargar_segmento", lambda carpeta, canal, seg: (t, v))
+    monkeypatch.setattr(app, "cargar_segmento", lambda carpeta, canal, seg, **k: (t, v))
     monkeypatch.setattr(app, "meta_medicion",
                         lambda carpeta: {ch: {"xinc": 1e-8} for ch in ("ch2", "ch3", "ch4")})
 
@@ -99,7 +99,7 @@ def test_actualizar_descarta_captura_obsoleta(monkeypatch):
     vista previa en vez de mostrar las cruces del snapshot anterior."""
     llamadas = []
     monkeypatch.setattr(app, "capturar", lambda *a, **k: "CAP")
-    monkeypatch.setattr(app, "figura", lambda carpeta, seg, canal, cfg_sensores=None, cap=None:
+    monkeypatch.setattr(app, "figura", lambda carpeta, seg, canal, cfg_sensores=None, cap=None, **k:
                         llamadas.append(cap))
     p = {"carpeta": "m", "canal": "ch4", "umbral": 10.0, "dist": 0.035, "tmin": 0.15}
     comunes = ("m", 1, "ch4", p, 5, 0.035, 0.15, 6, 0.035, 0.15)

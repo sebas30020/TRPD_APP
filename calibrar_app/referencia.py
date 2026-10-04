@@ -161,3 +161,16 @@ def delta_t10_menos_O1(carpeta: str) -> dict:
         "n": n,
         "por_segmento": delta.tolist(),
     }
+
+
+# ancla_por_segmento("origen_virtual_IEC60060") evalúa la norma en cada segmento
+# (~0.2 s c/u) y la piden varios callbacks a la vez al cambiar de medición:
+# se calcula una sola vez por (carpeta, referencia).
+import datos_h5  # noqa: E402
+
+_ancla_por_segmento_directo = ancla_por_segmento
+
+
+def ancla_por_segmento(carpeta: str, referencia: str = "t10") -> dict:  # noqa: F811
+    return datos_h5.calcular_una_vez(_ANCLA_CACHE, (carpeta, referencia),
+                                      lambda: _ancla_por_segmento_directo(carpeta, referencia))
