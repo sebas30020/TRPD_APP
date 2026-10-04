@@ -72,7 +72,7 @@ def test_2_t10_por_segmento_app():
 
     t10_arr = app.t10_por_segmento(CARPETA_TEST)
     n_fb = app.n_fallback_t10(CARPETA_TEST)
-    assert len(t10_arr) == 50
+    assert len(t10_arr) == app.n_segmentos(CARPETA_TEST)   # uno por segmento, sea cual sea N
     assert np.all(np.isfinite(t10_arr))
 
     mean_ns = np.mean(t10_arr) * 1e3
@@ -91,7 +91,7 @@ def test_3_humo_calibracion_calibrar_app():
     t, v = datos.cargar_segmento(CARPETA_TEST, "ch4", 1)
     u = float(np.max(np.abs(v)) * 0.60)
     res = arribo.calibrar_retardo(CARPETA_TEST, "ch4", u, 0.5, 0.0)
-    assert len(res["t_lag"]) == res["n_total"] == 50
+    assert len(res["t_lag"]) == res["n_total"] == datos.n_segmentos(CARPETA_TEST)
     assert res["n_valid"] > 0
     assert res["t_lag_us"] is not None
 

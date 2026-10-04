@@ -102,7 +102,7 @@ def test_callback_evaluar_iec():
 
     res = evaluar_conformidad_iec(1, CARPETA_TEST)
     assert "resumen_iec" in res and "delta" in res
-    assert res["resumen_iec"]["n_total"] == 50
+    assert res["resumen_iec"]["n_total"] == datos.n_segmentos(CARPETA_TEST)
     assert 0.18 <= res["delta"]["media_us"] <= 0.34
 
 

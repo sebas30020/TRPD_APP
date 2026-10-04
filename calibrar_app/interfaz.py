@@ -199,7 +199,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                             html.Div(style={"display": "none"}, children=[
                                 dcc.Input(id="canal", value="todos"),
                                 dcc.Input(id="ucal", type="number"),
-                                dcc.Input(id="dtcal", type="number", value=0.035),
+                                dcc.Input(id="dtcal", type="number", value=0.05),
                                 dcc.Input(id="tmincal", type="number", value=0.15),
                             ]),
                         ],

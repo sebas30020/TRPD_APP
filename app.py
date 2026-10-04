@@ -72,7 +72,10 @@ SIN_DIEZMADO_US = 1.0
 URL_CALIBRAR = "http://127.0.0.1:8052"   # calibrar_app (pestaña Calibración)
 
 # Parámetros de detección por defecto cuando un campo queda vacío
-DIST_DEFECTO_US = 0.035
+# Δt por defecto: 50 ns. El paper usaba 180 muestras a 5 GSa/s = 36 ns, pero las antenas
+# muestran un eco de la misma descarga 37–43 ns después del pico (~17 % de su amplitud,
+# también en la señal cruda) que con 35 ns se contaba como una segunda descarga.
+DIST_DEFECTO_US = 0.05
 TMIN_DEFECTO_US = 0.15
 
 
@@ -129,9 +132,9 @@ def config_sensores_defecto(carpeta, filtrado=True):
     """Genera la configuración de trigger (umbral, dist, tmin) para los canales
     trigger (ch2, ch3, ch4), leyendo de metadata.yaml si existen o calculando valores iniciales."""
     defaults = {
-        "ch2": {"umbral": None, "dist": 0.035, "tmin": 0.15},
-        "ch3": {"umbral": None, "dist": 0.035, "tmin": 0.15},
-        "ch4": {"umbral": None, "dist": 0.035, "tmin": 0.15},
+        "ch2": {"umbral": None, "dist": DIST_DEFECTO_US, "tmin": TMIN_DEFECTO_US},
+        "ch3": {"umbral": None, "dist": DIST_DEFECTO_US, "tmin": TMIN_DEFECTO_US},
+        "ch4": {"umbral": None, "dist": DIST_DEFECTO_US, "tmin": TMIN_DEFECTO_US},
     }
     if not carpeta:
         return defaults

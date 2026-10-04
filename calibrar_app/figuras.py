@@ -59,7 +59,7 @@ def umbral_desde_relayout(relayout: dict | None, fallback: float) -> float:
 
 def figura_canal(carpeta: str, canal: str, seg: int,
                  umbral: float | None = None,
-                 dist_us: float = 0.035,
+                 dist_us: float = 0.05,
                  tmin: float | None = None,
                  ancla_us: float | None = None,
                  t_arr_us: float | None = None,

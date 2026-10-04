@@ -1,0 +1,3 @@
+# Dependencias solo para scripts de reportes (generar_presentacion.py)
+python-pptx
+matplotlib

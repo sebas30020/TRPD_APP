@@ -86,7 +86,7 @@ def filtrar_mad(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, float | None, 
     return valido, atipico, media, sigma
 
 
-def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0.035, tmin: float = 0.15,
+def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0.05, tmin: float = 0.15,
                      referencia: str = "t10", distancia_us: float | None = None) -> dict:
     """Calcula el retardo instrumental t_lag = t_ant - ancla para cada segmento.
 

@@ -52,6 +52,10 @@ def test_v4_t10_por_segmento_vs_app():
 def test_v4_calibrar_retardo_vs_app_y_oraculo(oraculo_data):
     if not datos.canales_presentes(CARPETA_TEST):
         pytest.skip("TRPD_CARPETA_TEST no definida o sin datos")
+    # El oráculo guarda resultados de UNA medición concreta: solo se compara contra ella.
+    med_oraculo = str(oraculo_data.get("carpeta", "")).replace("\\", "/").rstrip("/")
+    if not med_oraculo or not CARPETA_TEST.replace("\\", "/").rstrip("/").endswith(med_oraculo):
+        pytest.skip(f"El oráculo corresponde a '{med_oraculo}', no a TRPD_CARPETA_TEST")
 
     for ch in ["ch2", "ch3", "ch4"]:
         ref_oraculo = oraculo_data["canales"][ch]

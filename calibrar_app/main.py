@@ -366,7 +366,7 @@ def actualizar_grafico_canal(
         return no_update
 
     canal_foco = "ch4" if canal == "todos" else canal
-    dt_us = float(dtcal or 0.035)
+    dt_us = float(dtcal or 0.05)
 
     # Configuración por canal independiente
     cfg_sensores = {
@@ -462,7 +462,7 @@ def calcular_retardo_canal(
     if store.get("_carpeta") != carpeta:
         store = {"_carpeta": carpeta}
 
-    dt_us = float(dtcal or 0.035)
+    dt_us = float(dtcal or 0.05)
 
     cfg_map = {
         "ch2": (u2 if u2 is not None else (ucal if canal == "ch2" and ucal is not None else None), tmin2 if tmin2 is not None else tmincal),

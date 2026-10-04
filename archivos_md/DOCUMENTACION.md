@@ -722,7 +722,10 @@ Ver el análisis completo y las mediciones antes/después en `archivos_md/plan_r
 - La pestaña Calibración abre calibrar_app ya con la medición actual (`?embebido=1&carpeta=...`) y
   al volver a Análisis se releen los retardos guardados.
 - Errores visibles: si una figura falla se muestra el mensaje en lugar de dejar la anterior.
-- Campos vacíos de Δt/t_mín usan siempre `DIST_DEFECTO_US = 0.035` y `TMIN_DEFECTO_US = 0.15`.
+- Campos vacíos de Δt/t_mín usan siempre `DIST_DEFECTO_US = 0.05` (50 ns) y `TMIN_DEFECTO_US = 0.15`.
+  Δt = 50 ns y no los 36 ns del paper (180 muestras a 5 GSa/s): las antenas registran un eco de cada
+  descarga 37–43 ns después del pico (~17 % de su amplitud, presente también sin filtro) que con 35 ns
+  se contaba como una segunda descarga.
 
 ---
 
@@ -820,6 +823,21 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
 ---
 
 ## 13. Scripts auxiliares (fuera de la app)
+
+### `generar_presentacion.py` — presentación de señales (PowerPoint)
+
+`python generar_presentacion.py [<raiz>] [--salida <ruta.pptx>] [--dpi 150] [--solo <texto>]`
+(dependencias aparte: `pip install -r requirements_reportes.txt`, python-pptx y matplotlib).
+
+- Por defecto lee `mediciones/med_proced_confuse` y escribe `reportes/senales_med_proced_confuse.pptx`.
+- Una diapositiva por disparo con 4 gráficos apilados: Impulso (CH1, V), HFCT (CH2), Antena 1 – cercana
+  (CH3) y Antena 2 – lejana (CH4), en mV. Ventana -5…30 µs; CH2..CH4 con los mismos filtros que la app
+  (`cargar_segmento(..., filtrado=True)`), CH1 sin filtrar. Escala vertical común a los disparos de cada medición.
+- Título: nº de vacuolas · diámetros · tensión — Disparo k / N, tomados de la jerarquía
+  `<probeta>/<X>kV` (`inferir_parametros`); subtítulo con probeta, set y ruta. Incluye portada, índice
+  y un separador por medición.
+- `--solo "3v_2mm3mm4mm_1	kV"` genera solo las mediciones cuya ruta contiene ese texto (prueba rápida).
+- Con las 12 mediciones (224 disparos): 238 diapositivas, ~19 MB, ~4 min.
 
 - **`preprocesar.py`.** Filtro paso-alto Butterworth de fase cero (`sosfiltfilt`,
   **5 MHz**, orden 4) aplicado a cada segmento de `ch2.h5` (señal completa, no
