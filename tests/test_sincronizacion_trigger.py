@@ -98,7 +98,8 @@ def test_actualizar_descarta_captura_obsoleta(monkeypatch):
     """Tras editar un parámetro después de "⚡ Calcular peaks", el gráfico vuelve a
     vista previa en vez de mostrar las cruces del snapshot anterior."""
     llamadas = []
-    monkeypatch.setattr(app, "capturar", lambda *a, **k: "CAP")
+    monkeypatch.setattr(app, "_cap_p", lambda p, ed=None: "CAP")   # captura editada del snapshot
+    monkeypatch.setattr(app, "_ed", lambda store, carpeta, canal: {"historial": []})
     monkeypatch.setattr(app, "figura", lambda carpeta, seg, canal, cfg_sensores=None, cap=None, **k:
                         llamadas.append(cap))
     p = {"carpeta": "m", "canal": "ch4", "umbral": 10.0, "dist": 0.035, "tmin": 0.15}

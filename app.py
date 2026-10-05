@@ -13,6 +13,7 @@ Ejecutar:  python3 app.py   ->  abrir http://127.0.0.1:8051
 import base64
 import urllib.parse
 import copy
+import json
 import os
 import re
 from collections import OrderedDict
@@ -77,6 +78,11 @@ URL_CALIBRAR = "http://127.0.0.1:8052"   # calibrar_app (pestaña Calibración)
 # también en la señal cruda) que con 35 ns se contaba como una segunda descarga.
 DIST_DEFECTO_US = 0.05
 TMIN_DEFECTO_US = 0.15
+
+# Edición manual de peaks (marca temporal):
+SNAP_MARCA_US = 0.010   # el clic se ajusta al máximo de la señal en ±10 ns
+TOL_PEAK_US = 0.005     # un peak detectado "es" una marca guardada si está a <= 5 ns
+RESNAP_US = 0.001       # al reaplicar un añadido (p. ej. sin filtros) se reajusta en ±1 ns
 
 
 def _ruta(carpeta, canal):
@@ -211,7 +217,7 @@ def _canales_senal(carpeta):
     return [c for c in canales_presentes(carpeta) if c != "ch1"]
 
 
-def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rango_x=None):
+def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rango_x=None, marca=None):
     canales = canales_presentes(carpeta)
     fig = make_subplots(
         rows=len(canales), cols=1,
@@ -266,10 +272,24 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
         dist_act = cfg_act.get("dist", 1.0)
         tmin_act = cfg_act.get("tmin", 0.0)
 
+        manual = None
         if cap is not None:
+            # Captura editada: índice global en customdata (selección), manuales aparte.
             mask = cap["seg"] == seg
-            tp, vp = cap["t_peak"][mask], cap["v_peak"][mask]
-            customdata = np.nonzero(mask)[0].tolist()
+            origen = np.asarray(cap.get("origen", np.zeros(mask.size, dtype=int)))
+            m_man = mask & (origen == 1) if origen.size == mask.size else np.zeros_like(mask)
+            m_det = mask & ~m_man
+            manual = (cap["t_peak"][m_man], cap["v_peak"][m_man], np.nonzero(m_man)[0].tolist())
+            tp, vp = cap["t_peak"][m_det], cap["v_peak"][m_det]
+            customdata = np.nonzero(m_det)[0].tolist()
+            quitados = [(t, v) for s_, t, v in cap.get("quitados_vis", []) if s_ == seg]
+            if quitados:
+                fig.add_trace(go.Scattergl(
+                    x=[q[0] for q in quitados], y=[q[1] for q in quitados], mode="markers",
+                    name="quitados", showlegend=False,
+                    marker=dict(symbol="x", color=tema.MUTED_LIGHT, size=8, line=dict(width=1)),
+                    hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak quitado</extra>",
+                ), row=fila, col=1)
         else:
             tp, vp = _detectar_con_ventana(carpeta, canal, t_trig, v_trig, u0,
                                            _muestras(carpeta, canal, dist_act), tmin_act)
@@ -284,6 +304,19 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
             ),
             row=fila, col=1,
         )
+        if manual is not None and len(manual[0]):
+            fig.add_trace(go.Scattergl(
+                x=manual[0], y=manual[1], mode="markers", name="peaks manuales",
+                customdata=manual[2], showlegend=False,
+                marker=dict(symbol="diamond", color=tema.ACCENT, size=10,
+                            line=dict(color="white", width=1)),
+                hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak manual</extra>",
+            ), row=fila, col=1)
+        # Marca temporal (después de las líneas de umbral: umbrales_desde_relayout
+        # supone que shapes[0..2] son los umbrales).
+        if marca and marca.get("carpeta") == carpeta and marca.get("canal") == canal                 and marca.get("seg") == seg and marca.get("t_us") is not None:
+            fig.add_vline(x=float(marca["t_us"]), row=fila, col=1, editable=False,
+                          line=dict(color=tema.ACCENT, width=1.5, dash="dash"))
 
     # Impulso CH1 filtrado (50 MHz) + líneas verticales de tiempos sobre CH1.
     if "ch1" in canales:
@@ -364,24 +397,6 @@ def umbrales_desde_relayout(relayout, canales):
     return cambios
 
 
-def _obtener_excluidos(excl_dict, key):
-    """Obtiene la lista de índices excluidos para una clave 'carpeta|canal'."""
-    val = (excl_dict or {}).get(key, [])
-    if isinstance(val, dict):
-        return val.get("excluidos", [])
-    if isinstance(val, (list, set)):
-        return list(val)
-    return []
-
-
-def _obtener_historial(excl_dict, key):
-    """Obtiene el historial de pasos de exclusión para una clave 'carpeta|canal'."""
-    val = (excl_dict or {}).get(key, {})
-    if isinstance(val, dict):
-        return val.get("historial", [])
-    return []
-
-
 def parsear_lista_disparos(texto_o_num, n_max_segs=None):
     """Parsea una entrada como '5', '1, 3, 5', '2-6' a una lista de enteros (1-indexed)."""
     if texto_o_num is None or texto_o_num == "":
@@ -409,18 +424,13 @@ def parsear_lista_disparos(texto_o_num, n_max_segs=None):
     return sorted(segs)
 
 
-def contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=None, filtrado=True):
+def contar_peaks(carpeta, canal, umbral, dist_us, tmin, ediciones=None, filtrado=True):
     """Nº de peaks válidos (con ventana completa de 70 ns) del canal trigger por segmento,
-    omitiendo los índices de descargas excluidas si se proporcionan."""
-    cap = capturar(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado)
+    con las ediciones manuales del canal aplicadas (añadidos y quitados)."""
+    cap = captura_editada(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado, ediciones=ediciones)
     n_segs = n_segmentos(carpeta)
     segs = list(range(1, n_segs + 1))
     seg_arr = np.asarray(cap["seg"], dtype=int)
-    if excluidos:
-        activo = np.ones(seg_arr.size, dtype=bool)
-        idx = np.fromiter((i for i in excluidos if 0 <= i < seg_arr.size), dtype=int)
-        activo[idx] = False
-        seg_arr = seg_arr[activo]
     seg_arr = seg_arr[(seg_arr >= 1) & (seg_arr <= n_segs)]
     conteos = np.bincount(seg_arr, minlength=n_segs + 1)[1:n_segs + 1]
     return segs, [int(c) for c in conteos]
@@ -507,6 +517,160 @@ def _capturar(carpeta, canal, umbral, dist_us, tmin, antes_us, desp_us, filtrado
         "dt_us": dt_us,
     }
     return res
+
+
+# ---------------- Edición manual de peaks ----------------
+# Las ediciones se guardan por canal en metadata.yaml (ediciones_peaks.<ch>.historial)
+# como (disparo, t en µs del osciloscopio), no como índices: así se reaplican igual
+# tras cambiar umbral, Δt, t_mín o el interruptor de filtros.
+
+def estado_ediciones(ed_canal):
+    """Reproduce el historial de ediciones de un canal y devuelve
+    {"anadidos": [(seg, t)], "quitados": [(seg, t)], "disparos": set(seg)}.
+    Quitar un peak añadido lo saca de añadidos; añadir sobre uno quitado lo
+    saca de quitados (misma posición = mismo disparo y a <= TOL_PEAK_US)."""
+    anadidos, quitados, disparos = [], [], set()
+
+    def mismo(p, s, t):
+        return p[0] == s and abs(p[1] - t) <= TOL_PEAK_US
+
+    for paso in (ed_canal or {}).get("historial") or []:
+        accion = paso.get("accion")
+        if accion == "quitar_disparo":
+            disparos.update(int(s) for s in paso.get("segs") or [])
+            continue
+        for pt in paso.get("puntos") or []:
+            s, t = int(pt["seg"]), float(pt["t_us"])
+            if accion == "anadir":
+                quitados = [q for q in quitados if not mismo(q, s, t)]
+                if not any(mismo(a, s, t) for a in anadidos):
+                    anadidos.append((s, t))
+            elif accion == "quitar":
+                anadidos = [a for a in anadidos if not mismo(a, s, t)]
+                if not any(mismo(q, s, t) for q in quitados):
+                    quitados.append((s, t))   # por si coincide con un peak detectado
+    return {"anadidos": anadidos, "quitados": quitados, "disparos": disparos}
+
+
+def _hay_ediciones(ed_canal):
+    return bool((ed_canal or {}).get("historial"))
+
+
+def _peak_en(carpeta, canal, seg, t_us, radio_us, filtrado=True):
+    """Máximo de v en [t-radio, t+radio] del segmento: (i, t, v, t_arr, v_arr) o None."""
+    t, v = cargar_segmento(carpeta, canal, int(seg), filtrado=filtrado)
+    sel = np.nonzero((t >= t_us - radio_us) & (t <= t_us + radio_us))[0]
+    if not sel.size:
+        return None
+    i = int(sel[np.argmax(v[sel])])
+    return i, float(t[i]), float(v[i]), t, v
+
+
+def ajustar_a_peak(carpeta, canal, seg, t_us, radio_us=None, filtrado=True):
+    """Instante (t, v) del máximo de la señal a <= radio_us de t_us (por defecto
+    SNAP_MARCA_US), o None si no hay muestras ahí."""
+    r = _peak_en(carpeta, canal, seg, t_us, SNAP_MARCA_US if radio_us is None else radio_us, filtrado)
+    return None if r is None else (r[1], r[2])
+
+
+def aplicar_ediciones(cap, carpeta, canal, ed_canal, filtrado=True):
+    """Captura con las ediciones manuales aplicadas: mismas claves que capturar()
+    más `origen` (0 detectado, 1 manual/forzado), `quitados_vis` [(seg, t, v)] de
+    los detectados quitados y `omitidos` (añadidos cuya ventana de 70 ns no cabe).
+    Ordenada por (segmento, t_peak)."""
+    n = np.asarray(cap.get("t_peak", [])).size
+    base = dict(cap, origen=np.zeros(n, dtype=int), quitados_vis=[], omitidos=0)
+    if not _hay_ediciones(ed_canal):
+        return base
+    est = estado_ediciones(ed_canal)
+    seg = np.asarray(cap.get("seg", np.zeros(n)), dtype=int)
+    tp = np.asarray(cap.get("t_peak", np.zeros(n)), dtype=float)
+    activo = np.array([
+        int(seg[i]) not in est["disparos"]
+        and not any(s == seg[i] and abs(t - tp[i]) <= TOL_PEAK_US for s, t in est["quitados"])
+        for i in range(n)], dtype=bool)
+    origen = np.zeros(n, dtype=int)
+
+    nuevos = []   # (seg, t, v, ventana)
+    omitidos = 0
+    n_antes = n_desp = 0
+    if est["anadidos"]:
+        dt_us = meta_medicion(carpeta)[canal]["xinc"] * 1e6
+        n_antes = int(round(VENTANA_PD_ANTES_US / dt_us))
+        n_desp = int(round(VENTANA_PD_DESP_US / dt_us))
+    for s, t in est["anadidos"]:
+        if s in est["disparos"]:
+            continue
+        cerca = np.nonzero(activo & (seg == s) & (np.abs(tp - t) <= TOL_PEAK_US))[0]
+        if cerca.size:
+            origen[cerca[0]] = 1   # ya detectado: queda forzado aunque otro trigger lo pierda
+            continue
+        r = _peak_en(carpeta, canal, s, t, RESNAP_US, filtrado)
+        if r is None:
+            omitidos += 1
+            continue
+        i, ti, vi, _, v_arr = r
+        a, b = i - n_antes, i + n_desp + 1
+        if a < 0 or b > v_arr.size:
+            omitidos += 1
+            continue
+        nuevos.append((s, ti, vi, v_arr[a:b]))
+
+    out = dict(cap)
+    out["quitados_vis"] = [(int(seg[i]), float(tp[i]), float(np.asarray(cap["v_peak"])[i]))
+                           for i in np.nonzero(~activo)[0]] if "v_peak" in cap else []
+    out["omitidos"] = omitidos
+    k = len(nuevos)
+    seg_n = np.array([x[0] for x in nuevos], dtype=int)
+    t_n = np.array([x[1] for x in nuevos], dtype=float)
+    columnas = {
+        "seg": (seg, seg_n),
+        "t_peak": (tp, t_n),
+        "v_peak": (cap.get("v_peak"), np.array([x[2] for x in nuevos], dtype=float)),
+        "vpp": (cap.get("vpp"), np.array([float(np.ptp(x[3])) for x in nuevos], dtype=float)),
+    }
+    if "t10_seg" in cap:
+        t10 = t10_por_segmento(carpeta) if k else np.array([])
+        columnas["t10_seg"] = (cap["t10_seg"], t10[seg_n - 1] if k else np.array([]))
+    for clave, (viejo, nuevo) in columnas.items():
+        if viejo is None:
+            continue
+        viejo = np.asarray(viejo)
+        out[clave] = np.concatenate([viejo[activo] if viejo.size == n else viejo, nuevo])
+    if "W" in cap:
+        W = np.asarray(cap["W"])
+        W_act = W[activo] if W.shape[0] == n else W
+        if k:
+            W_act = np.vstack([W_act.reshape(-1, len(nuevos[0][3])), np.array([x[3] for x in nuevos])])
+        out["W"] = W_act
+    origen_tot = np.concatenate([origen[activo], np.ones(k, dtype=int)])
+    orden = np.lexsort((out["t_peak"], out["seg"]))
+    for clave in ("seg", "t_peak", "v_peak", "vpp", "t10_seg", "W"):
+        if clave in out and np.asarray(out[clave]).shape[:1] == orden.shape:
+            out[clave] = np.asarray(out[clave])[orden]
+    out["origen"] = origen_tot[orden]
+    return out
+
+
+_CAPTURA_EDITADA_CACHE = OrderedDict()
+
+
+def captura_editada(carpeta, canal, umbral, dist_us, tmin, filtrado=True, ediciones=None):
+    """capturar() + aplicar_ediciones(). Es la captura que usan todos los análisis."""
+    cap = capturar(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado)
+    if not _hay_ediciones(ediciones):
+        return aplicar_ediciones(cap, carpeta, canal, None)
+    key = (carpeta, canal, round(umbral, 6) if umbral is not None else None, dist_us, tmin,
+           bool(filtrado), json.dumps(ediciones, sort_keys=True, default=str))
+    return datos_h5.calcular_una_vez(
+        _CAPTURA_EDITADA_CACHE, key,
+        lambda: aplicar_ediciones(cap, carpeta, canal, ediciones, filtrado), maxsize=16)
+
+
+def _cap_p(p, ediciones=None):
+    """Captura editada del snapshot `captura_params`."""
+    return captura_editada(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"],
+                           filtrado=p.get("filtrado", True), ediciones=ediciones)
 
 
 def _idx_scatter(datos, n, activos=None):
@@ -872,6 +1036,33 @@ def guardar_diametros(carpeta, texto):
     return ok, f"Diámetros {norm} — {msg}" if ok else msg
 
 
+def ediciones_canal(carpeta, canal):
+    """Ediciones manuales de peaks del canal (metadata.yaml: ediciones_peaks.<canal>)."""
+    ed = (obtener_metadata(carpeta).get("ediciones_peaks") or {}).get(canal) or {}
+    return {"historial": list(ed.get("historial") or [])}
+
+
+def ediciones_medicion(carpeta):
+    """{canal: ediciones} de los canales trigger de la medición."""
+    return {ch: ediciones_canal(carpeta, ch) for ch in TRIGGERS} if carpeta else {}
+
+
+def guardar_ediciones_canal(carpeta, canal, ed):
+    """Guarda las ediciones de un canal en metadata.yaml sin tocar el resto de secciones.
+    Un historial vacío borra la clave del canal (y la sección si queda vacía)."""
+    meta = {k: v for k, v in obtener_metadata(carpeta).items() if not k.startswith("_")}
+    sec = dict(meta.get("ediciones_peaks") or {})
+    if ed and ed.get("historial"):
+        sec[canal] = {"historial": ed["historial"]}
+    else:
+        sec.pop(canal, None)
+    if sec:
+        meta["ediciones_peaks"] = sec
+    else:
+        meta.pop("ediciones_peaks", None)
+    return guardar_metadata_archivo(carpeta, yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
+
+
 COLUMNAS_DENSIDAD = [
     {"name": "Specimen", "id": "specimen"},
     {"name": "d (mm)", "id": "diametro"},
@@ -896,7 +1087,7 @@ def _tension_kv(carpeta, meta):
         return None
 
 
-def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, excluidos=None,
+def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, ediciones=None,
                            filtrado=True):
     """Fila de la tabla de estadística con el formato de la Tabla 1 del paper:
     Specimen (Nv), d (mm), Voltage (kV), Sensor, N_PD distribution [0, 1, 2, 3, 4, > 4],
@@ -904,7 +1095,7 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
 
     V̄_pp y t̄_abs se promedian solo sobre las descargas de los disparos con
     N_PD == N_cav (si no se conoce N_cav, sobre todas las descargas activas).
-    Si se proporciona `excluidos`, omite dichos índices globales del cálculo."""
+    `ediciones`: ediciones manuales del canal (peaks añadidos/quitados)."""
     meta = obtener_metadata(carpeta)
     prob = meta.get("probeta") or {}
     inf = inferir_parametros(carpeta)
@@ -926,12 +1117,10 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
     sens_info = (meta.get("canales") or {}).get(canal) or {}
     sensor = nombre_corto_sensor(sens_info.get("sensor"), canal)
 
-    cap = capturar(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado)
-    n_total = cap["t_peak"].size
-    excl_set = set(excluidos or [])
-    activos = [i for i in range(n_total) if i not in excl_set]
+    cap = captura_editada(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado, ediciones=ediciones)
+    activos = list(range(cap["t_peak"].size))
 
-    segs, cuentas = contar_peaks(carpeta, canal, umbral, dist_us, tmin, excluidos=excl_set,
+    segs, cuentas = contar_peaks(carpeta, canal, umbral, dist_us, tmin, ediciones=ediciones,
                                  filtrado=filtrado)
     cuentas_arr = np.asarray(cuentas)
     if cuentas_arr.size > 0:
@@ -1394,12 +1583,12 @@ def _dibujar_impulso_ch1(fig, carpeta, fila):
 
 
 def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="vmax",
-                   t_abs=None, t10_ref=None, t_lag_us=0.0, calibrado=False, excluidos=None):
+                   t_abs=None, t10_ref=None, t_lag_us=0.0, calibrado=False):
     # Peaks SIEMPRE como curva 0 (la selección mapea por pointNumber o customdata).
-    # La referencia CH1 y el resaltado van como trazas extra.
+    # La referencia CH1 y el resaltado van como trazas extra. `cap` es la captura
+    # editada: los peaks quitados ya no están y los manuales (origen 1) son rombos.
     n = cap["t_peak"].size
-    excl_set = set(excluidos or [])
-    activos = [i for i in range(n) if i not in excl_set]
+    activos = list(range(n))
 
     fig = go.Figure()
     es_vpp = (modo == "vpp")
@@ -1420,10 +1609,13 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
     y_act = y_val[activos] if n > 0 else np.array([])
     cd_act = cd[activos] if cd is not None else None
 
+    origen = np.asarray(cap.get("origen", np.zeros(n, dtype=int)))
+    manual = origen.size == n and bool(np.any(origen == 1))
     fig.add_trace(go.Scattergl(
         x=x_act, y=y_act, mode="markers", name=traza_nombre,
         customdata=cd_act,
-        marker=dict(color=tema.SCATTER_PUNTOS, size=6, opacity=0.6),
+        marker=dict(color=tema.SCATTER_PUNTOS, size=6, opacity=0.6,
+                    symbol=np.where(origen == 1, "diamond", "circle").tolist() if manual else "circle"),
         hovertemplate="t_abs=%{x:.4f} µs (%{customdata[4]:.2f} ns)<br>t_osc=%{customdata[2]:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<br>Seg %{customdata[3]:.0f}<extra>" + canal.upper() + "</extra>",
     ))
     if t_ref is not None and v_ref is not None and v_ref.size:
@@ -1440,7 +1632,7 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
                                    opacity=0.6, hovertemplate=htmpl))
         fig.add_vline(x=0, line=dict(color=tema.LINEA_T10, width=1, dash="dot"),
                       annotation_text="t10", annotation_position="top")
-    h = [i for i in (highlight or []) if 0 <= i < n and i not in excl_set]
+    h = [i for i in (highlight or []) if 0 <= i < n]
     if h and y_val.size > 0:
         fig.add_trace(go.Scattergl(
             x=x[h], y=y_val[h], mode="markers", name="sel",
@@ -1468,7 +1660,10 @@ app.layout = html.Div(
         dcc.Store(id="rango_x"),            # zoom vigente del gráfico de señales
         dcc.Store(id="captura_params"),
         dcc.Store(id="seleccion", data=[]),
-        dcc.Store(id="descargas_excluidas", data={}, storage_type="local"),
+        # Ediciones manuales de peaks de la medición ({"carpeta", "canales": {ch: {"historial"}}});
+        # se leen y escriben en metadata.yaml (ediciones_peaks).
+        dcc.Store(id="ediciones_peaks"),
+        dcc.Store(id="marca_peak"),         # marca temporal {carpeta, canal, seg, t_us}
         dcc.Store(id="densidad_store", data=[], storage_type="local"),
         dcc.Store(id="ultima_carpeta", storage_type="local"),
         dcc.Store(id="calibracion_store"),
@@ -1709,6 +1904,36 @@ app.layout = html.Div(
                                 dcc.Tab(label="Transformada S", value="st", **_TAB),
                             ]),
                             html.Div(id="panel_senales", children=[
+                                html.Div(
+                                    className="barra-ediciones",
+                                    style={
+                                        "display": "flex", "alignItems": "center", "gap": "6px",
+                                        "padding": "6px 8px", "backgroundColor": tema.BG,
+                                        "borderBottom": f"1px solid {tema.BORDER}", "marginBottom": "4px",
+                                        "flexWrap": "wrap",
+                                    },
+                                    title="Clic sobre la señal del canal activo para poner la marca (se ajusta "
+                                          "al máximo en ±10 ns); clic en una cruz para seleccionar un peak.",
+                                    children=[
+                                        html.Span("Marca t [µs]:", style={"fontSize": "11px", "fontWeight": "bold", "color": tema.INK}),
+                                        dcc.Input(id="input_marca_t", type="number", step="any", debounce=True,
+                                                  placeholder="clic en la señal",
+                                                  style={"width": "110px", "fontSize": "11px", "padding": "3px 5px",
+                                                         "borderRadius": "4px", "border": f"1px solid {tema.BORDER}"}),
+                                        html.Button("Añadir peak en la marca", id="btn_anadir_peak", n_clicks=0, disabled=True,
+                                                    style=tema.ESTILO_BOTON_SUCCESS),
+                                        html.Button("Quitar peak", id="btn_quitar_peak", n_clicks=0, disabled=True,
+                                                    style=tema.ESTILO_BOTON_DANGER),
+                                        html.Button("Deshacer", id="btn_deshacer_edicion", n_clicks=0, disabled=True,
+                                                    style=tema.ESTILO_BOTON_WARN),
+                                        html.Button("Restaurar todo", id="btn_restaurar_ediciones", n_clicks=0, disabled=True,
+                                                    style=tema.ESTILO_BOTON_SECONDARY),
+                                        html.Span(id="aviso_ediciones",
+                                                  style={"fontSize": "11px", "color": tema.ERROR}),
+                                        html.Span(id="badge_ediciones",
+                                                  style={"fontSize": "11px", "color": tema.MUTED, "fontWeight": "600", "marginLeft": "auto"}),
+                                    ],
+                                ),
                                 dcc.Loading(type="circle", delay_show=300, color=tema.ACCENT, children=dcc.Graph(
                                     id="grafico",
                                     # Solo las shapes con editable=True (umbrales) se arrastran;
@@ -2195,10 +2420,12 @@ def sincronizar_parametros_sensores(carpeta, relayout, sw_filtros=("on",)):
     Input("dist_ch4", "value"),
     Input("tmin_ch4", "value"),
     Input("switch_filtros", "value"),
+    Input("ediciones_peaks", "data"),
+    Input("marca_peak", "data"),
     State("rango_x", "data"),
 )
 def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_filtros=("on",),
-               rango=None):
+               store_ed=None, marca=None, rango=None):
     if not carpeta or not seg:
         return _fig_vacia("Seleccione una medición con el botón 📁 para ver sus señales.", altura=850)
     filtrado = _filtrado(sw_filtros)
@@ -2207,10 +2434,10 @@ def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_fi
     if (p and p["canal"] == canal and p["carpeta"] == carpeta
             and p.get("filtrado", True) == filtrado
             and _captura_vigente(p, cfg_sensores.get(canal, {}))):
-        cap = capturar(carpeta, canal, p["umbral"], p["dist"], p["tmin"], filtrado=filtrado)
+        cap = _cap_p(p, _ed(store_ed, carpeta, canal))
     try:
         return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap,
-                      filtrado=filtrado, rango_x=_rango_vigente(rango, carpeta, canal))
+                      filtrado=filtrado, rango_x=_rango_vigente(rango, carpeta, canal), marca=marca)
     except Exception as e:
         return _fig_error("No se pudo dibujar las señales", e, altura=850)
 
@@ -2439,14 +2666,13 @@ def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4, 
 @app.callback(
     Output("grafico_peaks", "figure"),
     Input("captura_params", "data"),
-    Input("descargas_excluidas", "data"),
+    Input("ediciones_peaks", "data"),
 )
-def calcular_peaks(p, excl_dict):
+def calcular_peaks(p, store):
     if not p:
         return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.", altura=415)
-    key = f"{p['carpeta']}|{p['canal']}"
-    excl = _obtener_excluidos(excl_dict, key)
-    segs, cuentas = contar_peaks(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], excluidos=excl,
+    segs, cuentas = contar_peaks(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"],
+                                 ediciones=_ed(store, p["carpeta"], p["canal"]),
                                  filtrado=p.get("filtrado", True))
     if not segs:
         return _fig_vacia(f"{p['canal'].upper()} no disponible en esta medición", altura=415)
@@ -2608,7 +2834,7 @@ def badges_calibracion(cal):
     Input("captura_params", "data"),
     Input("btn_calc_todos_sensores", "n_clicks"),
     Input("btn_limpiar_densidad", "n_clicks"),
-    Input("descargas_excluidas", "data"),
+    Input("ediciones_peaks", "data"),
     State("densidad_store", "data"),
     State("umbral_ch2", "value"),
     State("dist_ch2", "value"),
@@ -2624,7 +2850,7 @@ def badges_calibracion(cal):
     prevent_initial_call=True,
     running=[(Output("btn_calc_todos_sensores", "disabled"), True, False)],
 )
-def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
+def actualizar_densidad_store(p, n_todos, n_limpiar, store_ed, data_actual,
                               u2, d2, t2, u3, d3, t3, u4, d4, t4, cal_store, tab="estadistica"):
     """Filas de la tabla de Estadística. La fila de la captura vigente solo se
     calcula con la pestaña Estadística visible (al entrar en ella se pone al día)."""
@@ -2634,7 +2860,7 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
         trig = None
     if trig == "btn_limpiar_densidad":
         return []
-    if tab != "estadistica" and trig in ("captura_params", "descargas_excluidas", "tabs_principal"):
+    if tab != "estadistica" and trig in ("captura_params", "ediciones_peaks", "tabs_principal"):
         return no_update
 
     filas = list(data_actual) if data_actual else []
@@ -2650,7 +2876,6 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
         "ch3": {"umbral": u3, "dist": d3, "tmin": t3},
         "ch4": {"umbral": u4, "dist": d4, "tmin": t4},
     }
-    excl_dict = excl_dict or {}
 
     if trig == "btn_calc_todos_sensores" and p:
         carpeta = p["carpeta"]
@@ -2664,17 +2889,17 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, excl_dict, data_actual,
                 dist_ch = cfg_ch.get("dist") or DIST_DEFECTO_US
                 tmin_ch = cfg_ch.get("tmin") if cfg_ch.get("tmin") is not None else TMIN_DEFECTO_US
                 t_lag = lag_canal(cal_store, carpeta, ch)
-                excl_ch = _obtener_excluidos(excl_dict, f"{carpeta}|{ch}")
                 f = calcular_fila_densidad(carpeta, ch, float(u_ch), float(dist_ch), float(tmin_ch),
-                                           t_lag_us=t_lag, excluidos=excl_ch, filtrado=p.get("filtrado", True))
+                                           t_lag_us=t_lag, ediciones=_ed(store_ed, carpeta, ch),
+                                           filtrado=p.get("filtrado", True))
                 _upsert(f)
         return filas
 
-    if trig in ("captura_params", "descargas_excluidas", "tabs_principal") and p:
+    if trig in ("captura_params", "ediciones_peaks", "tabs_principal") and p:
         t_lag = lag_canal(cal_store, p["carpeta"], p["canal"])
-        excl_ch = _obtener_excluidos(excl_dict, f"{p['carpeta']}|{p['canal']}")
         f = calcular_fila_densidad(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"],
-                                   t_lag_us=t_lag, excluidos=excl_ch, filtrado=p.get("filtrado", True))
+                                   t_lag_us=t_lag, ediciones=_ed(store_ed, p["carpeta"], p["canal"]),
+                                   filtrado=p.get("filtrado", True))
         _upsert(f)
         return filas
 
@@ -2857,130 +3082,193 @@ def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, n_guardar_diam,
     )
 
 
+def _ed(store, carpeta, canal):
+    """Ediciones del canal: del store si corresponde a la medición, si no del YAML."""
+    if store and store.get("carpeta") == carpeta:
+        return (store.get("canales") or {}).get(canal) or {"historial": []}
+    return ediciones_canal(carpeta, canal) if carpeta else {"historial": []}
+
+
+@app.callback(
+    Output("ediciones_peaks", "data", allow_duplicate=True),
+    Input("carpeta", "value"),
+    prevent_initial_call="initial_duplicate",
+)
+def cargar_ediciones(carpeta):
+    """Ediciones manuales de peaks de la medición (metadata.yaml: ediciones_peaks)."""
+    if not carpeta:
+        return None
+    return {"carpeta": carpeta, "canales": ediciones_medicion(carpeta)}
+
+
+@app.callback(
+    Output("marca_peak", "data"),
+    Output("input_marca_t", "value"),
+    Input("grafico", "clickData"),
+    Input("input_marca_t", "value"),
+    Input("carpeta", "value"),
+    Input("canal", "value"),
+    Input("segmento", "value"),
+    State("switch_filtros", "value"),
+    State("marca_peak", "data"),
+)
+def fijar_marca(click, t_txt, carpeta, canal, seg, sw_filtros=("on",), marca=None):
+    """Marca temporal para añadir un peak: clic sobre la señal del canal activo
+    (ajustado al máximo en ±SNAP_MARCA_US) o valor escrito en el campo t."""
+    trig = ctx.triggered_id if ctx.triggered else None
+    if trig in ("carpeta", "canal", "segmento") or not carpeta or not seg:
+        return None, None
+    if trig == "input_marca_t":
+        if t_txt is None:
+            return None, no_update
+        if marca and marca.get("t_us") is not None and abs(float(marca["t_us"]) - float(t_txt)) < 1e-9:
+            return no_update, no_update
+        return {"carpeta": carpeta, "canal": canal, "seg": int(seg), "t_us": float(t_txt)}, no_update
+    if trig != "grafico" or not click or not click.get("points"):
+        return no_update, no_update
+    pt = click["points"][0]
+    if pt.get("customdata") is not None:
+        return no_update, no_update          # cruz de peak: la gestiona la selección
+    sig = _canales_senal(carpeta)
+    if canal not in sig or pt.get("curveNumber") != sig.index(canal) or pt.get("x") is None:
+        return no_update, no_update          # clic sobre otro canal
+    r = ajustar_a_peak(carpeta, canal, int(seg), float(pt["x"]), SNAP_MARCA_US, _filtrado(sw_filtros))
+    if r is None:
+        return no_update, no_update
+    t = round(r[0], 6)
+    return {"carpeta": carpeta, "canal": canal, "seg": int(seg), "t_us": t}, t
+
+
 @app.callback(
     Output("seleccion", "data"),
     Input("captura_params", "data"),
     Input("grafico_scatter", "selectedData"),
     Input("grafico_scatter", "clickData"),
     Input("grafico", "clickData"),
-    Input("btn_excluir_seleccion", "n_clicks"),
-    Input("btn_deshacer_exclusion", "n_clicks"),
-    Input("btn_restaurar_descargas", "n_clicks"),
-    Input("btn_excluir_disparo", "n_clicks"),
-    Input("input_excluir_disparo", "n_submit"),
+    Input("ediciones_peaks", "data"),
     State("captura_params", "data"),
-    State("descargas_excluidas", "data"),
 )
-def set_seleccion(_cap_in, sel_pk, click_pk, click_g, n_exc, n_undo, n_res, n_disp, n_sub, p, excl_dict):
-    """Fuente única de la selección (índices globales de ventana). La alimentan
-    los clics/cajas del scatter TRPD y los clics en las cruces del canal
-    trigger. Una nueva captura o acción de exclusión/restauración/deshacer la limpian; los reset a None (por redibujo) se
-    ignoran para no romper el ciclo."""
+def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p):
+    """Fuente única de la selección (índices de la captura editada). La alimentan
+    los clics/cajas del scatter TRPD y los clics en las cruces del canal trigger.
+    Una nueva captura o cualquier edición de peaks la limpian; los reset a None
+    (por redibujo) se ignoran para no romper el ciclo."""
     trg = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-    if (trg.startswith("captura_params") or
-            trg.startswith("btn_excluir_seleccion") or
-            trg.startswith("btn_deshacer_exclusion") or
-            trg.startswith("btn_restaurar_descargas") or
-            trg.startswith("btn_excluir_disparo") or
-            trg.startswith("input_excluir_disparo")):
-        return []  # limpiar selección
+    if trg.startswith("captura_params") or trg.startswith("ediciones_peaks"):
+        return []  # los índices cambian: limpiar selección
     if not p:
         return no_update
-    n = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))["W"].shape[0]
-    key = f"{p['carpeta']}|{p['canal']}"
-    excl = set(_obtener_excluidos(excl_dict, key))
-    activos = [i for i in range(n) if i not in excl]
+    n = _cap_p(p, _ed(store_ed, p["carpeta"], p["canal"]))["t_peak"].size
 
     if trg == "grafico.clickData":            # cruces del trigger (customdata)
         idx = _idx_cruces(click_g, n)
     elif trg == "grafico_scatter.selectedData":
-        idx = _idx_scatter(sel_pk, n, activos=activos)
+        idx = _idx_scatter(sel_pk, n)
     elif trg == "grafico_scatter.clickData":
-        idx = _idx_scatter(click_pk, n, activos=activos)
+        idx = _idx_scatter(click_pk, n)
     else:
         idx = None
     # None = reset por redibujo o clic sin punto válido: no cambiar la selección.
     return no_update if idx is None else idx
 
 
+def _puntos(cap, indices):
+    """[{seg, t_us}] de los índices de una captura (para el historial de ediciones)."""
+    return [{"seg": int(cap["seg"][i]), "t_us": round(float(cap["t_peak"][i]), 6)}
+            for i in sorted(set(int(i) for i in indices)) if 0 <= i < cap["t_peak"].size]
+
+
 @app.callback(
-    Output("descargas_excluidas", "data"),
+    Output("ediciones_peaks", "data"),
     Output("input_excluir_disparo", "value"),
+    Output("aviso_ediciones", "children"),
     Input("btn_excluir_seleccion", "n_clicks"),
     Input("btn_deshacer_exclusion", "n_clicks"),
     Input("btn_restaurar_descargas", "n_clicks"),
     Input("btn_excluir_disparo", "n_clicks"),
     Input("input_excluir_disparo", "n_submit"),
+    Input("btn_anadir_peak", "n_clicks"),
+    Input("btn_quitar_peak", "n_clicks"),
+    Input("btn_deshacer_edicion", "n_clicks"),
+    Input("btn_restaurar_ediciones", "n_clicks"),
     State("seleccion", "data"),
     State("input_excluir_disparo", "value"),
-    State("descargas_excluidas", "data"),
+    State("ediciones_peaks", "data"),
     State("captura_params", "data"),
+    State("marca_peak", "data"),
     prevent_initial_call=True,
 )
-def gestionar_exclusiones_descargas(n_exc, n_undo, n_res, n_disp, n_sub,
-                                    sel, val_disparo, excl_dict, p):
-    try:
-        trig = ctx.triggered_id
-    except Exception:
-        trig = None
+def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit, n_undo2, n_res2,
+                              sel, val_disparo, store, p, marca=None):
+    """Añadir/quitar peaks, excluir disparos, deshacer y restaurar. Cada acción es un
+    paso del historial del canal (en tiempo, no en índices) que se guarda en
+    metadata.yaml, así sobrevive a cambios de umbral, Δt, t_mín y filtros."""
+    trig = ctx.triggered_id if ctx.triggered else None
     if not p:
-        return no_update, no_update
+        return no_update, no_update, "Pulse «Calcular peaks» antes de editar."
+    carpeta, canal = p["carpeta"], p["canal"]
+    ed = _ed(store, carpeta, canal)
+    hist = [dict(h) for h in ed.get("historial") or []]
+    cap = _cap_p(p, ed)
+    paso, limpiar_input = None, no_update
 
-    excl_dict = dict(excl_dict) if isinstance(excl_dict, dict) else {}
-    key = f"{p['carpeta']}|{p['canal']}"
+    if trig in ("btn_excluir_seleccion", "btn_quitar_peak"):
+        idx = list(sel or [])
+        if not idx and trig == "btn_quitar_peak" and marca and marca.get("carpeta") == carpeta \
+                and marca.get("canal") == canal and marca.get("t_us") is not None:
+            cerca = np.nonzero((cap["seg"] == int(marca["seg"])) &
+                               (np.abs(cap["t_peak"] - float(marca["t_us"])) <= SNAP_MARCA_US))[0]
+            if cerca.size:
+                idx = [int(cerca[np.argmin(np.abs(cap["t_peak"][cerca] - float(marca["t_us"])))])]
+        pts = _puntos(cap, idx)
+        if not pts:
+            return no_update, no_update, "Seleccione un peak (cruz o punto del TRPD) o ponga la marca sobre él."
+        paso = {"accion": "quitar", "puntos": pts,
+                "desc": f"{len(pts)} descarga{'s' if len(pts) != 1 else ''}"}
 
-    curr_excl = list(_obtener_excluidos(excl_dict, key))
-    curr_hist = [dict(h) for h in _obtener_historial(excl_dict, key)]
+    elif trig in ("btn_excluir_disparo", "input_excluir_disparo"):
+        segs = parsear_lista_disparos(val_disparo, n_segmentos(carpeta))
+        limpiar_input = ""
+        if not segs:
+            return no_update, "", "Disparo no válido."
+        paso = {"accion": "quitar_disparo", "segs": segs, "desc": f"Disparo(s) {segs}"}
 
-    if trig == "btn_excluir_seleccion" and sel:
-        ya = set(curr_excl)
-        nuevos = [int(i) for i in sel if i not in ya]
-        if nuevos:
-            curr_hist.append({"tipo": "lazo", "indices": nuevos, "desc": f"{len(nuevos)} descargas"})
-            curr_excl = sorted(set(curr_excl).union(nuevos))
-            excl_dict[key] = {"excluidos": curr_excl, "historial": curr_hist}
-            return excl_dict, no_update
-        return no_update, no_update
+    elif trig == "btn_anadir_peak":
+        if not marca or marca.get("carpeta") != carpeta or marca.get("canal") != canal \
+                or marca.get("t_us") is None:
+            return no_update, no_update, "Ponga primero la marca sobre la señal del canal activo."
+        r = ajustar_a_peak(carpeta, canal, int(marca["seg"]), float(marca["t_us"]), SNAP_MARCA_US,
+                           p.get("filtrado", True))
+        if r is None:
+            return no_update, no_update, "La marca está fuera de la señal."
+        paso = {"accion": "anadir", "puntos": [{"seg": int(marca["seg"]), "t_us": round(r[0], 6)}],
+                "desc": f"Peak manual seg {int(marca['seg'])}"}
+        if _cap_p(p, {"historial": hist + [paso]})["omitidos"] > cap["omitidos"]:
+            return no_update, no_update, "No se añadió: la ventana de 70 ns no cabe en la señal."
 
-    if trig in ("btn_excluir_disparo", "input_excluir_disparo"):
-        cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
-        n_segs = n_segmentos(p["carpeta"])
-        segs = parsear_lista_disparos(val_disparo, n_segs)
-        if segs and cap["seg"].size:
-            segs_set = set(segs)
-            indices_segs = [int(i) for i, s in enumerate(cap["seg"]) if s in segs_set]
-            ya = set(curr_excl)
-            nuevos = [i for i in indices_segs if i not in ya]
-            if nuevos:
-                curr_hist.append({
-                    "tipo": "disparo",
-                    "segs": segs,
-                    "indices": nuevos,
-                    "desc": f"Disparo(s) {segs} ({len(nuevos)} peaks)"
-                })
-                curr_excl = sorted(set(curr_excl).union(nuevos))
-                excl_dict[key] = {"excluidos": curr_excl, "historial": curr_hist}
-                return excl_dict, ""
-        return no_update, ""
+    elif trig in ("btn_deshacer_exclusion", "btn_deshacer_edicion"):
+        if not hist:
+            return no_update, no_update, ""
+        hist.pop()
 
-    if trig == "btn_deshacer_exclusion":
-        if curr_hist:
-            curr_hist.pop()
-            reconstruidos = set()
-            for paso in curr_hist:
-                reconstruidos.update(paso.get("indices", []))
-            curr_excl = sorted(reconstruidos)
-            excl_dict[key] = {"excluidos": curr_excl, "historial": curr_hist}
-            return excl_dict, no_update
-        return no_update, no_update
+    elif trig in ("btn_restaurar_descargas", "btn_restaurar_ediciones"):
+        if not hist:
+            return no_update, no_update, ""
+        hist = []
+    else:
+        return no_update, no_update, no_update
 
-    if trig == "btn_restaurar_descargas":
-        if curr_excl or curr_hist:
-            excl_dict[key] = {"excluidos": [], "historial": []}
-            return excl_dict, no_update
-        return excl_dict, no_update
-
-    return no_update, no_update
+    if paso is not None:
+        hist.append(paso)
+    ok, msg = guardar_ediciones_canal(carpeta, canal, {"historial": hist})
+    if not ok:
+        return no_update, limpiar_input, f"No se guardaron las ediciones: {msg}"
+    if (store or {}).get("carpeta") == carpeta:
+        canales = dict(store.get("canales") or {})
+    else:
+        canales = ediciones_medicion(carpeta)
+    canales[canal] = {"historial": hist}
+    return {"carpeta": carpeta, "canales": canales}, limpiar_input, ""
 
 
 @app.callback(
@@ -2989,34 +3277,44 @@ def gestionar_exclusiones_descargas(n_exc, n_undo, n_res, n_disp, n_sub,
     Output("btn_deshacer_exclusion", "disabled"),
     Output("btn_restaurar_descargas", "disabled"),
     Output("badge_filtro_descargas", "children"),
+    Output("btn_anadir_peak", "disabled"),
+    Output("btn_quitar_peak", "disabled"),
+    Output("btn_deshacer_edicion", "disabled"),
+    Output("btn_restaurar_ediciones", "disabled"),
+    Output("badge_ediciones", "children"),
     Input("seleccion", "data"),
-    Input("descargas_excluidas", "data"),
+    Input("ediciones_peaks", "data"),
     Input("captura_params", "data"),
+    Input("marca_peak", "data"),
 )
-def actualizar_badge_filtro(sel, excl_dict, p):
+def actualizar_badge_filtro(sel, store, p, marca=None):
     if not p:
-        return True, "Quitar selección", True, True, ""
+        return True, "Quitar selección", True, True, "", True, True, True, True, ""
+    ed = _ed(store, p["carpeta"], p["canal"])
+    hist = ed.get("historial") or []
+    cap = _cap_p(p, ed)
+    n_act = cap["t_peak"].size
+    n_quit = len(cap.get("quitados_vis") or [])
+    n_man = int(np.sum(np.asarray(cap.get("origen", [])) == 1))
+    n_disp = len(estado_ediciones(ed)["disparos"])
     n_sel = len(sel) if sel else 0
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
-    n_total = cap["t_peak"].size
-    key = f"{p['carpeta']}|{p['canal']}"
-    excl = set(_obtener_excluidos(excl_dict, key))
-    hist = _obtener_historial(excl_dict, key)
-    n_excl = len(excl.intersection(range(n_total)))
-    n_act = max(0, n_total - n_excl)
 
     btn_txt = f"Quitar {n_sel} seleccionada{'s' if n_sel != 1 else ''}" if n_sel > 0 else "Quitar selección"
-    btn_disabled = (n_sel == 0)
-    btn_undo_disabled = (len(hist) == 0)
-    btn_reset_disabled = (n_excl == 0 and len(hist) == 0)
+    sin_hist = len(hist) == 0
+    hay_marca = bool(marca and marca.get("carpeta") == p["carpeta"] and marca.get("canal") == p["canal"]
+                     and marca.get("t_us") is not None)
 
-    if n_excl > 0:
-        pasos_txt = f" en {len(hist)} paso{'s' if len(hist) != 1 else ''}" if len(hist) > 1 else ""
-        badge = f"{n_act}/{n_total} activas ({n_excl} excluida{'s' if n_excl != 1 else ''}{pasos_txt})"
-    else:
-        badge = f"{n_total} descargas activas"
+    detalle = [f"{n_quit} quitada{'s' if n_quit != 1 else ''}"] if n_quit else []
+    if n_man:
+        detalle.append(f"{n_man} manual{'es' if n_man != 1 else ''}")
+    badge = f"{n_act} descargas activas" + (f" ({', '.join(detalle)})" if detalle else "")
+    partes = [f"{n_man} añadido{'s' if n_man != 1 else ''}", f"{n_quit} quitado{'s' if n_quit != 1 else ''}"]
+    if n_disp:
+        partes.append(f"{n_disp} disparo{'s' if n_disp != 1 else ''} excluido{'s' if n_disp != 1 else ''}")
+    badge_ed = " · ".join(partes) if hist else "Sin ediciones manuales"
 
-    return btn_disabled, btn_txt, btn_undo_disabled, btn_reset_disabled, badge
+    return (n_sel == 0, btn_txt, sin_hist, sin_hist, badge,
+            not hay_marca, not (n_sel or hay_marca), sin_hist, sin_hist, badge_ed)
 
 
 @app.callback(
@@ -3025,14 +3323,15 @@ def actualizar_badge_filtro(sel, excl_dict, p):
     Input("seleccion", "data"),
     Input("modo_magnitud_trpd", "value"),
     Input("calibracion_store", "data"),
-    Input("descargas_excluidas", "data"),
+    Input("ediciones_peaks", "data"),
 )
-def actualizar_scatter(p, sel, modo_trpd, cal, excl_dict):
-    """Scatter de Patrón TRPD, con los puntos seleccionados en
+def actualizar_scatter(p, sel, modo_trpd, cal, store):
+    """Scatter de Patrón TRPD (captura editada), con los puntos seleccionados
     resaltados (venga la selección del scatter o de las cruces del trigger)."""
     if not p:
         return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.", altura=415)
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
+    ed = _ed(store, p["carpeta"], p["canal"])
+    cap = _cap_p(p, ed)
     t_ref, v_ref = promedio_impulso(p["carpeta"])
     modo = modo_trpd or "vmax"
     t_lag = lag_canal(cal, p["carpeta"], p["canal"])
@@ -3040,15 +3339,12 @@ def actualizar_scatter(p, sel, modo_trpd, cal, excl_dict):
     T = tiempos_impulso(p["carpeta"])
     t10_ref = T["t10"] if T else None
     calibrado = bool(cal and cal.get("carpeta") == p["carpeta"] and cal.get("canales", {}).get(p["canal"], {}).get("calibrado"))
-    key = f"{p['carpeta']}|{p['canal']}"
-    excl = _obtener_excluidos(excl_dict, key)
     # uirevision estable dentro de una captura: al pintar el amarillo no se
-    # pierde zoom ni la caja de selección; cambia al hacer una captura nueva, cambiar modo o exclusiones.
-    rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}|{len(excl)}"
+    # pierde zoom ni la caja de selección; cambia con otra captura, modo o ediciones.
+    rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}|{len(ed.get('historial') or [])}"
     try:
         return figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo,
-                              t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado,
-                              excluidos=excl)
+                              t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado)
     except Exception as e:
         return _fig_error("No se pudo dibujar el patrón TRPD", e, altura=415)
 
@@ -3058,12 +3354,13 @@ def actualizar_scatter(p, sel, modo_trpd, cal, excl_dict):
     Output("grafico_fft", "figure"),
     Input("seleccion", "data"),
     Input("captura_params", "data"),
+    State("ediciones_peaks", "data"),
 )
-def actualizar_temporal(sel, p):
+def actualizar_temporal(sel, p, store=None):
     """Ventanas y FFT de SOLO las señales seleccionadas (store `seleccion`)."""
     if not p:
         return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición."), _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.")
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
+    cap = _cap_p(p, _ed(store, p["carpeta"], p["canal"]))
     sel = sel or []
     return figura_ventanas(cap, sel, p["canal"]), figura_fft(cap, sel, p["canal"])
 
@@ -3074,15 +3371,16 @@ def actualizar_temporal(sel, p):
     Input("tabs_espectro", "value"),
     Input("st_fmax", "value"),
     Input("captura_params", "data"),
+    State("ediciones_peaks", "data"),
 )
-def actualizar_st_ventana(sel, tab, fmax, p):
+def actualizar_st_ventana(sel, tab, fmax, p, store=None):
     """Transformada S de la ventana de 70 ns (solo si su pestaña está visible),
     promediando SOLO las señales seleccionadas (store `seleccion`)."""
     if tab != "st":
         return no_update
     if not p:
         return _fig_vacia("Pulse «Calcular peaks» para analizar las descargas de esta medición.")
-    cap = capturar(p["carpeta"], p["canal"], p["umbral"], p["dist"], p["tmin"], filtrado=p.get("filtrado", True))
+    cap = _cap_p(p, _ed(store, p["carpeta"], p["canal"]))
     return figura_st_ventana(cap, sel or [], p["canal"], fmax or ST_FMAX_MHZ)
 
 

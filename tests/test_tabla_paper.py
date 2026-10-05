@@ -53,8 +53,10 @@ def test_fila_sin_coincidencias(monkeypatch):
 
 def test_fila_respeta_excluidos(monkeypatch):
     _parchear(monkeypatch, _cap_sintetica(), META_VIEJA)
-    # Excluir una descarga del seg 2 -> ese disparo pasa a 2 peaks
-    f = app.calcular_fila_densidad(CARPETA, "ch3", 1.0, 1.0, 0.0, excluidos=[3])
+    app._CAPTURA_EDITADA_CACHE.clear()
+    # Quitar la descarga de t = 4 µs del seg 2 -> ese disparo pasa a 2 peaks
+    ed = {"historial": [{"accion": "quitar", "puntos": [{"seg": 2, "t_us": 4.0}]}]}
+    f = app.calcular_fila_densidad(CARPETA, "ch3", 1.0, 1.0, 0.0, ediciones=ed)
     assert f["n_coinc"] == "1"
     assert f["vpp_media"] == "0.200"
 

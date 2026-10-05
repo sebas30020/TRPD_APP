@@ -459,6 +459,50 @@ cruces del gráfico principal) derivan de ese snapshot vía `capturar`.
   HDF5 ni invalidar la matriz de formas de onda $W$, la FFT, la Transformada S o la
   selección activa de eventos.
 
+### 4b. Edición manual de peaks (marca temporal)
+
+Cuando un ajuste del trigger arregla un peak pero estropea otro, los peaks se pueden
+**añadir** o **quitar a mano**. Las ediciones se guardan como **(disparo, t)** en tiempo
+del osciloscopio, **no como índices**, así que se reaplican igual al cambiar umbral, Δt,
+t_mín o el interruptor de filtros (plan: `archivos_md/plan_peaks_manuales.md`).
+
+- **Persistencia** en `metadata.yaml`, sección `ediciones_peaks`, un historial por canal
+  (`ediciones_canal`, `ediciones_medicion`, `guardar_ediciones_canal`; reescribe el YAML con
+  `safe_dump` como al guardar diámetros, por lo que se pierden los comentarios):
+  ```yaml
+  ediciones_peaks:
+    ch4:
+      historial:
+      - {accion: anadir, puntos: [{seg: 18, t_us: -0.361867}], desc: Peak manual seg 18}
+      - {accion: quitar, puntos: [{seg: 18, t_us: 13.770533}], desc: 1 descarga}
+      - {accion: quitar_disparo, segs: [5], desc: 'Disparo(s) [5]'}
+  ```
+  `estado_ediciones` reproduce el historial: quitar un añadido lo saca de añadidos; añadir
+  sobre un quitado lo recupera. "Deshacer" quita el último paso; "Restaurar todo" vacía el
+  historial (y borra la clave del canal).
+- **Aplicación** (`aplicar_ediciones`, `captura_editada`; caché `_CAPTURA_EDITADA_CACHE`):
+  sobre la captura de `capturar` se quitan los peaks detectados a ≤ `TOL_PEAK_US` (5 ns) de un
+  quitado del mismo disparo y todos los de un disparo excluido; cada añadido se reajusta al
+  máximo de la señal en ±`RESNAP_US` (1 ns) y se le extrae su ventana de 70 ns (`vpp`, `W`,
+  `t10_seg`). Si ya hay un detectado a ≤ 5 ns no se duplica: queda **forzado** (sigue aunque un
+  trigger posterior no lo detecte). Un añadido cuya ventana no cabe se omite (`omitidos`).
+  La captura editada lleva además `origen` (0 detectado, 1 manual) y `quitados_vis`, y está
+  ordenada por (disparo, t). **Todos** los análisis la usan (`_cap_p`): barras, Estadística
+  (distribución N_PD, N_PD = N_cav, V̄_pp, t̄_abs), Patrón TRPD, ventanas, FFT y ST.
+- **Interfaz.** Barra encima del gráfico de señales:
+  - **Marca t [µs]** (`input_marca_t`): un clic sobre la señal del **canal activo** pone la marca
+    (línea discontinua), ajustada al máximo en ±`SNAP_MARCA_US` (10 ns); también se puede escribir.
+  - **Añadir peak en la marca** (`btn_anadir_peak`), **Quitar peak** (`btn_quitar_peak`: la
+    selección —clic en una cruz o en el TRPD— o, sin selección, el peak bajo la marca),
+    **Deshacer** y **Restaurar todo**; `badge_ediciones` resume añadidos/quitados/disparos y
+    `aviso_ediciones` muestra los errores (sin captura, sin marca, ventana que no cabe…).
+  - Los botones del Patrón TRPD ("Quitar selección", "Excluir" disparo, "Deshacer",
+    "Restaurar todo") escriben en el mismo historial.
+  - Dibujo: añadidos = **rombos**; quitados = cruces grises (no seleccionables); en el TRPD los
+    manuales son rombos en la curva 0 (el índice sigue en `customdata[5]`).
+- Las ediciones solo se ven con una captura vigente ("Calcular peaks"); en vista previa
+  (campos de trigger editados sin recalcular) las cruces son la detección automática.
+
 
 ---
 
@@ -522,8 +566,8 @@ fuente para el gráfico temporal, la FFT y el resaltado amarillo.
 
   **Promedio condicionado:** `V̄_pp` y `t̄_abs` se promedian solo sobre las descargas de los
   disparos con $N_{PD} = N_{cav}$ (criterio del paper); si no hay ninguno se muestra `-`. Si no
-  se conoce $N_{cav}$ se promedian todas las descargas activas. Las descargas excluidas
-  manualmente no participan. Filas ordenadas por nº de cavidades, tensión y canal.
+  se conoce $N_{cav}$ se promedian todas las descargas activas. Se calcula sobre la captura
+  editada: los peaks quitados no participan y los añadidos a mano sí (§4b). Filas ordenadas por nº de cavidades, tensión y canal.
   Botones **"Calcular todos los sensores (CH2..CH4)"**, **"Limpiar tabla"** y **"Exportar CSV"**
   (`btn_exportar_densidad` → `dcc.Download` `descarga_densidad`). Historial en `densidad_store`.
 - **Patrón TRPD** (`figura_scatter`): Dispone de selector de magnitud con dos modos:
@@ -737,15 +781,19 @@ Ver el análisis completo y las mediciones antes/después en `archivos_md/plan_r
 | `sincronizar_parametros_sensores` | `carpeta, grafico.relayoutData` | `umbral_ch{2,3,4}, dist_ch{2,3,4}, tmin_ch{2,3,4}` |
 | `redecimar_zoom` | `grafico.relayoutData` (+State carpeta, segmento, canal, switch_filtros) | `grafico.figure` (Patch), `rango_x.data` |
 | `recordar_carpeta` / `restaurar_carpeta` | `carpeta` / `ultima_carpeta.modified_timestamp` | `ultima_carpeta.data` / `carpeta.value/options`, `explorador_panel.hidden` |
-| `actualizar` | `carpeta, segmento, canal, captura_params` (+State 9 inputs sensores) | `grafico.figure` |
+| `actualizar` | `carpeta, segmento, canal, captura_params, ediciones_peaks, marca_peak` (+9 inputs sensores) | `grafico.figure` |
+| `cargar_ediciones` | `carpeta` | `ediciones_peaks.data` (desde metadata.yaml) |
+| `fijar_marca` | `grafico.clickData, input_marca_t.value, carpeta, canal, segmento` | `marca_peak.data, input_marca_t.value` |
+| `gestionar_ediciones_peaks` | botones de edición (barra de señales y Patrón TRPD) (+State seleccion, captura_params, marca_peak, ediciones_peaks) | `ediciones_peaks.data, input_excluir_disparo.value, aviso_ediciones.children` (y guarda metadata.yaml) |
+| `actualizar_badge_filtro` | `seleccion, ediciones_peaks, captura_params, marca_peak` | estado de los botones de edición, `badge_filtro_descargas`, `badge_ediciones` |
 | `fijar_captura` | `btn.n_clicks` (+State carpeta, canal, 9 inputs sensores) | `captura_params.data` |
-| `calcular_peaks` | `captura_params.data` | `grafico_peaks.figure` |
+| `calcular_peaks` | `captura_params.data, ediciones_peaks.data` | `grafico_peaks.figure` |
 | `actualizar_densidad_store` | `captura_params.data, btn_calc_todos_sensores.n_clicks, btn_limpiar_densidad.n_clicks, calibracion_store.data` (+State densidad_store, 9 inputs sensores) | `densidad_store.data` |
 | `sincronizar_tabla_densidad` | `densidad_store.data` | `tabla_densidad.children` |
 | `exportar_densidad` | `btn_exportar_densidad.n_clicks` (+State densidad_store) | `descarga_densidad.data` |
 | `actualizar_panel_metadata` | `carpeta, btn_guardar_metadata.n_clicks, btn_guardar_yaml_texto.n_clicks, calibracion_store.data` (+State meta_yaml_text) | Tarjetas, tabla canales y YAML de `panel_metadata` |
-| `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico_vpp_energia.selectedData, grafico_vpp_energia.clickData, grafico.clickData` (+State captura_params) | `seleccion.data` |
-| `actualizar_scatter` | `captura_params.data, seleccion.data, modo_magnitud_trpd.value, calibracion_store.data` | `grafico_scatter.figure, grafico_vpp_energia.figure` |
+| `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico.clickData, ediciones_peaks.data` (+State captura_params) | `seleccion.data` |
+| `actualizar_scatter` | `captura_params.data, seleccion.data, modo_magnitud_trpd.value, calibracion_store.data, ediciones_peaks.data` | `grafico_scatter.figure` |
 | `actualizar_temporal` | `seleccion.data` (+State `captura_params`) | `grafico_ventanas.figure, grafico_fft.figure` |
 | `alternar_panel_principal` | `tabs_principal.value` | `panel_senales.hidden, panel_st_segmento.hidden, panel_metadata.hidden` |
 | `actualizar_st_segmento` | `tabs_principal.value, carpeta, segmento, st_fmax` | `grafico_st_segmento.figure` |
@@ -784,7 +832,7 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
 - **Pestañas Principales (`tabs_principal`):**
   1. **Análisis (`value="senales"`):**
      - **Fila superior (2 columnas):**
-       - Columna izquierda: Pestañas de dominio (`tabs_dominio`) con sub-pestaña **Señales** (`panel_senales`, 4 filas ch1..ch4 con líneas de umbral interactivas) y **Transformada S** (`panel_st_segmento`, 4 mapas de calor de segmento completo).
+       - Columna izquierda: Pestañas de dominio (`tabs_dominio`) con sub-pestaña **Señales** (`panel_senales`: barra de edición manual de peaks (§4b) y 4 filas ch1..ch4 con líneas de umbral interactivas) y **Transformada S** (`panel_st_segmento`, 4 mapas de calor de segmento completo).
        - Columna derecha: Tarjeta superior con **Peaks por segmento** (`tabs_peaks`, `grafico_peaks`). Tarjeta inferior con **Patrón TRPD** (`tabs_scatter`, `grafico_scatter` en tiempo absoluto $t_{\text{abs}}$, selector de magnitud $V_{\max}$ / $V_{\text{pp}}$, controles de exclusión de descargas por lazo o disparo y badge de estado del filtro).
      - **Fila inferior (2 columnas):**
        - Columna izquierda: **Ventanas** (`figura_ventanas`), formas de onda ventaneadas (70 ns) superpuestas y alineadas en $t = 0$.
@@ -802,7 +850,8 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
 - **Stores de sesión en `app.py`:**
   - `captura_params`: snapshot de parámetros numéricos fijados al pulsar "Calcular peaks".
   - `seleccion`: índices globales de descargas activas seleccionadas interactivamente.
-  - `descargas_excluidas`: diccionario de exclusiones e historial por canal y medición.
+  - `ediciones_peaks`: ediciones manuales de peaks de la medición (`{carpeta, canales: {ch: {historial}}}`), reflejo de `metadata.yaml` (§4b).
+  - `marca_peak`: marca temporal para añadir un peak (`{carpeta, canal, seg, t_us}`).
   - `calibracion_store`: diccionario de retardo instrumental derivado de `metadata.yaml`.
   - `densidad_store`: conjunto acumulado de filas estadísticas para la tabla de densidad.
   - `explorador_ruta_actual`: ruta activa en el modal de exploración de carpetas de medición.
@@ -826,10 +875,13 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
 
 ### `generar_presentacion.py` — presentación de señales (PowerPoint)
 
-`python generar_presentacion.py [<raiz>] [--salida <ruta.pptx>] [--dpi 150] [--solo <texto>]`
+`python generar_presentacion.py [<raiz> ...] [--salida <ruta.pptx>] [--dpi 150] [--solo <texto>] [--crudo]`
 (dependencias aparte: `pip install -r requirements_reportes.txt`, python-pptx y matplotlib).
 
-- Por defecto lee `mediciones/med_proced_confuse` y escribe `reportes/senales_med_proced_confuse.pptx`.
+- Por defecto lee `mediciones/med_proced_confuse` y `mediciones/med_proced/1v_2mm_01` y escribe
+  `reportes/senales_med_proced_confuse.pptx`. Cada raíz puede ser una carpeta de probetas o una probeta.
+- Orden: nº de vacuolas y diámetros, luego tensión creciente (p. ej. `1v_2mm_01`, 11–16 kV, va antes que
+  `1v_2mm_0`, 17.5–20 kV). El set se muestra tal como está escrito en la carpeta (`01`).
 - Una diapositiva por disparo con 4 gráficos apilados: Impulso (CH1, V), HFCT (CH2), Antena 1 – cercana
   (CH3) y Antena 2 – lejana (CH4), en mV. Ventana -5…30 µs; CH2..CH4 con los mismos filtros que la app
   (`cargar_segmento(..., filtrado=True)`), CH1 sin filtrar. Escala vertical común a los disparos de cada medición.
@@ -837,7 +889,10 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
   `<probeta>/<X>kV` (`inferir_parametros`); subtítulo con probeta, set y ruta. Incluye portada, índice
   y un separador por medición.
 - `--solo "3v_2mm3mm4mm_1	kV"` genera solo las mediciones cuya ruta contiene ese texto (prueba rápida).
-- Con las 12 mediciones (224 disparos): 238 diapositivas, ~19 MB, ~4 min.
+- Con las 18 mediciones (314 disparos): 334 diapositivas, ~28 MB, ~5–6 min.
+- `--crudo`: misma presentación con las señales tal como las registró el osciloscopio (solo conversión
+  a tensión, ningún filtro en ningún canal; escalas verticales recalculadas sobre la señal cruda).
+  Salida por defecto `reportes/senales_med_proced_confuse_crudo.pptx`.
 
 - **`preprocesar.py`.** Filtro paso-alto Butterworth de fase cero (`sosfiltfilt`,
   **5 MHz**, orden 4) aplicado a cada segmento de `ch2.h5` (señal completa, no
