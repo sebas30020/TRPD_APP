@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisión TRPD</title>
+<link rel="stylesheet" href="assets/visor.css">
+<script src="assets/plotly.min.js"></script>
+<script src="data/indice.js"></script>
+</head>
+<body>
+<header class="barra">
+  <h1>Revisión TRPD <span class="sub">Antena 1 (CH3) + HFCT (CH2)</span></h1>
+  <div class="controles">
+    <label>Medición <select id="sel-medicion"></select></label>
+    <div class="seg-control" role="radiogroup" aria-label="Filtros">
+      <button type="button" data-estado="F" class="activo">Con filtros</button>
+      <button type="button" data-estado="C">Sin filtros</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="chk-cand" checked> Candidatos (≥ <span id="frac-cand"></span> umbral)</label>
+    <button type="button" id="btn-exportar" class="primario">Exportar revisión (<span id="n-marcas">0</span>)</button>
+  </div>
+</header>
+
+<main>
+  <section class="fila-sup">
+    <div class="mapas">
+      <div id="mapa-ch3" class="grafico mapa"></div>
+      <div id="mapa-ch2" class="grafico mapa"></div>
+    </div>
+    <aside class="lateral">
+      <div class="tarjeta">
+        <h2 id="titulo-med">—</h2>
+        <p id="params" class="nota"></p>
+        <table id="tabla1" class="tabla"></table>
+        <h3>Con filtros vs sin filtros</h3>
+        <table id="tabla-fc" class="tabla"></table>
+        <p class="nota">Relleno: también en el otro sensor · hueco: solo en este sensor · rombo: añadido a mano ·
+          gris: candidato bajo el umbral · ✕ rojo: marcado “no es DP” · aro verde: marcado “es DP”.</p>
+      </div>
+      <div class="tarjeta">
+        <h3>Revisión <span class="nota">(se guarda en este navegador)</span></h3>
+        <ul id="lista-marcas" class="marcas"></ul>
+        <button type="button" id="btn-borrar" class="secundario">Borrar todas las marcas</button>
+      </div>
+    </aside>
+  </section>
+
+  <section class="tarjeta">
+    <div class="nav">
+      <strong id="titulo-disparo">Disparo —</strong>
+      <button type="button" id="btn-seg-ant">◀ Disparo</button>
+      <select id="sel-disparo"></select>
+      <button type="button" id="btn-seg-sig">Disparo ▶</button>
+      <span class="sep"></span>
+      <button type="button" id="btn-pd-ant">◀ Punto</button>
+      <button type="button" id="btn-pd-sig">Punto ▶</button>
+      <span id="info-sel" class="nota"></span>
+    </div>
+    <div id="senales" class="grafico senales"></div>
+  </section>
+
+  <section class="fila-inf">
+    <div class="tarjeta det">
+      <h3>Detalle ± <span id="det-us"></span> µs <span class="nota">(clic en una traza de CH3 o CH2 = proponer “es DP” en ese instante)</span></h3>
+      <div id="detalle" class="grafico detalle"></div>
+    </div>
+    <div class="tarjeta">
+      <h3>Puntos del disparo</h3>
+      <table id="tabla-disparo" class="tabla"></table>
+    </div>
+  </section>
+  <p class="nota pie" id="pie"></p>
+</main>
+<script src="assets/visor.js"></script>
+</body>
+</html>

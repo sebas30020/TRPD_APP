@@ -922,6 +922,30 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
   `reportes/informe_trpd_ch3_ch2.pdf` combinado (Tabla 1 con una fila por sensor y una página por
   medición con los dos mapas, sus filas de la Tabla 1 y N_PD por disparo). Mediciones dudosas en
   `reportes/mediciones_a_revisar.txt`.
+- `calcular(raices, canales, umbrales, solo, propios, filtrado)` hace solo la detección y devuelve
+  `(descs, res, umbrales)`; `filtrado=False` detecta sobre la señal cruda. Cada resultado incluye
+  `candidatos` [(seg, t_osc, v)]: máximos entre `FRAC_CANDIDATO` (0.5) × umbral y el umbral (en CH2,
+  además, por encima de `SIGMAS_CANDIDATO` (6) σ del ruido del disparo).
+
+### `generar_reporte_html.py` — página HTML de revisión del TRPD (reporte2)
+
+`python generar_reporte_html.py [<raiz> ...] [--salida <dir>] [--solo <texto>]`
+(plan: `archivos_md/plan_reporte2_html_trpd.md`).
+
+- Llama dos veces a `generar_informe_trpd.calcular()` (con filtros y sin filtros) para CH3 y CH2 y
+  escribe en `reportes/reporte2/`: `index.html`, `assets/` (`plotly.min.js` copiado del entorno,
+  `visor.js`, `visor.css`, cuyas fuentes están en `TRPD_APP/reporte_html/`) y `data/` (`indice.js`
+  + `m<NN>.js` por medición, cargados con `<script>`: se abre con doble clic, sin servidor ni internet).
+- Página: mapas TRPD de CH3 y CH2 (relleno = también en el otro sensor, hueco = solo en ese,
+  gris = candidato); clic en un punto → las 4 señales del disparo (traza diezmada min-max) con
+  la descarga resaltada y un detalle ±0.25 µs a 0.2 ns de CH3, CH4, CH2 y CH2 − resonancia, con
+  umbrales. Interruptor con filtros / sin filtros, tabla de puntos del disparo, botones
+  "No es DP" / "Es DP" y clic en el detalle para proponer una descarga nueva. Las marcas se guardan
+  en el navegador (`localStorage`) y se exportan a `revision_trpd.json`:
+  `[{"id", "ruta", "titulo", "canal", "estado": "F"|"C", "accion": "quitar"|"anadir", "seg", "t_us"}]`.
+- `--aplicar revision_trpd.json [--respaldo <dir>]` añade esas marcas como pasos de
+  `ediciones_peaks.<canal>.historial` en el `metadata.yaml` de cada medición (respaldo previo en
+  `reportes/reporte2/respaldo_metadata/`); las ediciones se aplican igual con y sin filtros.
 
 - **`preprocesar.py`.** Filtro paso-alto Butterworth de fase cero (`sosfiltfilt`,
   **5 MHz**, orden 4) aplicado a cada segmento de `ch2.h5` (señal completa, no

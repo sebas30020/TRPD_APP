@@ -95,6 +95,9 @@ RESONANCIA = {"ch2": {
 # Retardo fijo de cada sensor respecto de CH3 (µs) y tolerancia de coincidencia.
 RETARDO_US = {"ch2": 0.011, "ch3": 0.0, "ch4": 0.0005}
 TOL_COINC_US = 0.05
+FRAC_CANDIDATO = 0.5      # candidatos bajo el umbral: máximos desde esta fracción del umbral
+SIGMAS_CANDIDATO = 6.0    # ... y por encima de este nº de σ del ruido del disparo (CH2; med_proced
+                          # tiene ruido de cuantización de ~40 mV, sobre 0.5 × 65 mV)
 A4_APAISADO = (11.69, 8.27)
 COLS_RESUMEN = ["Set", "Umbral\n(mV)", "Specimen", "d (mm)", "Voltage (kV)", "Sensor",
                 "N_PD distribution\n[0, 1, 2, 3, 4, > 4]", "N_PD = N_cav", "V̄_pp (V)", "t̄_abs (µs)"]
@@ -120,12 +123,12 @@ def _contar(cap, n_segs):
     return segs, [int(c) for c in np.bincount(seg, minlength=n_segs + 1)[1:n_segs + 1]]
 
 
-def fila_tabla1(carpeta, canal, cap, cuentas, t_lag):
+def fila_tabla1(carpeta, canal, cap, cuentas, t_lag, filtrado=True):
     """Fila Tabla 1 calculada sobre `cap` (misma regla que app.calcular_fila_densidad: V̄_pp y
     t̄_abs sobre las descargas de los disparos con N_PD = N_cav). Los campos descriptivos
     (Specimen, d, Voltage, Sensor) se toman de la app con un umbral infinito (sin peaks)."""
     fila = app.calcular_fila_densidad(carpeta, canal, np.inf, app.DIST_DEFECTO_US,
-                                      app.TMIN_DEFECTO_US, filtrado=True)
+                                      app.TMIN_DEFECTO_US, filtrado=filtrado)
     c = np.asarray(cuentas)
     fila["distribucion"] = "[" + ", ".join(
         str(x) for x in [int(np.sum(c == k)) for k in range(5)] + [int(np.sum(c > 4))]) + "]"
@@ -145,22 +148,33 @@ def fila_tabla1(carpeta, canal, cap, cuentas, t_lag):
     return fila
 
 
-def analizar_estandar(carpeta, canal, umbral):
-    """Detección de la app (CH3/CH4): captura editada, fila Tabla 1 y N_PD por disparo."""
+def _sin_detectados(seg, t, v, cap):
+    """Filtra (seg, t, v) quitando los que coinciden (mismo disparo, ≤ TOL_PEAK_US) con `cap`."""
+    sc, tc = np.asarray(cap["seg"], dtype=int), np.asarray(cap["t_peak"], dtype=float)
+    return [(int(s), float(ti), float(vi)) for s, ti, vi in zip(seg, t, v)
+            if not np.any((sc == s) & (np.abs(tc - ti) <= app.TOL_PEAK_US))]
+
+
+def analizar_estandar(carpeta, canal, umbral, filtrado=True):
+    """Detección de la app (CH3/CH4): captura editada, fila Tabla 1, N_PD por disparo y
+    candidatos bajo el umbral (máximos entre FRAC_CANDIDATO·umbral y el umbral)."""
     dist, tmin = DIST_US.get(canal, app.DIST_DEFECTO_US), tmin_osc(carpeta, canal)
     ed = app.ediciones_canal(carpeta, canal)
-    cap = app.captura_editada(carpeta, canal, umbral, dist, tmin, filtrado=True, ediciones=ed)
+    cap = app.captura_editada(carpeta, canal, umbral, dist, tmin, filtrado=filtrado, ediciones=ed)
     t_lag = app.lag_canal(app.calibracion_desde_metadata(carpeta), carpeta, canal)
     fila = app.calcular_fila_densidad(carpeta, canal, umbral, dist, tmin, t_lag_us=t_lag,
-                                      ediciones=ed, filtrado=True)
-    segs, cuentas = app.contar_peaks(carpeta, canal, umbral, dist, tmin, ediciones=ed, filtrado=True)
+                                      ediciones=ed, filtrado=filtrado)
+    segs, cuentas = app.contar_peaks(carpeta, canal, umbral, dist, tmin, ediciones=ed, filtrado=filtrado)
+    baja = app.capturar(carpeta, canal, FRAC_CANDIDATO * umbral, dist, tmin, filtrado=filtrado)
+    cand = _sin_detectados(baja["seg"], baja["t_peak"], baja["v_peak"], cap)
     return {"canal": canal, "cap": cap, "t_abs": app.t_abs_captura(cap, t_lag), "fila": fila,
-            "segs": segs, "cuentas": cuentas, "t_lag": t_lag, "umbral": umbral}
+            "segs": segs, "cuentas": cuentas, "t_lag": t_lag, "umbral": umbral,
+            "filtrado": filtrado, "candidatos": cand}
 
 
 # --- Resta de la resonancia (CH2) ---
 
-def malla_resonancia(carpeta, canal):
+def malla_resonancia(carpeta, canal, filtrado=True):
     """Eje t_abs (paso de muestreo) y señales de todos los disparos interpoladas en él."""
     cfg = RESONANCIA[canal]
     dt = app.meta_medicion(carpeta)[canal]["xinc"] * 1e6
@@ -168,7 +182,7 @@ def malla_resonancia(carpeta, canal):
     t10 = app.t10_por_segmento(carpeta)
     X = {}
     for s in range(1, app.n_segmentos(carpeta) + 1):
-        t, v = app.cargar_segmento(carpeta, canal, s)
+        t, v = app.cargar_segmento(carpeta, canal, s, filtrado=filtrado)
         X[s] = np.interp(malla, t - t10[s - 1], v)
     return malla, X
 
@@ -211,10 +225,12 @@ def ajustar_resonancia(x, T, malla, canal):
     return mejor[2], mejor[1]
 
 
-def analizar_resonancia(carpeta, canal, umbral, normalizadas, limpios, malla):
+def analizar_resonancia(carpeta, canal, umbral, normalizadas, limpios, malla, filtrado=True):
     """Detección sobre el residuo tras restar la resonancia (ver docstring del módulo).
     `normalizadas`: [(clave, señal normalizada)] de los disparos limpios disponibles
-    (clave = (carpeta, seg)); `limpios`: disparos limpios de esta medición."""
+    (clave = (carpeta, seg)); `limpios`: disparos limpios de esta medición.
+    Devuelve además `modelo` {seg: resonancia ajustada en `malla` (float32)} para poder
+    reconstruir el residuo, y `candidatos` [(seg, t, v)] entre FRAC_CANDIDATO·umbral y el umbral."""
     cfg = RESONANCIA[canal]
     dist = DIST_US.get(canal, app.DIST_DEFECTO_US)
     t_ini = T_INI_US.get(canal, 0.0)
@@ -227,19 +243,26 @@ def analizar_resonancia(carpeta, canal, umbral, normalizadas, limpios, malla):
     n_segs = app.n_segmentos(carpeta)
     T_comun = plantilla(normalizadas)
     W, tpk, vpk, segs, env_pk = [], [], [], [], []
+    modelos, cand = {}, []
     n_colas = 0
     for s in range(1, n_segs + 1):
-        t, v = app.cargar_segmento(carpeta, canal, s)
+        t, v = app.cargar_segmento(carpeta, canal, s, filtrado=filtrado)
         ta = t - t10[s - 1]
         T = plantilla(normalizadas, (carpeta, s)) if s in limpios else T_comun
         x = np.interp(malla, ta, v)
         a, d = ajustar_resonancia(x, T, malla, canal)
         Td = np.roll(T, d)
+        modelos[s] = (a * Td).astype(np.float32)
         modelo = a * np.interp(ta, malla, Td, left=0.0, right=0.0)
         env = abs(a) * np.interp(ta, malla, maximum_filter1d(np.abs(Td), n_env), left=0.0, right=0.0)
         r = v - modelo
         umb = umbral + cfg["k_env"] * env
         idx, _ = find_peaks(r, height=umb, distance=n_dist)
+        tardio = r[ta >= 5.0] if np.any(ta >= 5.0) else r
+        sigma = 1.4826 * float(np.median(np.abs(tardio - np.median(tardio))))
+        baja, _ = find_peaks(r, height=np.maximum(FRAC_CANDIDATO * umb, SIGMAS_CANDIDATO * sigma),
+                             distance=n_dist)
+        cand += [(s, float(t[i]), float(r[i])) for i in baja[ta[baja] >= t_ini] if r[i] < umb[i]]
         for i in idx[ta[idx] >= t_ini]:
             a0, b0 = i - n_antes, i + n_desp + 1
             if a0 < 0 or b0 > r.size:
@@ -257,13 +280,15 @@ def analizar_resonancia(carpeta, canal, umbral, normalizadas, limpios, malla):
            "seg": seg_arr, "t10_seg": t10[seg_arr - 1] if seg_arr.size else np.array([]),
            "dt_us": dt, "env": np.array(env_pk)}
     ed = app.ediciones_canal(carpeta, canal)
-    cap = app.aplicar_ediciones(cap, carpeta, canal, ed if app._hay_ediciones(ed) else None)
+    cap = app.aplicar_ediciones(cap, carpeta, canal, ed if app._hay_ediciones(ed) else None, filtrado)
     t_lag = app.lag_canal(app.calibracion_desde_metadata(carpeta), carpeta, canal)
     segs_l, cuentas = _contar(cap, n_segs)
     return {"canal": canal, "cap": cap, "t_abs": app.t_abs_captura(cap, t_lag),
-            "fila": fila_tabla1(carpeta, canal, cap, cuentas, t_lag), "segs": segs_l,
+            "fila": fila_tabla1(carpeta, canal, cap, cuentas, t_lag, filtrado), "segs": segs_l,
             "cuentas": cuentas, "t_lag": t_lag, "umbral": umbral, "n_colas": n_colas,
-            "n_limpios": len(limpios)}
+            "n_limpios": len(limpios), "filtrado": filtrado, "malla": malla, "modelo": modelos,
+            "candidatos": _sin_detectados([c[0] for c in cand], [c[1] for c in cand],
+                                          [c[2] for c in cand], cap)}
 
 
 def coincidencias(ra, rb):
@@ -496,8 +521,12 @@ def _referencia(canal, canales):
     return next((c for c in canales if c != canal and c not in RESONANCIA), "ch3")
 
 
-def generar(raices, salida, canales=("ch3", "ch2"), umbrales=None, solo=None, propios=None):
-    """`umbrales` {canal: mV} y `propios` {canal: {ruta: mV}} sustituyen a los de defecto."""
+def calcular(raices, canales=("ch3", "ch2"), umbrales=None, solo=None, propios=None, filtrado=True):
+    """Detección de todos los canales en todas las mediciones (sin escribir nada).
+    Devuelve (descs, res, umbrales): descs de generar_presentacion.describir (+ 'carpeta') y
+    res {canal: [resultado por medición]} con las coincidencias entre canales en r['en'].
+    `umbrales` {canal: mV} y `propios` {canal: {ruta: mV}} sustituyen a los de defecto;
+    `filtrado=False` detecta sobre la señal cruda del osciloscopio (sin filtros digitales)."""
     canales = list(canales)
     umbrales = {c: (umbrales or {}).get(c, UMBRAL_DEFECTO[c]) for c in canales}
     propios = propios if propios is not None else UMBRAL_POR_MEDICION
@@ -521,7 +550,7 @@ def generar(raices, salida, canales=("ch3", "ch2"), umbrales=None, solo=None, pr
         print(f"medición {i}/{len(descs)}: {d['ruta']}", flush=True)
         for c in estandar:
             r = analizar_estandar(d["carpeta"], c, umbral_de(d["ruta"], umbrales.get(c, UMBRAL_DEFECTO[c]),
-                                                             propios.get(c)))
+                                                             propios.get(c)), filtrado)
             r["carpeta"] = d["carpeta"]
             (res if c in res else aux)[c][i - 1] = r
 
@@ -530,7 +559,7 @@ def generar(raices, salida, canales=("ch3", "ch2"), umbrales=None, solo=None, pr
         refs = res.get(ref) or aux[ref]
         datos = []    # (malla, X, limpios) por medición
         for d, rr in zip(descs, refs):
-            malla, X = malla_resonancia(d["carpeta"], c)
+            malla, X = malla_resonancia(d["carpeta"], c, filtrado)
             datos.append((malla, X, disparos_limpios(d["carpeta"], rr["cap"], rr["t_lag"], malla)))
         for i, d in enumerate(descs):
             malla, X, limpios = datos[i]
@@ -545,7 +574,7 @@ def generar(raices, salida, canales=("ch3", "ch2"), umbrales=None, solo=None, pr
             u = umbral_de(d["ruta"], umbrales[c], propios.get(c))
             print(f"  {c} {d['ruta']}: resta de resonancia ({len(limpios)} disparos limpios, "
                   f"plantilla con {len(norm)})", flush=True)
-            r = analizar_resonancia(d["carpeta"], c, u, norm, limpios, malla)
+            r = analizar_resonancia(d["carpeta"], c, u, norm, limpios, malla, filtrado)
             r["carpeta"] = d["carpeta"]
             res[c][i] = r
 
@@ -553,7 +582,13 @@ def generar(raices, salida, canales=("ch3", "ch2"), umbrales=None, solo=None, pr
         for i in range(len(descs)):
             for a in canales:
                 res[a][i]["en"] = {b: coincidencias(res[a][i], res[b][i]) for b in canales if b != a}
+    return descs, res, umbrales
 
+
+def generar(raices, salida, canales=("ch3", "ch2"), umbrales=None, solo=None, propios=None):
+    """calcular() + PNG/CSV por medición y canal, PDF por canal y PDF combinado."""
+    canales = list(canales)
+    descs, res, umbrales = calcular(raices, canales, umbrales, solo, propios)
     y_max = {}
     for c in canales:
         todos = np.concatenate([r["cap"]["vpp"] for r in res[c]]) / 1000.0
