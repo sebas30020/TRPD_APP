@@ -6,10 +6,15 @@ lejana (CH4). Señales igual que en la app: CH2..CH4 filtradas según
 canales.chX.filtro de metadata.yaml (por defecto HP 5 MHz / HP 200 MHz), CH1 sin
 filtrar, ventana -5..30 µs. Cada título indica nº de vacuolas, diámetros y tensión,
 leídos de la jerarquía <probeta>/<X>kV (p. ej. 3v_2mm3mm4mm_1/13kV).
+Con --crudo se dibujan las señales tal como las registró el osciloscopio, sin
+ningún filtro digital (salida por defecto senales_med_proced_confuse_crudo.pptx).
 
 Uso:
-    python generar_presentacion.py [<raiz_mediciones>] [--salida <ruta.pptx>]
-                                   [--dpi 150] [--solo <subcadena de la ruta>]
+    python generar_presentacion.py [<raiz> ...] [--salida <ruta.pptx>]
+                                   [--dpi 150] [--solo <subcadena de la ruta>] [--crudo]
+Cada <raiz> puede ser una carpeta de probetas (<raiz>/<probeta>/<X>kV) o una
+probeta (<raiz>/<X>kV). Orden: por nº de vacuolas y diámetros, luego por tensión
+creciente (así un set posterior medido a menor tensión queda antes).
 Dependencias: requirements_reportes.txt (python-pptx, matplotlib).
 """
 
@@ -37,8 +42,12 @@ import tema  # noqa: E402
 from generate_metadata import inferir_parametros  # noqa: E402
 
 PROYECTO = os.path.dirname(AQUI)
-RAIZ_DEFECTO = os.path.join(PROYECTO, "mediciones", "med_proced_confuse")
+RAICES_DEFECTO = [
+    os.path.join(PROYECTO, "mediciones", "med_proced_confuse"),
+    os.path.join(PROYECTO, "mediciones", "med_proced", "1v_2mm_01"),
+]
 SALIDA_DEFECTO = os.path.join(PROYECTO, "reportes", "senales_med_proced_confuse.pptx")
+SALIDA_CRUDO = os.path.join(PROYECTO, "reportes", "senales_med_proced_confuse_crudo.pptx")
 
 CANALES = [
     ("ch1", "Impulso\nCH1", "V"),
@@ -54,19 +63,31 @@ TINTA = RGBColor(0x1F, 0x29, 0x33)
 
 # ---------------- Mediciones ----------------
 
-def descubrir(raiz, solo=None):
-    """Mediciones <probeta>/<X>kV bajo `raiz`, ordenadas por probeta y tensión."""
+def _carpetas_medicion(raiz):
+    """Carpetas con chN.h5 en `raiz` o hasta dos niveles por debajo."""
+    if app.canales_presentes(raiz):
+        return [raiz]
+    encontradas = []
+    for sub in os.listdir(raiz):
+        d = os.path.join(raiz, sub)
+        if os.path.isdir(d):
+            encontradas += [d] if app.canales_presentes(d) else [
+                os.path.join(d, x) for x in os.listdir(d)
+                if os.path.isdir(os.path.join(d, x)) and app.canales_presentes(os.path.join(d, x))]
+    return encontradas
+
+
+def descubrir(raices, solo=None):
+    """Mediciones bajo `raices`, ordenadas por (nº de vacuolas, diámetros), luego
+    por tensión creciente y por último por nombre de probeta."""
     meds = []
-    for probeta in sorted(os.listdir(raiz), key=rutas.orden_natural):
-        dp = os.path.join(raiz, probeta)
-        if not os.path.isdir(dp):
-            continue
-        for sub in os.listdir(dp):
-            d = os.path.join(dp, sub)
-            if os.path.isdir(d) and app.canales_presentes(d):
-                inf = inferir_parametros(d)
-                meds.append((probeta, inf.get("tension_sec_kv") or 0.0, d, inf))
-    meds.sort(key=lambda m: (rutas.orden_natural(m[0]), m[1]))
+    for raiz in raices:
+        for d in _carpetas_medicion(raiz):
+            inf = inferir_parametros(d)
+            probeta = os.path.basename(os.path.dirname(d))
+            meds.append((probeta, inf.get("tension_sec_kv") or 0.0, d, inf, raiz))
+    meds.sort(key=lambda m: (m[3].get("nro_vacuolas") or 99, tuple(m[3].get("diametros") or ()),
+                             m[1], rutas.orden_natural(m[0])))
     if solo:
         clave = solo.replace("/", "\\").lower()
         meds = [m for m in meds if clave in m[2].replace("/", "\\").lower()]
@@ -93,7 +114,8 @@ def describir(carpeta, inf, raiz):
         "diametros": _diametros(inf.get("diametros")),
         "tension": f"{kv:g} kV" if kv else "?",
         "probeta": inf.get("codigo_probeta") or os.path.basename(os.path.dirname(carpeta)),
-        "set": inf.get("set_impulsos"),
+        # set tal como está escrito en la carpeta ('01' no se convierte en 1)
+        "set": (inf.get("codigo_probeta") or "").rsplit("_", 1)[-1] if inf.get("codigo_probeta") else None,
         "ruta": os.path.relpath(carpeta, os.path.dirname(raiz)),
         "fecha": (meta.get("experimento") or {}).get("fecha_hora") or "",
         "nsegs": app.n_segmentos(carpeta),
@@ -104,12 +126,12 @@ def describir(carpeta, inf, raiz):
 
 # ---------------- Figuras ----------------
 
-def _senal(carpeta, ch, seg):
-    t, v = app.cargar_segmento(carpeta, ch, seg, filtrado=True)   # CH1 nunca se filtra
+def _senal(carpeta, ch, seg, filtrado=True):
+    t, v = app.cargar_segmento(carpeta, ch, seg, filtrado=filtrado)   # CH1 nunca se filtra
     return t, (v / 1000.0 if ch == "ch1" else v)                  # CH1 en V
 
 
-def limites_y(carpeta):
+def limites_y(carpeta, filtrado=True):
     """(ymin, ymax) por canal, comunes a todos los disparos de la medición."""
     lim = {}
     for ch, _, _ in CANALES:
@@ -117,7 +139,7 @@ def limites_y(carpeta):
             continue
         lo, hi = np.inf, -np.inf
         for s in range(1, app.n_segmentos(carpeta) + 1):
-            _, v = _senal(carpeta, ch, s)
+            _, v = _senal(carpeta, ch, s, filtrado)
             if v.size:
                 lo, hi = min(lo, float(v.min())), max(hi, float(v.max()))
         if np.isfinite(lo):
@@ -126,11 +148,11 @@ def limites_y(carpeta):
     return lim
 
 
-def figura_segmento(carpeta, seg, lim, dpi):
+def figura_segmento(carpeta, seg, lim, dpi, filtrado=True):
     fig, ejes = plt.subplots(4, 1, sharex=True, figsize=(13.33, 6.3), dpi=dpi)
     for ax, (ch, nombre, unidad) in zip(ejes, CANALES):
         if ch in app.canales_presentes(carpeta):
-            t, v = _senal(carpeta, ch, seg)
+            t, v = _senal(carpeta, ch, seg, filtrado)
             t, v = app.decimar_minmax(t, v, PUNTOS_POR_TRAZA)
             ax.plot(t, v, color=tema.COLORES_CANALES.get(ch, "#2f5d8a"), lw=0.7)
             if ch in lim:
@@ -172,15 +194,19 @@ def _nueva(prs):
     return prs.slides.add_slide(prs.slide_layouts[6])   # en blanco
 
 
-def portada(prs, meds, raiz, total):
+def portada(prs, meds, raices, total, filtrado=True):
     s = _nueva(prs)
-    _texto(s, Inches(0.8), Inches(2.0), Inches(11.7), Inches(1.2),
-           f"Señales temporales — {os.path.basename(raiz)}", 36, True)
+    _texto(s, Inches(0.8), Inches(1.6), Inches(11.7), Inches(1.0),
+           "Señales temporales de las mediciones" + ("" if filtrado else " — sin filtrar"), 36, True)
+    _texto(s, Inches(0.8), Inches(2.55), Inches(11.7), Inches(0.6),
+           "Fuentes: " + " · ".join(os.path.relpath(r, os.path.join(PROYECTO, "mediciones")) for r in raices),
+           14, color=GRIS)
     _texto(s, Inches(0.8), Inches(3.3), Inches(11.7), Inches(2.5),
            f"{len(meds)} mediciones · {total} disparos · una diapositiva por disparo\n"
            "Canales: Impulso (CH1) · HFCT (CH2) · Antena 1 – cercana (CH3) · Antena 2 – lejana (CH4)\n"
-           "CH2..CH4 con los filtros digitales de la app (Butterworth orden 4, fase cero); CH1 sin filtrar\n"
-           f"Ventana {app.T_MIN:g} a {app.T_MAX:g} µs · escala vertical común a los disparos de cada medición\n"
+           + ("CH2..CH4 con los filtros digitales de la app (Butterworth orden 4, fase cero); CH1 sin filtrar\n"
+              if filtrado else "Señales crudas, tal como las registró el osciloscopio: ningún canal filtrado\n")
+           + f"Ventana {app.T_MIN:g} a {app.T_MAX:g} µs · escala vertical común a los disparos de cada medición\n"
            f"Generado el {datetime.date.today().isoformat()} con TRPD_APP/generar_presentacion.py",
            16, color=GRIS)
 
@@ -189,8 +215,11 @@ def indice(prs, descs):
     s = _nueva(prs)
     _texto(s, Inches(0.6), Inches(0.35), Inches(12), Inches(0.7), "Índice de mediciones", 26, True)
     cols = ["Probeta", "Vacuolas", "Diámetros", "Tensión", "Disparos", "Fecha"]
+    alto_fila = min(Inches(0.38), int(Inches(5.9) / (len(descs) + 1)))
     tabla = s.shapes.add_table(len(descs) + 1, len(cols), Inches(0.6), Inches(1.2),
-                               Inches(12.1), Inches(0.38) * (len(descs) + 1)).table
+                               Inches(12.1), alto_fila * (len(descs) + 1)).table
+    for fila in tabla.rows:
+        fila.height = alto_fila
     for j, c in enumerate(cols):
         tabla.cell(0, j).text = c
     for i, d in enumerate(descs, start=1):
@@ -201,7 +230,7 @@ def indice(prs, descs):
         for celda in fila.cells:
             for p in celda.text_frame.paragraphs:
                 for r in p.runs:
-                    r.font.size = Pt(12)
+                    r.font.size = Pt(12 if len(descs) <= 13 else 10)
 
 
 def separador(prs, d):
@@ -214,7 +243,7 @@ def separador(prs, d):
            18, color=GRIS)
 
 
-def diapositiva_segmento(prs, d, seg, png):
+def diapositiva_segmento(prs, d, seg, png, filtrado=True):
     s = _nueva(prs)
     _texto(s, Inches(0.4), Inches(0.12), Inches(12.5), Inches(0.55),
            f"{d['titulo']} — Disparo {seg} / {d['nsegs']}", 22, True)
@@ -223,28 +252,30 @@ def diapositiva_segmento(prs, d, seg, png):
            f"Probeta {d['probeta']}{set_txt} · {d['ruta']}", 11, color=GRIS)
     s.shapes.add_picture(png, Inches(0.0), Inches(0.92), width=ANCHO)
     _texto(s, Inches(0.4), Inches(7.12), Inches(12.5), Inches(0.3),
-           f"{d['filtros']} (Butterworth orden 4, fase cero) · CH1 sin filtrar · "
-           f"Ventana {app.T_MIN:g}…{app.T_MAX:g} µs", 9, color=GRIS)
+           (f"{d['filtros']} (Butterworth orden 4, fase cero) · CH1 sin filtrar · " if filtrado
+            else "Señales crudas del osciloscopio, sin filtros · ")
+           + f"Ventana {app.T_MIN:g}…{app.T_MAX:g} µs", 9, color=GRIS)
 
 
 # ---------------- Principal ----------------
 
-def generar(raiz, salida, dpi=150, solo=None):
-    meds = descubrir(raiz, solo)
+def generar(raices, salida, dpi=150, solo=None, filtrado=True):
+    meds = descubrir(raices, solo)
     if not meds:
-        raise SystemExit(f"No hay mediciones en {raiz}" + (f" que contengan '{solo}'" if solo else ""))
-    descs = [describir(m[2], m[3], raiz) for m in meds]
+        raise SystemExit(f"No hay mediciones en {raices}" + (f" que contengan '{solo}'" if solo else ""))
+    descs = [describir(m[2], m[3], os.path.dirname(m[4]) if m[4].endswith(m[0]) else m[4])
+             for m in meds]
     total = sum(d["nsegs"] for d in descs)
     prs = Presentation()
     prs.slide_width, prs.slide_height = ANCHO, ALTO
-    portada(prs, meds, raiz, total)
+    portada(prs, meds, raices, total, filtrado)
     indice(prs, descs)
-    for i, ((_, _, carpeta, _), d) in enumerate(zip(meds, descs), start=1):
+    for i, ((_, _, carpeta, _, _), d) in enumerate(zip(meds, descs), start=1):
         separador(prs, d)
-        lim = limites_y(carpeta)
+        lim = limites_y(carpeta, filtrado)
         for seg in range(1, d["nsegs"] + 1):
             print(f"medición {i}/{len(meds)} ({d['ruta']}), disparo {seg}/{d['nsegs']}", flush=True)
-            diapositiva_segmento(prs, d, seg, figura_segmento(carpeta, seg, lim, dpi))
+            diapositiva_segmento(prs, d, seg, figura_segmento(carpeta, seg, lim, dpi, filtrado), filtrado)
     os.makedirs(os.path.dirname(os.path.abspath(salida)), exist_ok=True)
     tmp = salida + ".tmp"
     prs.save(tmp)
@@ -256,12 +287,14 @@ def generar(raiz, salida, dpi=150, solo=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("raiz", nargs="?", default=RAIZ_DEFECTO)
-    ap.add_argument("--salida", default=SALIDA_DEFECTO)
+    ap.add_argument("raices", nargs="*", default=RAICES_DEFECTO)
+    ap.add_argument("--salida", default=None)
     ap.add_argument("--dpi", type=int, default=150)
     ap.add_argument("--solo", default=None, help="genera solo las mediciones cuya ruta contenga este texto")
+    ap.add_argument("--crudo", action="store_true", help="señales sin ningún filtro digital")
     a = ap.parse_args()
-    generar(a.raiz, a.salida, a.dpi, a.solo)
+    salida = a.salida or (SALIDA_CRUDO if a.crudo else SALIDA_DEFECTO)
+    generar(a.raices, salida, a.dpi, a.solo, filtrado=not a.crudo)
 
 
 if __name__ == "__main__":
