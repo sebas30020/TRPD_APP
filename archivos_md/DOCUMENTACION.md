@@ -894,6 +894,35 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
   a tensión, ningún filtro en ningún canal; escalas verticales recalculadas sobre la señal cruda).
   Salida por defecto `reportes/senales_med_proced_confuse_crudo.pptx`.
 
+### `generar_informe_trpd.py` — informe PDF de patrones TRPD
+
+`python generar_informe_trpd.py [<raiz> ...] [--canales ch3 ch2] [--umbral <mV>] [--salida <dir>] [--solo <texto>]`
+(plan: `archivos_md/plan_informe_trpd.md`; dependencias: matplotlib).
+
+- Por defecto lee `mediciones/med_proced_confuse` y `mediciones/med_proced` y analiza **CH3 (Antena 1)**
+  y **CH2 (HFCT)**. Umbrales por defecto `UMBRAL_DEFECTO` (CH3 250 mV, CH2 40 mV) y por medición
+  `UMBRAL_POR_MEDICION` (CH2 65 mV en `med_proced\1v_2mm_01`, HFCT a 0.5 V/div); `--umbral` y
+  `--umbral-medicion RUTA=MV` actúan sobre el primer canal de `--canales`; `--sin-umbrales-propios`
+  los desactiva. t_lag de `calibracion_retardo` si existe (si no, 0).
+- Detección desde `T_INI_US` en t_abs (relativo al t10 de cada medición): CH3/CH4 0.25 µs (antes
+  llega el acoplamiento del frente del impulso), con la captura de la app (`captura_editada`,
+  Δt = 50 ns, señal filtrada, ediciones manuales del `metadata.yaml`).
+- CH2: se resta en cada disparo la resonancia del HFCT excitada por el impulso (~14.6 MHz,
+  τ ≈ 250-285 ns). Plantilla = mediana normalizada de los disparos sin descargas en CH3 (sin el propio
+  disparo; con < 5 se completa con el mismo set), escalada y desplazada por mínimos cuadrados en
+  t_abs 0-0.3 µs. Detección sobre el residuo desde t_abs 0.2 µs, umbral U + 0.1·envolvente de la
+  resonancia, Δt = 0.5 µs (el pulso oscila) y sin colas de oscilación; Vpp sobre el residuo
+  (parámetros en `RESONANCIA`).
+- Coincidencias: misma descarga en dos sensores si están en el mismo disparo a ≤ 50 ns tras corregir el
+  retardo fijo (`RETARDO_US`, CH2 − CH3 = 11 ns).
+- Salida en `reportes/`, con la misma jerarquía que las mediciones:
+  `reportes/<raíz>/<probeta>/<X>kV/trpd_<ch>.png` y `tabla_<ch>.csv` (una fila por descarga: disparo,
+  N_PD, t_abs, t_osc, Vmax, Vpp, manual, `resonancia_mV` en CH2, `en_<otro canal>`);
+  `reportes/resumen_trpd_<ch>.csv`, `reportes/informe_trpd_<ch>.pdf` por canal e
+  `reportes/informe_trpd_ch3_ch2.pdf` combinado (Tabla 1 con una fila por sensor y una página por
+  medición con los dos mapas, sus filas de la Tabla 1 y N_PD por disparo). Mediciones dudosas en
+  `reportes/mediciones_a_revisar.txt`.
+
 - **`preprocesar.py`.** Filtro paso-alto Butterworth de fase cero (`sosfiltfilt`,
   **5 MHz**, orden 4) aplicado a cada segmento de `ch2.h5` (señal completa, no
   ventaneada). Genera un archivo extra `ch2_hp5MHz.h5` con la **misma
