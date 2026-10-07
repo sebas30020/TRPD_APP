@@ -24,7 +24,7 @@ import plotly.graph_objects as go
 import scipy.fft as sfft
 import yaml
 from plotly.subplots import make_subplots
-from scipy.signal import find_peaks, butter, sosfiltfilt, welch
+from scipy.signal import find_peaks, butter, sosfiltfilt
 from dash import Dash, dcc, html, Input, Output, State, no_update, ctx, ALL, Patch
 
 from generate_metadata import (plantilla_metadata, inferir_parametros, inferir_diametros,
@@ -821,8 +821,8 @@ def figura_ventanas(cap, sel, canal):
 
 
 def figura_fft(cap, sel, canal):
-    """FFT (scipy.signal.welch, spectrum, lineal) promediando SOLO las ventanas
-    de sel (lista)."""
+    """|FFT| directa (np.fft.rfft, sin ventana ni promedios) de cada ventana de
+    sel (lista), una curva por señal."""
     if not sel:
         return _fig_sin_seleccion(canal)
     W = cap["W"]
@@ -830,18 +830,24 @@ def figura_fft(cap, sel, canal):
     fig = go.Figure()
     n = len(filas)
     if n and W.shape[1] > 1:
-        fs = 1.0 / (cap["dt_us"] * 1e-6)  # Hz
-        nperseg = min(W.shape[1], 256)
-        f, Pxx = welch(W[filas], fs=fs, nperseg=nperseg, scaling="spectrum", axis=-1)
+        f = np.fft.rfftfreq(W.shape[1], d=cap["dt_us"] * 1e-6)  # Hz
         hasta = f <= FFT_FMAX_MHZ * 1e6
+        mag = np.abs(np.fft.rfft(W[filas], axis=-1))[:, hasta]
+        fm = f[hasta] / 1e6
+        nan = np.array([np.nan])
+        xs, ys = [], []
+        for fila in mag:
+            xs.extend((fm, nan))
+            ys.extend((fila, nan))
         fig.add_trace(go.Scattergl(
-            x=f[hasta] / 1e6, y=Pxx.mean(axis=0)[hasta], mode="lines", line=dict(color=tema.ACCENT, width=1.2),
-            hovertemplate="f=%{x:.1f} MHz<br>%{y:.3g} mV²<extra></extra>", showlegend=False,
+            x=np.concatenate(xs), y=np.concatenate(ys), mode="lines", line=dict(color=tema.ACCENT, width=1.0),
+            opacity=0.6 if n > 1 else 1.0,
+            hovertemplate="f=%{x:.1f} MHz<br>|X|=%{y:.4g}<extra></extra>", showlegend=False,
         ))
     fig.update_layout(
         template="trpd",
-        title=f"FFT (Welch) {canal.upper()} — {n} señales",
-        xaxis_title="Frecuencia [MHz]", yaxis_title="Espectro [mV²]",
+        title=f"|FFT| {canal.upper()} — {n} señales",
+        xaxis_title="Frecuencia [MHz]", yaxis_title="|FFT| [mV]",
         xaxis_range=[0, FFT_FMAX_MHZ],
         height=430, margin=dict(t=50, r=20),
     )
