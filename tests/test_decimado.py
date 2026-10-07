@@ -67,7 +67,7 @@ def test_redecimar_zoom_patch_crudo(monkeypatch):
     assert val["dtype"] == "f4"
     x = np.frombuffer(__import__("base64").b64decode(val["bdata"]), dtype=np.float32)
     assert x.size >= int(0.5 / 1e-4)                       # 0.5 µs a 10 GSa/s: crudo
-    assert rango == {"carpeta": "m", "canal": "ch4", "x0": 1.0, "x1": 1.5}
+    assert rango == {"carpeta": "m", "canal": "ch4", "x0": 1.0, "x1": 1.5, "rev": 0}
 
 
 def test_redecimar_ignora_arrastre_de_umbral():

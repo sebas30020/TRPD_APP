@@ -74,9 +74,9 @@ def test_callbacks_navegacion_paneles():
 
 
 def test_callback_alternar_panel_dominio():
-    """Verifica que alternar_panel_dominio controle senales vs st."""
-    assert app.alternar_panel_dominio("senales") == (False, True)
-    assert app.alternar_panel_dominio("st") == (True, False)
+    """Verifica que alternar_panel_dominio controle senales (gráfico + barra de edición) vs st."""
+    assert app.alternar_panel_dominio("senales") == (False, False, True)
+    assert app.alternar_panel_dominio("st") == (True, True, False)
 
 
 def test_callback_diferir_carga_iframe():

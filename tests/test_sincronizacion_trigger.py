@@ -29,7 +29,9 @@ def _componentes(componente):
 
 def test_callback_grafico_escucha_umbral_dist_tmin():
     """Los 9 campos son Input (no State) del callback que dibuja `grafico`."""
-    entrada = next(v for k, v in app.app.callback_map.items() if k == "grafico.figure")
+    # Callback principal del gráfico (salidas grafico.figure + rango_x.data, sin allow_duplicate)
+    entrada = next(v for k, v in app.app.callback_map.items()
+                   if k == "grafico.figure" or k.startswith("..grafico.figure..."))
     inputs = {f"{i['id']}.{i['property']}" for i in entrada["inputs"]}
     for pid in PARAMS:
         assert f"{pid}.value" in inputs, f"{pid} no redibuja el gráfico"
@@ -96,16 +98,18 @@ def test_captura_vigente():
 
 def test_actualizar_descarta_captura_obsoleta(monkeypatch):
     """Tras editar un parámetro después de "⚡ Calcular peaks", el gráfico vuelve a
-    vista previa en vez de mostrar las cruces del snapshot anterior."""
+    vista previa en vez de mostrar las cruces del snapshot anterior (con las ediciones visibles)."""
     llamadas = []
     monkeypatch.setattr(app, "_cap_p", lambda p, ed=None: "CAP")   # captura editada del snapshot
     monkeypatch.setattr(app, "_ed", lambda store, carpeta, canal: {"historial": []})
     monkeypatch.setattr(app, "figura", lambda carpeta, seg, canal, cfg_sensores=None, cap=None, **k:
-                        llamadas.append(cap))
+                        llamadas.append((cap, k.get("vista_previa"))))
     p = {"carpeta": "m", "canal": "ch4", "umbral": 10.0, "dist": 0.035, "tmin": 0.15}
     comunes = ("m", 1, "ch4", p, 5, 0.035, 0.15, 6, 0.035, 0.15)
 
     actualizar(*comunes, 10.0, 0.035, 0.15)   # coincide con el snapshot
     actualizar(*comunes, 12.0, 0.035, 0.15)   # umbral editado
     actualizar(*comunes, 10.0, 0.035, 0.50)   # t_mín editado
-    assert llamadas == ["CAP", None, None]
+    # Con parámetros editados las cruces son de vista previa, pero la captura (manuales y
+    # quitados) se sigue pasando para que ninguna edición quede invisible.
+    assert llamadas == [("CAP", False), ("CAP", True), ("CAP", True)]

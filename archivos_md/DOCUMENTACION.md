@@ -495,13 +495,30 @@ t_mín o el interruptor de filtros (plan: `archivos_md/plan_peaks_manuales.md`).
   - **Añadir peak en la marca** (`btn_anadir_peak`), **Quitar peak** (`btn_quitar_peak`: la
     selección —clic en una cruz o en el TRPD— o, sin selección, el peak bajo la marca),
     **Deshacer** y **Restaurar todo**; `badge_ediciones` resume añadidos/quitados/disparos y
-    `aviso_ediciones` muestra los errores (sin captura, sin marca, ventana que no cabe…).
+    `aviso_ediciones` confirma cada acción en verde ("✓ Peak añadido: seg 6, t = … µs, Vmax = … mV",
+    "✓ Peak quitado…", "✓ Deshecho…"; estilo en `estilo_aviso_ediciones`) o muestra los errores
+    en rojo (sin captura, sin marca, ventana que no cabe…). Un clic sobre un canal que no es el
+    activo avisa de que la marca va sobre el canal activo.
+  - Tras cada edición la marca se borra (`fijar_marca` escucha `ediciones_peaks`), para que el
+    rombo del peak añadido no quede tapado por la línea de la marca.
+  - Flujo: **añadir** = clic en la señal del canal activo → «Añadir peak en la marca»;
+    **quitar** = clic en una cruz/rombo de la señal o en un punto del TRPD → «Quitar peak».
+  - Diagnóstico 2026-10-07 ("Añadir no marca nada"): el peak sí se guardaba y contaba, pero el
+    rombo (azul, 10 px) quedaba bajo la línea azul de la marca y no había mensaje de éxito. Ahora
+    es un rombo verde de 14 px con borde oscuro (`COLOR_MANUAL`) y la marca se limpia.
   - Los botones del Patrón TRPD ("Quitar selección", "Excluir" disparo, "Deshacer",
     "Restaurar todo") escriben en el mismo historial.
   - Dibujo: añadidos = **rombos**; quitados = cruces grises (no seleccionables); en el TRPD los
     manuales son rombos en la curva 0 (el índice sigue en `customdata[5]`).
-- Las ediciones solo se ven con una captura vigente ("Calcular peaks"); en vista previa
-  (campos de trigger editados sin recalcular) las cruces son la detección automática.
+- En vista previa (campos de trigger editados sin recalcular) las cruces son la detección con
+  los parámetros nuevos, pero los rombos manuales y las cruces grises de la captura se siguen
+  dibujando (`figura(..., vista_previa=True)`): ninguna edición queda invisible.
+- **Peak seleccionado.** Un clic en **un** punto del Patrón TRPD lleva al segmento de esa
+  descarga (`set_seleccion` también escribe `segmento.value`) y el gráfico de señales la marca
+  con un anillo amarillo (`COLOR_SELECCION`), una línea vertical en todos los canales y la
+  anotación "peak k de N · t = …". Una caja o lazo con varios puntos no cambia de segmento. Lo
+  mismo resalta un clic en una cruz. El zoom se mantiene; si el peak queda fuera de la vista,
+  se vuelve a la vista completa (`actualizar` sube `rango_x.rev`, que entra en `uirevision`).
 
 
 ---
@@ -781,7 +798,7 @@ Ver el análisis completo y las mediciones antes/después en `archivos_md/plan_r
 | `sincronizar_parametros_sensores` | `carpeta, grafico.relayoutData` | `umbral_ch{2,3,4}, dist_ch{2,3,4}, tmin_ch{2,3,4}` |
 | `redecimar_zoom` | `grafico.relayoutData` (+State carpeta, segmento, canal, switch_filtros) | `grafico.figure` (Patch), `rango_x.data` |
 | `recordar_carpeta` / `restaurar_carpeta` | `carpeta` / `ultima_carpeta.modified_timestamp` | `ultima_carpeta.data` / `carpeta.value/options`, `explorador_panel.hidden` |
-| `actualizar` | `carpeta, segmento, canal, captura_params, ediciones_peaks, marca_peak` (+9 inputs sensores) | `grafico.figure` |
+| `actualizar` | `carpeta, segmento, canal, captura_params, ediciones_peaks, marca_peak, seleccion` (+9 inputs sensores, State rango_x) | `grafico.figure`, `rango_x.data` (solo al volver a la vista completa) |
 | `cargar_ediciones` | `carpeta` | `ediciones_peaks.data` (desde metadata.yaml) |
 | `fijar_marca` | `grafico.clickData, input_marca_t.value, carpeta, canal, segmento` | `marca_peak.data, input_marca_t.value` |
 | `gestionar_ediciones_peaks` | botones de edición (barra de señales y Patrón TRPD) (+State seleccion, captura_params, marca_peak, ediciones_peaks) | `ediciones_peaks.data, input_excluir_disparo.value, aviso_ediciones.children` (y guarda metadata.yaml) |
@@ -792,7 +809,7 @@ Ver el análisis completo y las mediciones antes/después en `archivos_md/plan_r
 | `sincronizar_tabla_densidad` | `densidad_store.data` | `tabla_densidad.children` |
 | `exportar_densidad` | `btn_exportar_densidad.n_clicks` (+State densidad_store) | `descarga_densidad.data` |
 | `actualizar_panel_metadata` | `carpeta, btn_guardar_metadata.n_clicks, btn_guardar_yaml_texto.n_clicks, calibracion_store.data` (+State meta_yaml_text) | Tarjetas, tabla canales y YAML de `panel_metadata` |
-| `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico.clickData, ediciones_peaks.data` (+State captura_params) | `seleccion.data` |
+| `set_seleccion` | `captura_params.data, grafico_scatter.selectedData, grafico_scatter.clickData, grafico.clickData, ediciones_peaks.data` (+State captura_params, segmento) | `seleccion.data`, `segmento.value` (clic en un punto del TRPD) |
 | `actualizar_scatter` | `captura_params.data, seleccion.data, modo_magnitud_trpd.value, calibracion_store.data, ediciones_peaks.data` | `grafico_scatter.figure` |
 | `actualizar_temporal` | `seleccion.data` (+State `captura_params`) | `grafico_ventanas.figure, grafico_fft.figure` |
 | `alternar_panel_principal` | `tabs_principal.value` | `panel_senales.hidden, panel_st_segmento.hidden, panel_metadata.hidden` |
@@ -823,7 +840,8 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
 
 ### 11.2 Estructura de la Interfaz
 
-- **Barra de controles principales:** Medición (`carpeta`), explorador de directorios (`btn_examinar`), segmento (`segmento`), trigger activo (`canal`), botón "Calcular peaks" (`btn`), f máx ST (`st_fmax`).
+- **Barra de controles principales:** Medición (`carpeta`), explorador de directorios (`btn_examinar`), trigger activo (`canal`), botón "Calcular peaks" (`btn`), f máx ST (`st_fmax`).
+- **Barra de segmentos** (`barra-segmentos`: `segmento_prev`, `segmento`, `segmento_total`, `segmento_next`; teclas ←/→ en `assets/teclado.js`): en la columna de señales, justo debajo de la barra de edición de peaks y encima del gráfico; visible también en la sub-pestaña Transformada S.
 - **Barra sub-panel multi-trigger:** Contenedor con 3 bloques por canal sensor:
   - `CH2 (HFCT)`: `umbral_ch2`, `dist_ch2`, `tmin_ch2`.
   - `CH3 (Antena 1)`: `umbral_ch3`, `dist_ch3`, `tmin_ch3`.
@@ -832,7 +850,7 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
 - **Pestañas Principales (`tabs_principal`):**
   1. **Análisis (`value="senales"`):**
      - **Fila superior (2 columnas):**
-       - Columna izquierda: Pestañas de dominio (`tabs_dominio`) con sub-pestaña **Señales** (`panel_senales`: barra de edición manual de peaks (§4b) y 4 filas ch1..ch4 con líneas de umbral interactivas) y **Transformada S** (`panel_st_segmento`, 4 mapas de calor de segmento completo).
+       - Columna izquierda: Pestañas de dominio (`tabs_dominio`) con sub-pestaña **Señales** (`panel_senales_ediciones`: barra de edición manual de peaks (§4b); barra de segmentos común; `panel_senales`: 4 filas ch1..ch4 con líneas de umbral interactivas) y **Transformada S** (`panel_st_segmento`, 4 mapas de calor de segmento completo).
        - Columna derecha: Tarjeta superior con **Peaks por segmento** (`tabs_peaks`, `grafico_peaks`). Tarjeta inferior con **Patrón TRPD** (`tabs_scatter`, `grafico_scatter` en tiempo absoluto $t_{\text{abs}}$, selector de magnitud $V_{\max}$ / $V_{\text{pp}}$, controles de exclusión de descargas por lazo o disparo y badge de estado del filtro).
      - **Fila inferior (2 columnas):**
        - Columna izquierda: **Ventanas** (`figura_ventanas`), formas de onda ventaneadas (70 ns) superpuestas y alineadas en $t = 0$.
@@ -926,6 +944,41 @@ Tanto `app.py` como `calibrar_app` utilizan un sistema de diseño centralizado d
   `(descs, res, umbrales)`; `filtrado=False` detecta sobre la señal cruda. Cada resultado incluye
   `candidatos` [(seg, t_osc, v)]: máximos entre `FRAC_CANDIDATO` (0.5) × umbral y el umbral (en CH2,
   además, por encima de `SIGMAS_CANDIDATO` (6) σ del ruido del disparo).
+
+### `generar_informe_trpd3.py` — informe TRPD con tres sensores (reporte3)
+
+`python generar_informe_trpd3.py [<raiz> ...] [--salida <dir>] [--solo <texto>] [--umbral-medicion CANAL:RUTA=MV]`
+(plan: `archivos_md/plan_informe_trpd_3v_4mm.md`).
+
+- Por defecto lee `mediciones/med_proced_hfct_inv/3v_4mm_0` (esa medición se tomó con el HFCT al
+  revés; copia con CH2 invertido, ver `invertir_canal.py`) y `mediciones/med_proced/3v_4mm_1`, y
+  escribe en `reportes/reporte3/`.
+  Detección por canal con `generar_informe_trpd.calcular()` para CH3, CH4 y CH2 (umbrales `UMBRALES`:
+  250 / 250 / 65 mV; CH2 a 65 mV por la escala de ~0.5 V/div). `PROBETAS` da N_cav y diámetros de
+  códigos que `inferir_parametros` no reconoce (`3v_4mm` = 3 vacuolas de 4 mm, sin `metadata.yaml`).
+- Eventos: por disparo, una detección ancla (CH3 > CH4 > CH2) y la más cercana de cada otro canal a
+  ≤ 50 ns tras corregir `RETARDO_US`. **Solo cuentan las `triple`** (CH3 + CH4 + CH2): N_PD, Tabla 1,
+  V̄_pp y t̄_abs se calculan con ellas. Categorías dudosas: `antenas_resonancia` (CH3 + CH4 sin CH2,
+  con la envolvente de la resonancia ajustada de CH2 ≥ umbral en ese instante; se dibujan con "x"
+  naranja pero no cuentan), `antenas_hfct_solapado` (otra descarga de CH2 a < Δt = 0.5 µs),
+  `antenas_sin_hfct`, `ch3_ch2`, `ch4_ch2`, `solo_ch3`, `solo_ch4`, `solo_ch2`.
+- Salidas: `informe_trpd_3v_4mm.pdf` (resumen con 3 filas por medición, una página por medición con
+  los mapas de CH3, CH4 y CH2 y la franja de resonancia de CH2, y página de conteos por categoría),
+  `resumen_trpd_3sensores.csv`, `<probeta>/<X>kV/` con `trpd_<ch>.png`, `tabla_<ch>.csv` (todas las
+  detecciones con `evento_id` y `categoria`) y `eventos.csv`; `descargas_a_revisar.txt` (UTF-8 con BOM)
+  con cada evento dudoso y la ruta de su figura en `dudosas/<probeta>/<X>kV/` (CH3 del disparo completo
+  y CH3, CH4, CH2 filtrada + residuo + umbral dinámico en ±1 µs; un disparo con más de
+  `MAX_FIG_POR_DISPARO` dudosas lleva una sola figura).
+
+### `invertir_canal.py` — copia de una medición con un canal de polaridad invertida
+
+`python invertir_canal.py <origen> <destino> [--canal ch2]`
+
+- Copia la medición (probeta o carpeta `<X>kV`) y en cada `chN.h5` del canal cambia de signo los
+  atributos `YInc` e `YOrg` del grupo `Waveforms/Channel N`. Como la lectura es
+  `v = raw·YInc + YOrg`, la señal queda exactamente −v sin reescribir muestras. Marca el grupo con el
+  atributo `TRPD_polaridad_invertida` y se niega a invertir dos veces. No toca el origen.
+- Uso actual: `med_proced/3v_4mm_0` (HFCT montado al revés) → `med_proced_hfct_inv/3v_4mm_0`.
 
 ### `generar_reporte_html.py` — página HTML de revisión del TRPD (reporte2)
 

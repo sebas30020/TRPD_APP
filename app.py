@@ -81,6 +81,8 @@ TMIN_DEFECTO_US = 0.15
 
 # Edición manual de peaks (marca temporal):
 SNAP_MARCA_US = 0.010   # el clic se ajusta al máximo de la señal en ±10 ns
+COLOR_MANUAL = tema.OK      # rombo de los peaks añadidos a mano (verde, distinto de la marca azul)
+COLOR_SELECCION = "#e0a800"  # anillo del peak seleccionado (clic en el TRPD o en una cruz)
 TOL_PEAK_US = 0.005     # un peak detectado "es" una marca guardada si está a <= 5 ns
 RESNAP_US = 0.001       # al reaplicar un añadido (p. ej. sin filtros) se reajusta en ±1 ns
 
@@ -217,7 +219,12 @@ def _canales_senal(carpeta):
     return [c for c in canales_presentes(carpeta) if c != "ch1"]
 
 
-def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rango_x=None, marca=None):
+def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rango_x=None, marca=None,
+           vista_previa=False, seleccion=None, rev_zoom=0):
+    """Señales del segmento con umbrales, cruces de peaks del canal activo, peaks manuales y
+    quitados de `cap` (captura editada), marca temporal y peaks seleccionados resaltados.
+    `vista_previa`: los parámetros de la UI difieren de la captura; las cruces son la
+    detección con los parámetros nuevos, pero manuales y quitados siguen viniendo de `cap`."""
     canales = canales_presentes(carpeta)
     fig = make_subplots(
         rows=len(canales), cols=1,
@@ -290,7 +297,7 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
                     marker=dict(symbol="x", color=tema.MUTED_LIGHT, size=8, line=dict(width=1)),
                     hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak quitado</extra>",
                 ), row=fila, col=1)
-        else:
+        if cap is None or vista_previa:
             tp, vp = _detectar_con_ventana(carpeta, canal, t_trig, v_trig, u0,
                                            _muestras(carpeta, canal, dist_act), tmin_act)
             customdata = None
@@ -305,13 +312,36 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
             row=fila, col=1,
         )
         if manual is not None and len(manual[0]):
-            fig.add_trace(go.Scattergl(
+            # Rombo grande con borde oscuro: visible sobre la señal y sobre la línea de la marca.
+            fig.add_trace(go.Scatter(
                 x=manual[0], y=manual[1], mode="markers", name="peaks manuales",
                 customdata=manual[2], showlegend=False,
-                marker=dict(symbol="diamond", color=tema.ACCENT, size=10,
-                            line=dict(color="white", width=1)),
+                marker=dict(symbol="diamond", color=COLOR_MANUAL, size=14,
+                            line=dict(color=tema.INK, width=1.5)),
                 hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak manual</extra>",
             ), row=fila, col=1)
+        # Peaks seleccionados (clic en el TRPD o en una cruz) de este segmento: anillo + línea.
+        if cap is not None and seleccion:
+            sel_seg = [i for i in seleccion if 0 <= i < cap["seg"].size and cap["seg"][i] == seg]
+            todos = np.nonzero(cap["seg"] == seg)[0].tolist()
+            if sel_seg:
+                fig.add_trace(go.Scatter(
+                    x=cap["t_peak"][sel_seg], y=cap["v_peak"][sel_seg], mode="markers",
+                    name="seleccionado", customdata=sel_seg, showlegend=False,
+                    marker=dict(symbol="circle-open", color=COLOR_SELECCION, size=22,
+                                line=dict(color=COLOR_SELECCION, width=3)),
+                    hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>seleccionado</extra>",
+                ), row=fila, col=1)
+                for i in sel_seg:
+                    fig.add_vline(x=float(cap["t_peak"][i]), row="all", col=1, editable=False,
+                                  line=dict(color=COLOR_SELECCION, width=1.5, dash="dot"))
+                if len(sel_seg) == 1:
+                    i = sel_seg[0]
+                    fig.add_annotation(
+                        x=float(cap["t_peak"][i]), y=float(cap["v_peak"][i]), row=fila, col=1,
+                        text=f"peak {todos.index(i) + 1} de {len(todos)} · t = {cap['t_peak'][i]:.4f} µs",
+                        showarrow=True, arrowhead=0, ax=40, ay=-28, font=dict(size=11, color=tema.INK),
+                        bgcolor="rgba(255,255,255,0.9)", bordercolor=COLOR_SELECCION)
         # Marca temporal (después de las líneas de umbral: umbrales_desde_relayout
         # supone que shapes[0..2] son los umbrales).
         if marca and marca.get("carpeta") == carpeta and marca.get("canal") == canal                 and marca.get("seg") == seg and marca.get("t_us") is not None:
@@ -328,7 +358,8 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
         height=850, showlegend=False, margin=dict(t=70, r=20),
         title=f"{carpeta} — Segmento {seg}",
         hovermode="closest", hoverdistance=20, dragmode="zoom",
-        uirevision=f"{carpeta}-{canal}",
+        # rev_zoom cambia solo cuando hay que volver a la vista completa (peak seleccionado fuera).
+        uirevision=f"{carpeta}-{canal}-{rev_zoom}",
         editrevision=f"{carpeta}-{canal}-" + "-".join(
             str(cfg_sensores.get(ch, {}).get("umbral")) for ch in TRIGGERS),
     )
@@ -1686,15 +1717,6 @@ app.layout = html.Div(
                 ),
                 html.Button("Examinar…", id="btn_examinar", n_clicks=0,
                             style=tema.ESTILO_BOTON_SECONDARY),
-                html.Label("Segmento:"),
-                html.Button("◀", id="segmento_prev", n_clicks=0, title="Segmento anterior (tecla ←)",
-                            style=tema.ESTILO_BOTON_STEPPER),
-                dcc.Input(id="segmento", type="number", min=1, max=1, step=1, value=1,
-                          debounce=True, style={"width": "64px", "textAlign": "center"}),
-                html.Span(id="segmento_total", children="/ 1",
-                          style={"fontSize": "12px", "color": tema.MUTED}),
-                html.Button("▶", id="segmento_next", n_clicks=0, title="Segmento siguiente (tecla →)",
-                            style=tema.ESTILO_BOTON_STEPPER),
                 html.Label("Trigger activo:"),
                 dcc.Dropdown(
                     id="canal",
@@ -1903,7 +1925,8 @@ app.layout = html.Div(
                                 dcc.Tab(label="Señales", value="senales", **_TAB),
                                 dcc.Tab(label="Transformada S", value="st", **_TAB),
                             ]),
-                            html.Div(id="panel_senales", children=[
+                            # Barra de edición de peaks (solo en la vista de Señales)
+                            html.Div(id="panel_senales_ediciones", children=[
                                 html.Div(
                                     className="barra-ediciones",
                                     style={
@@ -1912,8 +1935,9 @@ app.layout = html.Div(
                                         "borderBottom": f"1px solid {tema.BORDER}", "marginBottom": "4px",
                                         "flexWrap": "wrap",
                                     },
-                                    title="Clic sobre la señal del canal activo para poner la marca (se ajusta "
-                                          "al máximo en ±10 ns); clic en una cruz para seleccionar un peak.",
+                                    title="Añadir: clic sobre la señal del canal activo (la marca se ajusta al "
+                                          "máximo en ±10 ns) → «Añadir peak en la marca». Quitar: clic en una cruz "
+                                          "o rombo de la señal, o en un punto del TRPD → «Quitar peak».",
                                     children=[
                                         html.Span("Marca t [µs]:", style={"fontSize": "11px", "fontWeight": "bold", "color": tema.INK}),
                                         dcc.Input(id="input_marca_t", type="number", step="any", debounce=True,
@@ -1934,6 +1958,29 @@ app.layout = html.Div(
                                                   style={"fontSize": "11px", "color": tema.MUTED, "fontWeight": "600", "marginLeft": "auto"}),
                                     ],
                                 ),
+                            ]),
+                            # Navegación de segmentos, junto a las figuras (teclas ←/→ en assets/teclado.js);
+                            # visible también en la Transformada S del segmento.
+                            html.Div(
+                                    className="barra-segmentos",
+                                    style={
+                                        "display": "flex", "alignItems": "center", "gap": "6px",
+                                        "padding": "6px 8px", "backgroundColor": tema.BG,
+                                        "borderBottom": f"1px solid {tema.BORDER}", "marginBottom": "4px",
+                                    },
+                                    children=[
+                                        html.Span("Segmento:", style={"fontSize": "11px", "fontWeight": "bold", "color": tema.INK}),
+                                        html.Button("◀", id="segmento_prev", n_clicks=0, title="Segmento anterior (tecla ←)",
+                                                    style=tema.ESTILO_BOTON_STEPPER),
+                                        dcc.Input(id="segmento", type="number", min=1, max=1, step=1, value=1,
+                                                  debounce=True, style={"width": "64px", "textAlign": "center"}),
+                                        html.Span(id="segmento_total", children="/ 1",
+                                                  style={"fontSize": "12px", "color": tema.MUTED}),
+                                        html.Button("▶", id="segmento_next", n_clicks=0, title="Segmento siguiente (tecla →)",
+                                                    style=tema.ESTILO_BOTON_STEPPER),
+                                    ],
+                                ),
+                            html.Div(id="panel_senales", children=[
                                 dcc.Loading(type="circle", delay_show=300, color=tema.ACCENT, children=dcc.Graph(
                                     id="grafico",
                                     # Solo las shapes con editable=True (umbrales) se arrastran;
@@ -2404,6 +2451,7 @@ def sincronizar_parametros_sensores(carpeta, relayout, sw_filtros=("on",)):
 
 @app.callback(
     Output("grafico", "figure"),
+    Output("rango_x", "data", allow_duplicate=True),
     Input("carpeta", "value"),
     Input("segmento", "value"),
     Input("canal", "value"),
@@ -2422,24 +2470,37 @@ def sincronizar_parametros_sensores(carpeta, relayout, sw_filtros=("on",)):
     Input("switch_filtros", "value"),
     Input("ediciones_peaks", "data"),
     Input("marca_peak", "data"),
+    Input("seleccion", "data"),
     State("rango_x", "data"),
+    prevent_initial_call="initial_duplicate",
 )
 def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_filtros=("on",),
-               store_ed=None, marca=None, rango=None):
+               store_ed=None, marca=None, sel=None, rango=None):
     if not carpeta or not seg:
-        return _fig_vacia("Seleccione una medición con el botón 📁 para ver sus señales.", altura=850)
+        return _fig_vacia("Seleccione una medición con el botón 📁 para ver sus señales.", altura=850), no_update
     filtrado = _filtrado(sw_filtros)
     cfg_sensores = _cfg_sensores(u2, d2, t2, u3, d3, t3, u4, d4, t4)
-    cap = None
-    if (p and p["canal"] == canal and p["carpeta"] == carpeta
-            and p.get("filtrado", True) == filtrado
-            and _captura_vigente(p, cfg_sensores.get(canal, {}))):
+    rev = int((rango or {}).get("rev", 0))
+    rango_out = no_update
+    cap, vista_previa = None, False
+    if p and p["canal"] == canal and p["carpeta"] == carpeta and p.get("filtrado", True) == filtrado:
+        # Con parámetros cambiados sin recalcular (vista previa) las cruces usan los nuevos,
+        # pero los peaks manuales y quitados de la captura se siguen dibujando.
         cap = _cap_p(p, _ed(store_ed, carpeta, canal))
+        vista_previa = not _captura_vigente(p, cfg_sensores.get(canal, {}))
+    rango_x = _rango_vigente(rango, carpeta, canal)
+    if cap is not None and sel and rango_x and None not in rango_x:
+        # Peak seleccionado fuera de la vista guardada: vista completa para que se vea.
+        t_sel = [float(cap["t_peak"][i]) for i in sel if 0 <= i < cap["seg"].size and cap["seg"][i] == int(seg)]
+        if t_sel and not all(rango_x[0] <= t <= rango_x[1] for t in t_sel):
+            rango_x, rev = None, rev + 1
+            rango_out = {"rev": rev}
     try:
         return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap,
-                      filtrado=filtrado, rango_x=_rango_vigente(rango, carpeta, canal), marca=marca)
+                      filtrado=filtrado, rango_x=rango_x, marca=marca,
+                      vista_previa=vista_previa, seleccion=sel, rev_zoom=rev), rango_out
     except Exception as e:
-        return _fig_error("No se pudo dibujar las señales", e, altura=850)
+        return _fig_error("No se pudo dibujar las señales", e, altura=850), no_update
 
 
 def _rango_desde_relayout(relayout):
@@ -2468,9 +2529,10 @@ def _rango_desde_relayout(relayout):
     State("segmento", "value"),
     State("canal", "value"),
     State("switch_filtros", "value"),
+    State("rango_x", "data"),
     prevent_initial_call=True,
 )
-def redecimar_zoom(relayout, carpeta, seg, canal, sw_filtros=("on",)):
+def redecimar_zoom(relayout, carpeta, seg, canal, sw_filtros=("on",), previo=None):
     """Zoom/pan en el gráfico de señales: reenvía solo las trazas de señal con el
     tramo visible (crudo si dura <= SIN_DIEZMADO_US, diezmado si no). Es un Patch:
     no se reconstruye la figura ni se pierden zoom ni umbrales."""
@@ -2485,7 +2547,9 @@ def redecimar_zoom(relayout, carpeta, seg, canal, sw_filtros=("on",)):
         td, vd = tramo_visible(t, v, x0, x1)
         pat["data"][i]["x"] = _arreglo_tipado(td)
         pat["data"][i]["y"] = _arreglo_tipado(vd)
-    guardado = None if rango == "completo" else {"carpeta": carpeta, "canal": canal, "x0": x0, "x1": x1}
+    rev = int((previo or {}).get("rev", 0))   # conservar la revisión de zoom de actualizar()
+    guardado = {"rev": rev} if rango == "completo" else {"carpeta": carpeta, "canal": canal,
+                                                          "x0": x0, "x1": x1, "rev": rev}
     return pat, guardado
 
 
@@ -2550,12 +2614,14 @@ def alternar_panel_principal(tab):
 
 @app.callback(
     Output("panel_senales", "hidden"),
+    Output("panel_senales_ediciones", "hidden"),
     Output("panel_st_segmento", "hidden"),
     Input("tabs_dominio", "value"),
 )
 def alternar_panel_dominio(tab_dom):
-    """Alterna entre la vista temporal de Señales y la Transformada S del segmento."""
-    return tab_dom != "senales", tab_dom != "st"
+    """Alterna entre la vista temporal de Señales (con su barra de edición de peaks) y la
+    Transformada S del segmento; la barra de segmentos queda visible en ambas."""
+    return tab_dom != "senales", tab_dom != "senales", tab_dom != "st"
 
 
 @app.callback(
@@ -3104,61 +3170,78 @@ def cargar_ediciones(carpeta):
 @app.callback(
     Output("marca_peak", "data"),
     Output("input_marca_t", "value"),
+    Output("aviso_ediciones", "children", allow_duplicate=True),
     Input("grafico", "clickData"),
     Input("input_marca_t", "value"),
     Input("carpeta", "value"),
     Input("canal", "value"),
     Input("segmento", "value"),
+    Input("ediciones_peaks", "data"),
     State("switch_filtros", "value"),
     State("marca_peak", "data"),
+    prevent_initial_call="initial_duplicate",
 )
-def fijar_marca(click, t_txt, carpeta, canal, seg, sw_filtros=("on",), marca=None):
+def fijar_marca(click, t_txt, carpeta, canal, seg, _ed_in=None, sw_filtros=("on",), marca=None):
     """Marca temporal para añadir un peak: clic sobre la señal del canal activo
-    (ajustado al máximo en ±SNAP_MARCA_US) o valor escrito en el campo t."""
+    (ajustado al máximo en ±SNAP_MARCA_US) o valor escrito en el campo t. Se borra al
+    cambiar de medición, canal o segmento y tras cada edición de peaks."""
     trig = ctx.triggered_id if ctx.triggered else None
+    if trig == "ediciones_peaks":
+        return None, None, no_update         # no borrar el aviso de la edición recién hecha
     if trig in ("carpeta", "canal", "segmento") or not carpeta or not seg:
-        return None, None
+        return None, None, ""
     if trig == "input_marca_t":
         if t_txt is None:
-            return None, no_update
+            return None, no_update, no_update
         if marca and marca.get("t_us") is not None and abs(float(marca["t_us"]) - float(t_txt)) < 1e-9:
-            return no_update, no_update
-        return {"carpeta": carpeta, "canal": canal, "seg": int(seg), "t_us": float(t_txt)}, no_update
+            return no_update, no_update, no_update
+        return {"carpeta": carpeta, "canal": canal, "seg": int(seg), "t_us": float(t_txt)}, no_update, ""
     if trig != "grafico" or not click or not click.get("points"):
-        return no_update, no_update
+        return no_update, no_update, no_update
     pt = click["points"][0]
     if pt.get("customdata") is not None:
-        return no_update, no_update          # cruz de peak: la gestiona la selección
+        return no_update, no_update, no_update   # cruz/rombo de peak: la gestiona la selección
     sig = _canales_senal(carpeta)
-    if canal not in sig or pt.get("curveNumber") != sig.index(canal) or pt.get("x") is None:
-        return no_update, no_update          # clic sobre otro canal
+    if canal not in sig or pt.get("x") is None:
+        return no_update, no_update, no_update
+    if pt.get("curveNumber") != sig.index(canal):
+        n = pt.get("curveNumber")
+        otro = sig[n].upper() if isinstance(n, int) and 0 <= n < len(sig) else "otro canal"
+        return no_update, no_update, (f"Clic sobre {otro}: la marca se pone sobre la señal del canal "
+                                      f"activo ({canal.upper()}); cámbielo en «Trigger activo».")
     r = ajustar_a_peak(carpeta, canal, int(seg), float(pt["x"]), SNAP_MARCA_US, _filtrado(sw_filtros))
     if r is None:
-        return no_update, no_update
+        return no_update, no_update, no_update
     t = round(r[0], 6)
-    return {"carpeta": carpeta, "canal": canal, "seg": int(seg), "t_us": t}, t
+    return {"carpeta": carpeta, "canal": canal, "seg": int(seg), "t_us": t}, t, ""
+
 
 
 @app.callback(
     Output("seleccion", "data"),
+    Output("segmento", "value", allow_duplicate=True),
     Input("captura_params", "data"),
     Input("grafico_scatter", "selectedData"),
     Input("grafico_scatter", "clickData"),
     Input("grafico", "clickData"),
     Input("ediciones_peaks", "data"),
     State("captura_params", "data"),
+    State("segmento", "value"),
+    prevent_initial_call="initial_duplicate",
 )
-def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p):
+def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p, seg_actual=None):
     """Fuente única de la selección (índices de la captura editada). La alimentan
     los clics/cajas del scatter TRPD y los clics en las cruces del canal trigger.
-    Una nueva captura o cualquier edición de peaks la limpian; los reset a None
-    (por redibujo) se ignoran para no romper el ciclo."""
+    Un clic en UN punto del TRPD además lleva al segmento de esa descarga (el gráfico
+    de señales la resalta). Una nueva captura o cualquier edición de peaks limpian la
+    selección; los reset a None (por redibujo) se ignoran para no romper el ciclo."""
     trg = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
     if trg.startswith("captura_params") or trg.startswith("ediciones_peaks"):
-        return []  # los índices cambian: limpiar selección
+        return [], no_update  # los índices cambian: limpiar selección
     if not p:
-        return no_update
-    n = _cap_p(p, _ed(store_ed, p["carpeta"], p["canal"]))["t_peak"].size
+        return no_update, no_update
+    cap = _cap_p(p, _ed(store_ed, p["carpeta"], p["canal"]))
+    n = cap["t_peak"].size
 
     if trg == "grafico.clickData":            # cruces del trigger (customdata)
         idx = _idx_cruces(click_g, n)
@@ -3169,7 +3252,14 @@ def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p):
     else:
         idx = None
     # None = reset por redibujo o clic sin punto válido: no cambiar la selección.
-    return no_update if idx is None else idx
+    if idx is None:
+        return no_update, no_update
+    seg = no_update
+    if trg == "grafico_scatter.clickData" and len(idx) == 1:
+        s = int(cap["seg"][idx[0]])
+        if s != seg_actual:
+            seg = s
+    return idx, seg
 
 
 def _puntos(cap, indices):
@@ -3210,7 +3300,7 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
     ed = _ed(store, carpeta, canal)
     hist = [dict(h) for h in ed.get("historial") or []]
     cap = _cap_p(p, ed)
-    paso, limpiar_input = None, no_update
+    paso, limpiar_input, ok_msg = None, no_update, ""
 
     if trig in ("btn_excluir_seleccion", "btn_quitar_peak"):
         idx = list(sel or [])
@@ -3225,6 +3315,8 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
             return no_update, no_update, "Seleccione un peak (cruz o punto del TRPD) o ponga la marca sobre él."
         paso = {"accion": "quitar", "puntos": pts,
                 "desc": f"{len(pts)} descarga{'s' if len(pts) != 1 else ''}"}
+        ok_msg = (f"✓ Peak quitado: seg {pts[0]['seg']}, t = {pts[0]['t_us']:.4f} µs" if len(pts) == 1
+                  else f"✓ {len(pts)} peaks quitados")
 
     elif trig in ("btn_excluir_disparo", "input_excluir_disparo"):
         segs = parsear_lista_disparos(val_disparo, n_segmentos(carpeta))
@@ -3232,6 +3324,7 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
         if not segs:
             return no_update, "", "Disparo no válido."
         paso = {"accion": "quitar_disparo", "segs": segs, "desc": f"Disparo(s) {segs}"}
+        ok_msg = f"✓ Disparo(s) {segs} excluido(s)"
 
     elif trig == "btn_anadir_peak":
         if not marca or marca.get("carpeta") != carpeta or marca.get("canal") != canal \
@@ -3245,16 +3338,20 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
                 "desc": f"Peak manual seg {int(marca['seg'])}"}
         if _cap_p(p, {"historial": hist + [paso]})["omitidos"] > cap["omitidos"]:
             return no_update, no_update, "No se añadió: la ventana de 70 ns no cabe en la señal."
+        ya = bool(np.any((cap["seg"] == int(marca["seg"])) & (np.abs(cap["t_peak"] - r[0]) <= TOL_PEAK_US)))
+        ok_msg = (f"✓ Ya era un peak detectado (seg {int(marca['seg'])}, t = {r[0]:.4f} µs): queda fijado como manual"
+                  if ya else f"✓ Peak añadido: seg {int(marca['seg'])}, t = {r[0]:.4f} µs, Vmax = {r[1]:.1f} mV")
 
     elif trig in ("btn_deshacer_exclusion", "btn_deshacer_edicion"):
         if not hist:
             return no_update, no_update, ""
-        hist.pop()
+        ok_msg = f"✓ Deshecho: {hist.pop().get('desc') or 'último paso'}"
 
     elif trig in ("btn_restaurar_descargas", "btn_restaurar_ediciones"):
         if not hist:
             return no_update, no_update, ""
         hist = []
+        ok_msg = "✓ Ediciones del canal restauradas"
     else:
         return no_update, no_update, no_update
 
@@ -3268,7 +3365,18 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
     else:
         canales = ediciones_medicion(carpeta)
     canales[canal] = {"historial": hist}
-    return {"carpeta": carpeta, "canales": canales}, limpiar_input, ""
+    return {"carpeta": carpeta, "canales": canales}, limpiar_input, ok_msg
+
+
+@app.callback(
+    Output("aviso_ediciones", "style"),
+    Input("aviso_ediciones", "children"),
+)
+def estilo_aviso_ediciones(texto):
+    """Avisos de éxito (empiezan por ✓) en verde; el resto (errores) en rojo."""
+    ok = isinstance(texto, str) and texto.startswith("✓")
+    return {"fontSize": "11px", "fontWeight": "600" if ok else "normal",
+            "color": tema.OK if ok else tema.ERROR}
 
 
 @app.callback(

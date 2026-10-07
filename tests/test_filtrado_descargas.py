@@ -179,7 +179,7 @@ def test_gestionar_ediciones_flujo_completo(monkeypatch):
     # 1. Lazo sobre los índices 0 y 1 -> (seg 1, 0.1 µs) y (seg 1, 0.2 µs)
     st1, _, aviso = accion("btn_excluir_seleccion", {"carpeta": "mock", "canales": {}}, sel=[0, 1])
     h = _hist(st1, "mock", "ch4")
-    assert aviso == "" and len(h) == 1 and h[0]["accion"] == "quitar"
+    assert aviso.startswith("✓") and len(h) == 1 and h[0]["accion"] == "quitar"
     assert h[0]["puntos"] == [{"seg": 1, "t_us": 0.1}, {"seg": 1, "t_us": 0.2}]
     assert contar_peaks("mock", "ch4", 10.0, 1.0, 0.0, ediciones={"historial": h})[1] == [0, 2, 2]
     assert guardados[-1][:2] == ("mock", "ch4")
