@@ -64,6 +64,23 @@ def test_1_sintetico_t_arribo():
     ta_neg = arribo.t_arribo(t, -v, umbral=umbral, distancia=10, tmin=0.0)
     assert ta_neg is not None and abs(ta_neg - ta) < 1e-7
 
+    # 1.5 Lóbulo positivo pequeño que cruza primero, seguido de un lóbulo negativo
+    #     mayor dentro de la distancia: el arribo es el primer cruce de |v|, no el
+    #     flanco del lóbulo negativo.
+    v_osc = np.zeros_like(t)
+    lob_pos = (t >= 0.30) & (t <= 0.32)
+    v_osc[lob_pos] = 2.0 * np.sin(np.pi * (t[lob_pos] - 0.30) / 0.02)
+    lob_neg = (t > 0.32) & (t <= 0.36)
+    v_osc[lob_neg] = -6.0 * np.sin(np.pi * (t[lob_neg] - 0.32) / 0.04)
+    t_esperado = 0.30 + 0.02 * np.arcsin(0.5) / np.pi  # 2·sin(...) = 1
+    ta_osc = arribo.t_arribo(t, v_osc, umbral=1.0, distancia=int(0.05 / dt), tmin=0.0)
+    assert ta_osc is not None and abs(ta_osc - t_esperado) < 2e-5, ta_osc
+
+    # 1.6 t_máx: una descarga posterior a la franja del estallido no se toma como arribo
+    assert arribo.t_arribo(t, v_osc, umbral=1.0, distancia=None, tmin=0.0, tmax=0.29) is None
+    ta_tmax = arribo.t_arribo(t, v_osc, umbral=1.0, distancia=None, tmin=0.0, tmax=0.35)
+    assert ta_tmax is not None and abs(ta_tmax - t_esperado) < 2e-5
+
 
 def test_2_t10_por_segmento_app():
     """Test 2: t10 por segmento en app.py."""

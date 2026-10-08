@@ -29,6 +29,10 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
             # Stores
             dcc.Store(id="resultado_store", data={}),
             dcc.Store(id="iec_store", data={}),
+            # Ediciones manuales de arribos ({"carpeta", "canales": {ch: {"historial"}}})
+            # y marca temporal de edición ({carpeta, canal, seg, t_us})
+            dcc.Store(id="ediciones_arribo"),
+            dcc.Store(id="marca_arribo"),
             dcc.Store(id="explorador_ruta_actual", data=rutas.ruta_inicial()),
             # TRPD_APP la abre embebida con ?embebido=1&carpeta=<medición>
             dcc.Location(id="url", refresh=False),
@@ -161,6 +165,10 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                     dcc.Input(id="umbral_ch2", debounce=True, type="number", step=0.1, style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
                                     html.Span("t_mín [µs]:"),
                                     dcc.Input(id="tmin_ch2", debounce=True, type="number", step=0.005, value=0.15, style={"width": "65px", "fontSize": "12px", "padding": "2px 4px"}),
+                                    html.Span("t_máx [µs]:"),
+                                    dcc.Input(id="tmax_ch2", debounce=True, type="number", step=0.005,
+                                              placeholder="sin límite",
+                                              style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
                                 ],
                             ),
                             # CH3: Antena 1
@@ -177,6 +185,10 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                     dcc.Input(id="umbral_ch3", debounce=True, type="number", step=0.1, style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
                                     html.Span("t_mín [µs]:"),
                                     dcc.Input(id="tmin_ch3", debounce=True, type="number", step=0.005, value=0.15, style={"width": "65px", "fontSize": "12px", "padding": "2px 4px"}),
+                                    html.Span("t_máx [µs]:"),
+                                    dcc.Input(id="tmax_ch3", debounce=True, type="number", step=0.005,
+                                              placeholder="sin límite",
+                                              style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
                                 ],
                             ),
                             # CH4: Antena 2
@@ -193,6 +205,10 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                     dcc.Input(id="umbral_ch4", debounce=True, type="number", step=0.1, style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
                                     html.Span("t_mín [µs]:"),
                                     dcc.Input(id="tmin_ch4", debounce=True, type="number", step=0.005, value=0.15, style={"width": "65px", "fontSize": "12px", "padding": "2px 4px"}),
+                                    html.Span("t_máx [µs]:"),
+                                    dcc.Input(id="tmax_ch4", debounce=True, type="number", step=0.005,
+                                              placeholder="sin límite",
+                                              style={"width": "75px", "fontSize": "12px", "padding": "2px 4px"}),
                                 ],
                             ),
                             # Inputs ocultos para retrocompatibilidad con tests existentes
@@ -311,6 +327,41 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
                                     style={"fontSize": "15px", "margin": "0", "color": tema.INK}),
                             html.Span("Nota: Arrastra la línea horizontal de umbral con el ratón en cualquier canal (CH2–CH4) para ajustar su trigger en tiempo real.",
                                       style={"fontSize": "12px", "color": tema.ACCENT, "fontWeight": "500"}),
+                        ],
+                    ),
+                    # Barra de edición manual de arribos (como «Añadir peak» de TRPD_APP)
+                    html.Div(
+                        style={
+                            "display": "flex", "alignItems": "center", "gap": "6px",
+                            "padding": "6px 8px", "backgroundColor": tema.BG,
+                            "border": f"1px solid {tema.BORDER}", "borderRadius": "6px",
+                            "marginBottom": "6px", "flexWrap": "wrap", "fontSize": "11px",
+                        },
+                        title="Fijar: clic sobre la señal de CH2–CH4 en el instante del arribo (o escriba t) → "
+                              "«Fijar arribo en la marca». Quitar: clic en la ✕/rombo del arribo (o ponga la "
+                              "marca en ese canal) → «Quitar disparo»: el disparo no entra al promedio del canal.",
+                        children=[
+                            html.Span("Marca:", style={"fontWeight": "bold", "color": tema.INK}),
+                            dcc.Dropdown(id="marca_canal", options=[{"label": c.upper(), "value": c}
+                                                                    for c in ("ch2", "ch3", "ch4")],
+                                         value="ch2", clearable=False, searchable=False,
+                                         style={"width": "80px", "fontSize": "11px"}),
+                            html.Span("t [µs]:", style={"fontWeight": "bold", "color": tema.INK}),
+                            dcc.Input(id="marca_t", type="number", step="any", debounce=True,
+                                      placeholder="clic en la señal",
+                                      style={"width": "110px", "fontSize": "11px", "padding": "3px 5px",
+                                             "borderRadius": "4px", "border": f"1px solid {tema.BORDER}"}),
+                            html.Button("Fijar arribo en la marca", id="btn_fijar_arribo", n_clicks=0, disabled=True,
+                                        style=tema.ESTILO_BOTON_SUCCESS),
+                            html.Button("Quitar disparo", id="btn_quitar_arribo", n_clicks=0, disabled=True,
+                                        style=tema.ESTILO_BOTON_DANGER),
+                            html.Button("Deshacer", id="btn_deshacer_arribo", n_clicks=0, disabled=True,
+                                        style=tema.ESTILO_BOTON_WARN),
+                            html.Button("Restaurar canal", id="btn_restaurar_arribo", n_clicks=0, disabled=True,
+                                        style=tema.ESTILO_BOTON_SECONDARY),
+                            html.Span(id="aviso_arribo", style={"fontSize": "11px", "color": tema.ERROR}),
+                            html.Span(id="badge_arribo", style={"fontSize": "11px", "color": tema.MUTED,
+                                                                "fontWeight": "600", "marginLeft": "auto"}),
                         ],
                     ),
                     dcc.Loading(dcc.Graph(id="grafico_canal", config={"displayModeBar": True, "edits": {"shapePosition": True}})),

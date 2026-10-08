@@ -694,6 +694,9 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
                 "distancia_us": round(float(params["distancia_us"]), 4) if params.get("distancia_us") is not None else None,
                 "tmin_us": round(float(params["tmin_us"]), 4) if params.get("tmin_us") is not None else None,
             }
+            if params.get("tmax_us") is not None:
+                # Fin de la ventana de búsqueda del arribo (solo calibración)
+                bloque[ch]["tmax_us"] = round(float(params["tmax_us"]), 4)
             if filtros and ch in filtros:
                 # Filtro digital con que se midió el arribo (ver filtros.py)
                 bloque[ch]["filtro"] = filtros[ch]

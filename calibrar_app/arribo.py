@@ -6,7 +6,6 @@ y la filtra mediante el estimador robusto MAD (k=5.0).
 
 from __future__ import annotations
 import numpy as np
-from scipy.signal import find_peaks
 from datos import (
     canales_presentes,
     n_segmentos,
@@ -21,43 +20,49 @@ MAD_K = 5.0  # Atípico si |t_lag - mediana| > MAD_K * 1.4826 * MAD
 _ARRIBO_CACHE: dict[tuple, dict] = {}
 
 
-def t_arribo(t: np.ndarray, v: np.ndarray, umbral: float, distancia: int | None, tmin: float | None) -> float | None:
-    """Instante t_ant (µs) por primer cruce del umbral en el frente de subida de |v|.
+def t_arribo(t: np.ndarray, v: np.ndarray, umbral: float, distancia: int | None, tmin: float | None,
+             tmax: float | None = None) -> float | None:
+    """Instante t_ant (µs) del primer cruce ascendente de |v| sobre el umbral.
 
-    Aplica máscara t >= tmin. Busca peaks en |v| con distancia mínima para que
-    pequeños precursores EMI queden absorbidos en el peak mayor. Luego retrocede
-    desde el primer peak hasta la última muestra por debajo del umbral e interpola
-    linealmente el cruce sub-muestra. Devuelve None si no hay cruce observable.
+    Aplica máscara tmin <= t <= tmax (tmax None: sin límite; acota la franja donde
+    puede llegar el estallido del spark gap) y busca la primera muestra i con |v[i]| >= umbral
+    precedida de |v[i-1]| < umbral (lóbulo positivo o negativo, lo que llegue
+    antes), e interpola linealmente el cruce sub-muestra. Devuelve None si no hay
+    cruce observable.
+
+    `distancia` se conserva por compatibilidad de firma y no se usa: el antiguo
+    filtrado con find_peaks(distance=...) descartaba el primer lóbulo cuando lo
+    seguía otro de mayor |v| y marcaba el arribo en un flanco posterior.
     """
-    if tmin is not None:
-        mask = t >= tmin
+    if tmin is not None or tmax is not None:
+        mask = np.ones(t.size, dtype=bool)
+        if tmin is not None:
+            mask &= t >= tmin
+        if tmax is not None:
+            mask &= t <= tmax
         t, v = t[mask], v[mask]
     if v.size < 2:
         return None
     a = np.abs(v)
-    idx, _ = find_peaks(a, height=umbral, distance=distancia)
-    if idx.size == 0:
+    cruces = np.nonzero((a[1:] >= umbral) & (a[:-1] < umbral))[0]
+    if cruces.size == 0:
         return None
-    i_p = int(idx[0])
-    # Retroceder desde i_p hasta la última muestra j < i_p con a[j] < umbral
-    j_candidates = np.nonzero(a[:i_p] < umbral)[0]
-    if j_candidates.size == 0:
-        return None  # Señal ya superaba el umbral desde el inicio
-    j = int(j_candidates[-1])
+    j = int(cruces[0])  # última muestra bajo el umbral antes del cruce
     da = a[j + 1] - a[j]
     if da <= 0:
         return float(t[j])
     return float(t[j] + (umbral - a[j]) * (t[j + 1] - t[j]) / da)
 
 
-def t_arribo_por_segmento(carpeta: str, canal: str, umbral: float, dist_us: float, tmin: float) -> list[float | None]:
+def t_arribo_por_segmento(carpeta: str, canal: str, umbral: float, dist_us: float, tmin: float,
+                          tmax: float | None = None) -> list[float | None]:
     """Calcula t_ant para cada segmento de un canal en la medición dada."""
     nsegs = n_segmentos(carpeta) if canal in canales_presentes(carpeta) else 0
     distancia = _muestras(carpeta, canal, dist_us)
     t_ant_list = []
     for s in range(1, nsegs + 1):
         t, v = cargar_segmento(carpeta, canal, s, ventana=VENTANA_T10)
-        ta = t_arribo(t, v, umbral, distancia, tmin)
+        ta = t_arribo(t, v, umbral, distancia, tmin, tmax)
         t_ant_list.append(ta)
     return t_ant_list
 
@@ -87,16 +92,19 @@ def filtrar_mad(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, float | None, 
 
 
 def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0.05, tmin: float = 0.15,
-                     referencia: str = "t10", distancia_us: float | None = None) -> dict:
+                     referencia: str = "t10", distancia_us: float | None = None,
+                     tmax: float | None = None) -> dict:
     """Calcula el retardo instrumental t_lag = t_ant - ancla para cada segmento.
 
-    Filtra atípicos por MAD y promedia los válidos. Cacheado por sesión.
+    El arribo se busca en [tmin, tmax]: un disparo sin cruce en esa franja (p. ej. sin
+    estallido del spark gap) no entra al promedio. Filtra atípicos por MAD y promedia
+    los válidos. Cacheado por sesión.
     Acepta tanto dist_us como distancia_us para compatibilidad total de llamadas.
     """
     if distancia_us is not None:
         dist_us = distancia_us
     key = (carpeta, canal, round(float(umbral), 6) if umbral is not None else None,
-           dist_us, tmin, referencia)
+           dist_us, tmin, tmax, referencia)
     if key in _ARRIBO_CACHE:
         return _ARRIBO_CACHE[key]
 
@@ -115,7 +123,7 @@ def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0
             "n_total": 0,
             "criterio": "primer_cruce_umbral",
             "referencia": referencia,
-            "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin},
+            "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin, "tmax_us": tmax},
         }
         _ARRIBO_CACHE[key] = res
         return res
@@ -129,7 +137,7 @@ def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0
 
     for s in range(1, nsegs + 1):
         t, v = cargar_segmento(carpeta, canal, s, ventana=VENTANA_T10)
-        ta = t_arribo(t, v, umbral, distancia, tmin)
+        ta = t_arribo(t, v, umbral, distancia, tmin, tmax)
         t_ant_list.append(ta)
         if ta is not None and s <= len(ancla):
             t_lag_arr[s - 1] = ta - ancla[s - 1]
@@ -151,7 +159,7 @@ def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0
         "criterio": "primer_cruce_umbral",
         "referencia": referencia,
         "ancla_us": ancla.tolist() if hasattr(ancla, "tolist") else list(ancla),
-        "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin},
+        "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin, "tmax_us": tmax},
     }
     _ARRIBO_CACHE[key] = res
     return res

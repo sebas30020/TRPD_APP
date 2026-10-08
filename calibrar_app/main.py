@@ -47,6 +47,12 @@ from persistencia import (
     construir_info_ancla,
     guardar_calibracion_metadata,
 )
+from ediciones import (
+    ediciones_medicion,
+    guardar_ediciones_canal,
+    estado_ediciones,
+    resultados_editados,
+)
 from interfaz import layout
 
 
@@ -345,6 +351,11 @@ def sincronizar_triggers(
     Input("tmin_ch3", "value"),
     Input("umbral_ch4", "value"),
     Input("tmin_ch4", "value"),
+    Input("ediciones_arribo", "data"),
+    Input("marca_arribo", "data"),
+    Input("tmax_ch2", "value"),
+    Input("tmax_ch3", "value"),
+    Input("tmax_ch4", "value"),
 )
 def actualizar_grafico_canal(
     carpeta: str,
@@ -360,6 +371,11 @@ def actualizar_grafico_canal(
     tmin3: float | None = None,
     u4: float | None = None,
     tmin4: float | None = None,
+    store_ed: dict | None = None,
+    marca: dict | None = None,
+    tmax2: float | None = None,
+    tmax3: float | None = None,
+    tmax4: float | None = None,
 ):
     """Actualiza el gráfico multicanal sincronizado con umbrales independientes y marcas de arribo."""
     if not carpeta or not seg:
@@ -373,14 +389,17 @@ def actualizar_grafico_canal(
         "ch2": {
             "umbral": u2 if u2 is not None else (ucal if canal == "ch2" and ucal is not None else float(umbral_defecto(carpeta, "ch2", seg=seg))),
             "tmin": tmin2 if tmin2 is not None else (tmincal if tmincal is not None else 0.15),
+            "tmax": tmax2,
         },
         "ch3": {
             "umbral": u3 if u3 is not None else (ucal if canal == "ch3" and ucal is not None else float(umbral_defecto(carpeta, "ch3", seg=seg))),
             "tmin": tmin3 if tmin3 is not None else (tmincal if tmincal is not None else 0.15),
+            "tmax": tmax3,
         },
         "ch4": {
             "umbral": u4 if u4 is not None else (ucal if canal in ("ch4", "todos") and ucal is not None else float(umbral_defecto(carpeta, "ch4", seg=seg))),
             "tmin": tmin4 if tmin4 is not None else (tmincal if tmincal is not None else 0.15),
+            "tmax": tmax4,
         },
     }
 
@@ -403,7 +422,199 @@ def actualizar_grafico_canal(
         ancla_us=ancla_us,
         referencia_nombre=ref_nombre,
         cfg_sensores=cfg_sensores,
+        ediciones=_ed_canales(store_ed, carpeta),
+        marca=marca if (marca or {}).get("carpeta") == carpeta else None,
     )
+
+
+# ---------------- Edición manual de arribos ----------------
+
+def _ed_canales(store_ed: dict | None, carpeta: str) -> dict:
+    """{canal: ediciones} del store si corresponde a la medición, si no {}."""
+    if not store_ed or store_ed.get("carpeta") != carpeta:
+        return {}
+    return dict(store_ed.get("canales") or {})
+
+
+@app.callback(
+    Output("ediciones_arribo", "data"),
+    Input("carpeta", "value"),
+)
+def cargar_ediciones_arribo(carpeta: str):
+    """Ediciones manuales de arribos de la medición (metadata.yaml: ediciones_arribo)."""
+    if not carpeta:
+        return None
+    return {"carpeta": carpeta, "canales": ediciones_medicion(carpeta)}
+
+
+@app.callback(
+    Output("marca_arribo", "data"),
+    Output("marca_t", "value"),
+    Output("marca_canal", "value"),
+    Output("aviso_arribo", "children", allow_duplicate=True),
+    Input("grafico_canal", "clickData"),
+    Input("marca_t", "value"),
+    Input("marca_canal", "value"),
+    Input("carpeta", "value"),
+    Input("segmento", "value"),
+    Input("ediciones_arribo", "data"),
+    State("marca_arribo", "data"),
+    prevent_initial_call="initial_duplicate",
+)
+def fijar_marca_arribo(click, t_txt, canal_sel, carpeta, seg, _ed=None, marca=None):
+    """Marca temporal para editar un arribo: clic sobre la señal de CH2–CH4 (el canal
+    sale del curveNumber de la traza; la ✕/rombo del arribo lo trae en customdata),
+    o valor escrito en el campo t para el canal elegido. Se borra al cambiar de
+    medición o segmento y tras cada edición."""
+    trig = ctx.triggered_id if ctx.triggered else None
+    if trig == "ediciones_arribo":
+        return None, None, no_update, no_update   # conservar el aviso de la edición
+    if trig in ("carpeta", "segmento") or not carpeta or not seg:
+        return None, None, no_update, ""
+    if trig in ("marca_t", "marca_canal"):
+        if t_txt is None:
+            return None, no_update, no_update, no_update
+        nueva = {"carpeta": carpeta, "canal": canal_sel, "seg": int(seg), "t_us": float(t_txt)}
+        if marca == nueva:
+            return no_update, no_update, no_update, no_update
+        return nueva, no_update, no_update, ""
+    if trig != "grafico_canal" or not click or not click.get("points"):
+        return no_update, no_update, no_update, no_update
+    pt = click["points"][0]
+    if pt.get("x") is None:
+        return no_update, no_update, no_update, no_update
+    cd = pt.get("customdata")
+    if isinstance(cd, list):
+        cd = cd[0] if cd else None
+    if isinstance(cd, str) and cd in ("ch2", "ch3", "ch4"):
+        canal = cd
+    else:
+        canales = [c for c in ("ch1", "ch2", "ch3", "ch4") if c in canales_presentes(carpeta)]
+        n = pt.get("curveNumber")
+        canal = canales[n] if isinstance(n, int) and 0 <= n < len(canales) else None
+    if canal not in ("ch2", "ch3", "ch4"):
+        return no_update, no_update, no_update, "La marca se pone sobre la señal de un sensor (CH2–CH4)."
+    t = round(float(pt["x"]), 6)
+    return {"carpeta": carpeta, "canal": canal, "seg": int(seg), "t_us": t}, t, canal, ""
+
+
+@app.callback(
+    Output("ediciones_arribo", "data", allow_duplicate=True),
+    Output("aviso_arribo", "children"),
+    Input("btn_fijar_arribo", "n_clicks"),
+    Input("btn_quitar_arribo", "n_clicks"),
+    Input("btn_deshacer_arribo", "n_clicks"),
+    Input("btn_restaurar_arribo", "n_clicks"),
+    State("carpeta", "value"),
+    State("segmento", "value"),
+    State("marca_canal", "value"),
+    State("marca_arribo", "data"),
+    State("ediciones_arribo", "data"),
+    prevent_initial_call=True,
+)
+def gestionar_ediciones_arribo(n_fijar, n_quitar, n_undo, n_rest, carpeta, seg, canal_sel,
+                               marca=None, store=None):
+    """Fijar el arribo en la marca, quitar el disparo del promedio, deshacer y
+    restaurar. Cada acción es un paso del historial del canal guardado en metadata.yaml."""
+    trig = ctx.triggered_id if ctx.triggered else None
+    if not carpeta or not seg:
+        return no_update, "Elija una medición."
+    hay_marca = bool(marca and marca.get("carpeta") == carpeta and marca.get("seg") == int(seg)
+                     and marca.get("t_us") is not None)
+    canal = marca["canal"] if hay_marca else canal_sel
+    if canal not in ("ch2", "ch3", "ch4"):
+        return no_update, "Elija el canal de la marca."
+    canales = _ed_canales(store, carpeta) or ediciones_medicion(carpeta)
+    hist = [dict(h) for h in (canales.get(canal) or {}).get("historial") or []]
+
+    if trig == "btn_fijar_arribo":
+        if not hay_marca:
+            return no_update, "Ponga primero la marca sobre la señal del canal (clic o t)."
+        t = round(float(marca["t_us"]), 6)
+        hist.append({"accion": "fijar", "seg": int(seg), "t_us": t,
+                     "desc": f"Arribo manual {canal.upper()} disparo {int(seg)}"})
+        ok_msg = f"✓ Arribo {canal.upper()} fijado: disparo {int(seg)}, t_ant = {t:.4f} µs"
+    elif trig == "btn_quitar_arribo":
+        hist.append({"accion": "quitar", "seg": int(seg),
+                     "desc": f"Disparo {int(seg)} quitado de {canal.upper()}"})
+        ok_msg = f"✓ Disparo {int(seg)} quitado del promedio de {canal.upper()}"
+    elif trig == "btn_deshacer_arribo":
+        if not hist:
+            return no_update, ""
+        ok_msg = f"✓ Deshecho: {hist.pop().get('desc') or 'último paso'}"
+    elif trig == "btn_restaurar_arribo":
+        if not hist:
+            return no_update, ""
+        hist = []
+        ok_msg = f"✓ Ediciones de {canal.upper()} restauradas"
+    else:
+        return no_update, no_update
+
+    ok, msg = guardar_ediciones_canal(carpeta, canal, {"historial": hist})
+    if not ok:
+        return no_update, f"No se guardaron las ediciones: {msg}"
+    canales = dict(canales)
+    canales[canal] = {"historial": hist}
+    return {"carpeta": carpeta, "canales": canales}, ok_msg
+
+
+@app.callback(
+    Output("aviso_arribo", "style"),
+    Input("aviso_arribo", "children"),
+)
+def estilo_aviso_arribo(texto):
+    """Avisos de éxito (empiezan por ✓) en verde; el resto en rojo."""
+    ok = isinstance(texto, str) and texto.startswith("✓")
+    return {"fontSize": "11px", "fontWeight": "600" if ok else "normal",
+            "color": tema.OK if ok else tema.ERROR}
+
+
+@app.callback(
+    Output("btn_fijar_arribo", "disabled"),
+    Output("btn_quitar_arribo", "disabled"),
+    Output("btn_deshacer_arribo", "disabled"),
+    Output("btn_restaurar_arribo", "disabled"),
+    Output("badge_arribo", "children"),
+    Input("ediciones_arribo", "data"),
+    Input("marca_arribo", "data"),
+    Input("marca_canal", "value"),
+    State("carpeta", "value"),
+)
+def estado_botones_arribo(store, marca, canal_sel, carpeta):
+    """Botones habilitados según la marca y el historial del canal de la marca."""
+    if not carpeta:
+        return True, True, True, True, ""
+    hay_marca = bool(marca and marca.get("carpeta") == carpeta and marca.get("t_us") is not None)
+    canal = marca["canal"] if hay_marca else canal_sel
+    ed = _ed_canales(store, carpeta).get(canal) or {}
+    sin_hist = not ed.get("historial")
+    est = estado_ediciones(ed)
+    n_man, n_quit = len(est["manuales"]), len(est["quitados"])
+    badge = (f"{(canal or '').upper()}: {n_man} manual{'es' if n_man != 1 else ''} · "
+             f"{n_quit} quitado{'s' if n_quit != 1 else ''}") if not sin_hist else \
+        f"{(canal or '').upper()}: sin ediciones manuales"
+    return not hay_marca, not canal, sin_hist, sin_hist, badge
+
+
+@app.callback(
+    Output("segmento", "value", allow_duplicate=True),
+    Output("marca_canal", "value", allow_duplicate=True),
+    Input("grafico_dispersion", "clickData"),
+    State("canal_dispersion", "value"),
+    State("segmento", "value"),
+    prevent_initial_call=True,
+)
+def ir_a_disparo_dispersion(click, canal_disp, seg_actual):
+    """Clic en un punto de la dispersión → ese disparo en el gráfico multicanal,
+    con el canal de la marca en el canal de la dispersión."""
+    if not click or not click.get("points"):
+        return no_update, no_update
+    x = click["points"][0].get("x")
+    try:
+        s = int(round(float(x)))
+    except (TypeError, ValueError):
+        return no_update, no_update
+    return (s if s != seg_actual else no_update), (canal_disp or no_update)
 
 
 @app.callback(
@@ -435,6 +646,9 @@ def actualizar_grafico_impulso(carpeta: str, seg: int):
     State("tmin_ch3", "value"),
     State("umbral_ch4", "value"),
     State("tmin_ch4", "value"),
+    State("tmax_ch2", "value"),
+    State("tmax_ch3", "value"),
+    State("tmax_ch4", "value"),
     prevent_initial_call=True,
     running=[(Output("btn_calcular", "disabled"), True, False)],
 )
@@ -453,6 +667,9 @@ def calcular_retardo_canal(
     tmin3: float | None = None,
     u4: float | None = None,
     tmin4: float | None = None,
+    tmax2: float | None = None,
+    tmax3: float | None = None,
+    tmax4: float | None = None,
 ):
     """Calcula el retardo para el canal seleccionado (o todos) con triggers independientes por canal."""
     if not n_clicks or not carpeta or not canal:
@@ -470,6 +687,8 @@ def calcular_retardo_canal(
         "ch4": (u4 if u4 is not None else (ucal if canal in ("ch4", "todos") and ucal is not None else None), tmin4 if tmin4 is not None else tmincal),
     }
 
+    tmax_map = {"ch2": tmax2, "ch3": tmax3, "ch4": tmax4}
+
     if canal == "todos":
         canales_calc = [c for c in ("ch2", "ch3", "ch4") if c in canales_presentes(carpeta)]
     else:
@@ -486,6 +705,7 @@ def calcular_retardo_canal(
             dist_us=dt_us,
             tmin=tm,
             referencia=ref,
+            tmax=tmax_map.get(c),
         )
         store[c] = res
 
@@ -515,10 +735,13 @@ def evaluar_conformidad_iec(n_clicks: int | None, carpeta: str):
     Output("grafico_dispersion", "figure"),
     Input("resultado_store", "data"),
     Input("canal_dispersion", "value"),
+    Input("ediciones_arribo", "data"),
 )
-def actualizar_grafico_dispersion(store: dict | None, canal: str = "ch4"):
-    """Muestra la dispersión e histograma del retardo del canal seleccionado en el gráfico."""
+def actualizar_grafico_dispersion(store: dict | None, canal: str = "ch4", store_ed: dict | None = None):
+    """Muestra la dispersión e histograma del retardo del canal seleccionado en el gráfico
+    (con los arribos editados a mano aplicados)."""
     ch_target = canal or "ch4"
+    store = resultados_editados(store, store_ed)
     if not store:
         return figura_dispersion_lag({}, canal=ch_target)
     if ch_target not in store or not isinstance(store[ch_target], dict):
@@ -543,9 +766,11 @@ def actualizar_grafico_ancla(carpeta: str, ref: str):
     Output("tabla_resumen", "children"),
     Input("resultado_store", "data"),
     Input("carpeta", "value"),
+    Input("ediciones_arribo", "data"),
 )
-def actualizar_tabla_resumen(store: dict | None, carpeta: str):
-    """Genera la tabla resumen de canales calibrados."""
+def actualizar_tabla_resumen(store: dict | None, carpeta: str, store_ed: dict | None = None):
+    """Genera la tabla resumen de canales calibrados (con las ediciones manuales aplicadas)."""
+    store = resultados_editados(store, store_ed)
     if not store:
         return html.P("Sin canales calibrados en la sesión actual. Pulsa Calcular Retardo.", style={"color": tema.MUTED, "fontSize": "13px"})
 
@@ -566,10 +791,13 @@ def actualizar_tabla_resumen(store: dict | None, carpeta: str):
                 html.Td(sensores_map.get(ch, ch.upper()), style={"padding": "6px 10px"}),
                 html.Td(t_lag_ns, style={"fontWeight": "700", "color": tema.ACCENT, "padding": "6px 10px"}),
                 html.Td(sig_ns, style={"padding": "6px 10px"}),
-                html.Td(f"{r.get('n_valid')}/{r.get('n_total')}", style={"padding": "6px 10px"}),
+                html.Td(f"{r.get('n_valid')}/{r.get('n_total')}" + _detalle_ediciones(r),
+                        style={"padding": "6px 10px"}),
                 html.Td(f"{p.get('umbral_mv', 0):.2f}", style={"padding": "6px 10px"}),
                 html.Td(f"{p.get('distancia_us', 0):.3f}", style={"padding": "6px 10px"}),
                 html.Td(f"{p.get('tmin_us', 0):.3f}", style={"padding": "6px 10px"}),
+                html.Td(f"{p['tmax_us']:.3f}" if p.get("tmax_us") is not None else "—",
+                        style={"padding": "6px 10px"}),
                 html.Td(filtros.etiqueta(spec_filtro(carpeta, ch)) if carpeta else "—",
                         style={"padding": "6px 10px"}),
             ]))
@@ -589,6 +817,7 @@ def actualizar_tabla_resumen(store: dict | None, carpeta: str):
                 html.Th("u_cal [mV]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
                 html.Th("Δt [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
                 html.Th("t_mín [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
+                html.Th("t_máx [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
                 html.Th("Filtro", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
             ])),
             html.Tbody(filas),
@@ -596,6 +825,16 @@ def actualizar_tabla_resumen(store: dict | None, carpeta: str):
     )
     aviso = aviso_calibracion_cruda(carpeta)
     return html.Div([tabla, aviso]) if aviso else tabla
+
+
+def _detalle_ediciones(r: dict) -> str:
+    """' (2 man., 1 quit.)' si el canal tiene arribos editados a mano."""
+    partes = []
+    if r.get("n_manual"):
+        partes.append(f"{r['n_manual']} man.")
+    if r.get("n_quitados"):
+        partes.append(f"{r['n_quitados']} quit.")
+    return f" ({', '.join(partes)})" if partes else ""
 
 
 def aviso_calibracion_cruda(carpeta: str):
@@ -662,13 +901,16 @@ def actualizar_panel_iec(store: dict | None):
     State("resultado_store", "data"),
     State("fuente_calibracion", "value"),
     State("referencia", "value"),
+    State("ediciones_arribo", "data"),
     prevent_initial_call=True,
     running=[(Output("btn_guardar", "disabled"), True, False)],
 )
-def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente: str, ref: str):
-    """Persiste los retardos calculados en metadata.yaml de la carpeta seleccionada."""
+def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente: str, ref: str,
+                        store_ed: dict | None = None):
+    """Persiste los retardos calculados (con los arribos editados a mano) en metadata.yaml."""
     if not n_clicks or not carpeta or not store:
         return no_update
+    store = resultados_editados(store, store_ed)
 
     canales_validos = {ch: store[ch] for ch in ["ch2", "ch3", "ch4"] if ch in store}
     if not canales_validos:
@@ -686,6 +928,11 @@ def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente:
         info_ancla=info_ancla,
         filtros={ch: filtros.texto(spec_filtro(carpeta, ch)) for ch in canales_validos},
     )
+    # Trazabilidad: cuántos arribos del promedio se fijaron o quitaron a mano
+    for ch, r in canales_validos.items():
+        if isinstance(bloque.get(ch), dict) and (r.get("n_manual") or r.get("n_quitados")):
+            bloque[ch]["n_arribos_manuales"] = int(r.get("n_manual") or 0)
+            bloque[ch]["n_disparos_quitados"] = int(r.get("n_quitados") or 0)
     ok, msg = guardar_calibracion_metadata(carpeta, bloque)
     if ok:
         return html.Div(

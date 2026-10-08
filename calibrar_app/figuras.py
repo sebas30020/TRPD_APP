@@ -20,6 +20,7 @@ from datos import (
     _muestras,
 )
 from arribo import t_arribo
+from ediciones import estado_ediciones
 
 _COLORES_CANALES = tema.COLORES_CANALES
 PUNTOS_PLOT = 5000
@@ -64,8 +65,17 @@ def figura_canal(carpeta: str, canal: str, seg: int,
                  ancla_us: float | None = None,
                  t_arr_us: float | None = None,
                  referencia_nombre: str = "t10",
-                 cfg_sensores: dict | None = None) -> go.Figure:
-    """Gráfico multicanal sincronizado (CH1..CH4) con eje X compartido, triggers independientes por canal y marcas."""
+                 cfg_sensores: dict | None = None,
+                 ediciones: dict | None = None,
+                 marca: dict | None = None) -> go.Figure:
+    """Gráfico multicanal sincronizado (CH1..CH4) con eje X compartido, triggers independientes por canal y marcas.
+
+    `ediciones` ({canal: {'historial': [...]}}) sustituye el arribo detectado por el
+    manual (rombo verde) o lo anula si el disparo está quitado. `marca`
+    ({canal, seg, t_us}) se dibuja como línea vertical en el subgráfico de su canal.
+    Las trazas de señal van primero y en el orden de los canales: el curveNumber de
+    un clic sobre la señal identifica el canal; los marcadores de arribo llevan el
+    canal en customdata."""
     canales_todos = ["ch1", "ch2", "ch3", "ch4"]
     disponibles = canales_presentes(carpeta) if carpeta else canales_todos
     canales = [c for c in canales_todos if c in disponibles]
@@ -167,12 +177,30 @@ def figura_canal(carpeta: str, canal: str, seg: int,
         tmin_c = float(cfg_c.get("tmin", tmin if tmin is not None else 0.15))
         u_c = u_canales.get(c, float(umbral_defecto(carpeta, c, seg=seg)))
 
-        # Línea vertical de t_mín independiente por canal
-        fig.add_vline(x=tmin_c, row=i, col=1, line=dict(color=tema.MUTED_LIGHT, width=1, dash="dash"))
+        tmax_c = cfg_c.get("tmax")
+        tmax_c = float(tmax_c) if tmax_c is not None else None
 
-        # Detección de arribo independiente
+        # Líneas verticales de t_mín y t_máx (franja de búsqueda del arribo) por canal
+        fig.add_vline(x=tmin_c, row=i, col=1, line=dict(color=tema.MUTED_LIGHT, width=1, dash="dash"))
+        if tmax_c is not None:
+            fig.add_vline(x=tmax_c, row=i, col=1, line=dict(color=tema.MUTED_LIGHT, width=1, dash="dash"))
+
+        # Marca temporal de edición (clic sobre la señal o valor escrito)
+        if marca and marca.get("canal") == c and marca.get("seg") == seg and marca.get("t_us") is not None:
+            fig.add_vline(x=float(marca["t_us"]), row=i, col=1,
+                          line=dict(color=tema.WARN, width=1.5, dash="dashdot"))
+
+        # Detección de arribo independiente, salvo que el disparo esté editado a mano
+        est = estado_ediciones((ediciones or {}).get(c))
         dist_m = _muestras(carpeta, c, dist_us) or 1
-        ta = t_arribo(t, v, u_c, dist_m, tmin_c) if v.size > 0 else None
+        manual = seg in est["manuales"]
+        quitado = seg in est["quitados"]
+        if manual:
+            ta = est["manuales"][seg]
+        elif quitado:
+            ta = None
+        else:
+            ta = t_arribo(t, v, u_c, dist_m, tmin_c, tmax_c) if v.size > 0 else None
 
         tlag_str = "—"
         if ta is not None and v.size > 0:
@@ -180,8 +208,11 @@ def figura_canal(carpeta: str, canal: str, seg: int,
             fig.add_trace(
                 go.Scatter(
                     x=[ta], y=[v_arr], mode="markers", name=f"arribo {c}",
-                    marker=dict(symbol="x", color=tema.LINEA_ACTIVO, size=9, line=dict(width=2)),
-                    hovertemplate=f"t_ant={ta:.4f} µs<br>v={v_arr:.2f} mV<extra>{c.upper()}</extra>",
+                    customdata=[c],
+                    marker=dict(symbol="diamond", color=tema.OK, size=12, line=dict(width=1, color="white"))
+                    if manual else dict(symbol="x", color=tema.LINEA_ACTIVO, size=9, line=dict(width=2)),
+                    hovertemplate=f"t_ant={ta:.4f} µs<br>v={v_arr:.2f} mV<extra>{c.upper()}"
+                                  f"{' manual' if manual else ''}</extra>",
                     showlegend=False,
                 ),
                 row=i, col=1,
@@ -190,12 +221,19 @@ def figura_canal(carpeta: str, canal: str, seg: int,
                 tlag_ns = (ta - ancla_us) * 1e3
                 tlag_str = f"{tlag_ns:.2f} ns"
 
-            anotacion_texto = f"<b>{c.upper()}</b> · t_ant = {ta:.4f} µs · <b>t_lag = {tlag_str}</b>"
-            badge_bg = "rgba(255,255,255,0.9)"
-            badge_border = tema.BORDER
+            anotacion_texto = (f"<b>{c.upper()}</b> · t_ant{' (manual)' if manual else ''} = {ta:.4f} µs"
+                               f" · <b>t_lag = {tlag_str}</b>")
+            badge_bg = tema.OK_BG if manual else "rgba(255,255,255,0.9)"
+            badge_border = tema.OK if manual else tema.BORDER
             badge_color = tema.INK
+        elif quitado:
+            anotacion_texto = f"<b>{c.upper()}</b> · Disparo quitado del promedio (manual)"
+            badge_bg = tema.WARN_BG
+            badge_border = tema.WARN
+            badge_color = tema.WARN
         else:
-            anotacion_texto = f"<b>{c.upper()}</b> · Sin cruce de umbral"
+            franja = f" en [{tmin_c:g}, {tmax_c:g}] µs" if tmax_c is not None else ""
+            anotacion_texto = f"<b>{c.upper()}</b> · Sin cruce de umbral{franja} (no entra al promedio)"
             badge_bg = tema.ERROR_BG
             badge_border = tema.ERROR
             badge_color = tema.ERROR
@@ -331,14 +369,19 @@ def figura_dispersion_lag(resultados: dict, canal: str = "") -> go.Figure:
     t_lag_us = np.asarray(resultados.get("t_lag", []), dtype=np.float64)
     t_lag_ns = t_lag_us * 1e3
     val = np.asarray(resultados.get("valido", []), dtype=bool)
+    origen = np.asarray(resultados.get("origen") or ["auto"] * segs.size)
+    man = origen == "manual"
 
     if np.any(val):
-        # Puntos válidos
+        # Puntos válidos (rombos: arribo fijado a mano); clic → ir a ese disparo
+        n_man = int(np.sum(val & man))
         fig.add_trace(
             go.Scatter(
                 x=segs[val], y=t_lag_ns[val], mode="markers",
-                name=f"Válidos ({resultados.get('n_valid')}/{resultados.get('n_total')})",
-                marker=dict(color=color, size=7),
+                name=f"Válidos ({resultados.get('n_valid')}/{resultados.get('n_total')})"
+                     + (f" · {n_man} manual{'es' if n_man != 1 else ''}" if n_man else ""),
+                marker=dict(color=color, size=np.where(man[val], 10, 7).tolist(),
+                            symbol=np.where(man[val], "diamond", "circle").tolist()),
                 hovertemplate="Disparo %{x}<br>t_lag=%{y:.2f} ns<extra></extra>",
             ),
             row=1, col=1,
