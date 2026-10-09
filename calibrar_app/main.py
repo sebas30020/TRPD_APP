@@ -46,7 +46,9 @@ from figuras import (
 from persistencia import (
     bloque_calibracion_retardo,
     construir_info_ancla,
+    estado_calibracion,
     fusionar_con_bloque_previo,
+    SENSORES_DEFECTO,
     guardar_calibracion_metadata,
 )
 from ediciones import (
@@ -779,64 +781,130 @@ def actualizar_grafico_ancla(carpeta: str, ref: str):
     Input("resultado_store", "data"),
     Input("carpeta", "value"),
     Input("ediciones_arribo", "data"),
+    Input("msg_feedback", "children"),       # tras guardar se relee metadata.yaml
+    Input("metadata_asegurada", "data"),
 )
-def actualizar_tabla_resumen(store: dict | None, carpeta: str, store_ed: dict | None = None):
-    """Genera la tabla resumen de canales calibrados (con las ediciones manuales aplicadas)."""
-    store = resultados_editados(store, store_ed)
-    if not store:
-        return html.P("Sin canales calibrados en la sesión actual. Pulsa Calcular Retardo.", style={"color": tema.MUTED, "fontSize": "13px"})
+def actualizar_tabla_resumen(store: dict | None, carpeta: str, store_ed: dict | None = None,
+                             _msg=None, _asegurada=None):
+    """Estado de la calibración guardada en metadata.yaml (verificado al cargar la
+    medición) y, debajo, lo calculado en la sesión con las ediciones aplicadas."""
+    if not carpeta:
+        return html.P("Seleccione una medición.", style={"color": tema.MUTED, "fontSize": "13px"})
+    est = estado_calibracion(carpeta, _ed_canales(store_ed, carpeta) or None)
+    partes = [_banner_estado(est), _tabla_guardada(est)]
 
-    sensores_map = {
-        "ch2": "HFCT",
-        "ch3": "Antena 1",
-        "ch4": "Antena 2",
-    }
-    filas = []
-    for ch in ["ch2", "ch3", "ch4"]:
-        if ch in store and isinstance(store[ch], dict):
-            r = store[ch]
-            t_lag_ns = f"{r['t_lag_us'] * 1e3:.2f}" if r.get("t_lag_us") is not None else "—"
-            sig_ns = f"{r['sigma_us'] * 1e3:.2f}" if r.get("sigma_us") is not None else "—"
-            p = r.get("params", {})
-            filas.append(html.Tr([
-                html.Td(ch.upper(), style={"fontWeight": "600", "padding": "6px 10px"}),
-                html.Td(sensores_map.get(ch, ch.upper()), style={"padding": "6px 10px"}),
-                html.Td(t_lag_ns, style={"fontWeight": "700", "color": tema.ACCENT, "padding": "6px 10px"}),
-                html.Td(sig_ns, style={"padding": "6px 10px"}),
-                html.Td(f"{r.get('n_valid')}/{r.get('n_total')}" + _detalle_ediciones(r),
-                        style={"padding": "6px 10px"}),
-                html.Td(f"{p.get('umbral_mv', 0):.2f}", style={"padding": "6px 10px"}),
-                html.Td(f"{p.get('distancia_us', 0):.3f}", style={"padding": "6px 10px"}),
-                html.Td(f"{p.get('tmin_us', 0):.3f}", style={"padding": "6px 10px"}),
-                html.Td(f"{p['tmax_us']:.3f}" if p.get("tmax_us") is not None else "—",
-                        style={"padding": "6px 10px"}),
-                html.Td(filtros.etiqueta(spec_filtro(carpeta, ch)) if carpeta else "—",
-                        style={"padding": "6px 10px"}),
-            ]))
+    sesion = resultados_editados(store, store_ed) if (store or {}).get("_carpeta") == carpeta else {}
+    filas = [_fila_sesion(ch, sesion[ch], carpeta, est["canales"].get(ch))
+             for ch in ("ch2", "ch3", "ch4") if isinstance(sesion.get(ch), dict)]
+    if filas:
+        partes.append(html.H4("Calculado en esta sesión",
+                              style={"fontSize": "13px", "margin": "14px 0 4px", "color": tema.INK}))
+        partes.append(_tabla(_CABECERA_SESION, filas))
+    else:
+        partes.append(html.P("Sin cálculos en esta sesión. Pulsa Calcular Retardo para (re)calibrar.",
+                             style={"color": tema.MUTED, "fontSize": "12px", "marginTop": "10px"}))
+    return html.Div(partes)
 
-    if not filas:
-        return html.P("Sin canales calibrados en la sesión actual. Pulsa Calcular Retardo.", style={"color": tema.MUTED, "fontSize": "13px"})
 
-    tabla = html.Table(
+_TD = {"padding": "6px 10px"}
+_COLOR_ESTADO = {"calibrado": (tema.OK, tema.OK_BG), "revisar": (tema.WARN, tema.WARN_BG),
+                 "sin_calibrar": (tema.ERROR, tema.ERROR_BG)}
+_TEXTO_ESTADO = {"calibrado": "✓ Calibrado", "revisar": "⚠ Revisar", "sin_calibrar": "✗ Sin calibrar"}
+_CABECERA_GUARDADA = ["Canal", "Sensor", "Estado", "t̄_lag [ns]", "σ [ns]", "Válidos",
+                      "u_cal [mV]", "t_mín [µs]", "t_máx [µs]", "Filtro"]
+_CABECERA_SESION = ["Canal", "Sensor", "t̄_lag [ns]", "σ [ns]", "Válidos", "u_cal [mV]",
+                    "Δt [µs]", "t_mín [µs]", "t_máx [µs]", "Filtro", "metadata.yaml"]
+
+
+def _tabla(cabecera: list[str], filas: list):
+    th = {"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}
+    return html.Table(
         style={"width": "100%", "fontSize": "12px", "borderCollapse": "collapse", "textAlign": "left"},
-        children=[
-            html.Thead(html.Tr([
-                html.Th("Canal", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("Sensor", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("t̄_lag [ns]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("σ [ns]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("Válidos", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("u_cal [mV]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("Δt [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("t_mín [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("t_máx [µs]", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-                html.Th("Filtro", style={"borderBottom": f"2px solid {tema.BORDER}", "padding": "6px 10px"}),
-            ])),
-            html.Tbody(filas),
-        ],
-    )
-    aviso = aviso_calibracion_cruda(carpeta)
-    return html.Div([tabla, aviso]) if aviso else tabla
+        children=[html.Thead(html.Tr([html.Th(c, style=th) for c in cabecera])), html.Tbody(filas)])
+
+
+def _num(v, fmt: str = ".2f") -> str:
+    return format(float(v), fmt) if v is not None else "—"
+
+
+def _banner_estado(est: dict):
+    """Resumen global: completa, incompleta (qué canales faltan), revisar o sin calibrar."""
+    n, tot = est["n_calibrados"], est["n_canales"]
+    info = " · ".join(x for x in (f"fecha {est['fecha']}" if est.get("fecha") else "",
+                                  f"referencia {est['referencia']}" if est.get("referencia") else "") if x)
+    if est["estado"] == "completa":
+        txt, fg, bg = f"Calibración completa en metadata.yaml: {n}/{tot} canales", tema.OK, tema.OK_BG
+    elif est["estado"] == "revisar":
+        txt, fg, bg = (f"Calibración guardada ({n}/{tot} canales), con canales a revisar",
+                       tema.WARN, tema.WARN_BG)
+    elif est["estado"] == "incompleta":
+        faltan = ", ".join(c.upper() for c in est["faltan"])
+        txt, fg, bg = (f"Calibración incompleta: {n}/{tot} canales · falta {faltan}",
+                       tema.WARN, tema.WARN_BG)
+    else:
+        txt, fg, bg = ("Sin calibración guardada en metadata.yaml: TRPD usará t_lag = 0",
+                       tema.ERROR, tema.ERROR_BG)
+    return html.Div(
+        [html.Strong(txt), html.Span(f" · {info}" if info else "")],
+        style={"color": fg, "backgroundColor": bg, "padding": "8px 12px", "borderRadius": "4px",
+               "border": f"1px solid {fg}", "fontSize": "13px", "marginBottom": "8px"})
+
+
+def _tabla_guardada(est: dict):
+    """Lo guardado en metadata.yaml por canal, con su estado y los motivos a revisar."""
+    filas = []
+    for ch, c in est["canales"].items():
+        b = c["bloque"] or {}
+        fg, bg = _COLOR_ESTADO[c["estado"]]
+        detalle = [html.Span(_TEXTO_ESTADO[c["estado"]],
+                             style={"color": fg, "backgroundColor": bg, "padding": "1px 6px",
+                                    "borderRadius": "3px", "fontWeight": "600"})]
+        if c["motivos"]:
+            detalle.append(html.Div("; ".join(c["motivos"]), style={"color": fg, "fontSize": "11px"}))
+        manual = (f" ({b.get('n_arribos_manuales') or 0} man., {b.get('n_disparos_quitados') or 0} quit.)"
+                  if b.get("n_arribos_manuales") or b.get("n_disparos_quitados") else "")
+        filas.append(html.Tr([
+            html.Td(ch.upper(), style={**_TD, "fontWeight": "600"}),
+            html.Td(b.get("sensor") or SENSORES_DEFECTO.get(ch, ch.upper()), style=_TD),
+            html.Td(detalle, style=_TD),
+            html.Td(_num(b.get("t_lag_ns")), style={**_TD, "fontWeight": "700", "color": tema.ACCENT}),
+            html.Td(_num(b.get("sigma_ns")), style=_TD),
+            html.Td(f"{b.get('n_valid')}/{b.get('n_total')}{manual}" if b else "—", style=_TD),
+            html.Td(_num(b.get("umbral_mv")), style=_TD),
+            html.Td(_num(b.get("tmin_us"), ".3f"), style=_TD),
+            html.Td(_num(b.get("tmax_us"), ".3f"), style=_TD),
+            html.Td(str(b.get("filtro") or "—"), style=_TD),
+        ]))
+    if not filas:
+        return html.P("La medición no tiene canales sensores (CH2–CH4).",
+                      style={"color": tema.MUTED, "fontSize": "12px"})
+    return _tabla(_CABECERA_GUARDADA, filas)
+
+
+def _fila_sesion(ch: str, r: dict, carpeta: str, guardado: dict | None):
+    """Fila de un canal calculado en la sesión; indica si coincide con lo guardado."""
+    p = r.get("params", {})
+    t_ns = round(r["t_lag_us"] * 1e3, 3) if r.get("t_lag_us") is not None else None
+    b = (guardado or {}).get("bloque") or {}
+    if t_ns is None:
+        guard = html.Span("sin arribos válidos", style={"color": tema.ERROR})
+    elif b.get("t_lag_ns") is not None and abs(float(b["t_lag_ns"]) - t_ns) < 5e-4:
+        guard = html.Span("✓ guardado", style={"color": tema.OK, "fontWeight": "600"})
+    else:
+        guard = html.Span("pendiente de guardar", style={"color": tema.WARN, "fontWeight": "600"})
+    return html.Tr([
+        html.Td(ch.upper(), style={**_TD, "fontWeight": "600"}),
+        html.Td(SENSORES_DEFECTO.get(ch, ch.upper()), style=_TD),
+        html.Td(_num(t_ns), style={**_TD, "fontWeight": "700", "color": tema.ACCENT}),
+        html.Td(_num(r["sigma_us"] * 1e3 if r.get("sigma_us") is not None else None), style=_TD),
+        html.Td(f"{r.get('n_valid')}/{r.get('n_total')}" + _detalle_ediciones(r), style=_TD),
+        html.Td(_num(p.get("umbral_mv")), style=_TD),
+        html.Td(_num(p.get("distancia_us"), ".3f"), style=_TD),
+        html.Td(_num(p.get("tmin_us"), ".3f"), style=_TD),
+        html.Td(_num(p.get("tmax_us"), ".3f"), style=_TD),
+        html.Td(filtros.etiqueta(spec_filtro(carpeta, ch)), style=_TD),
+        html.Td(guard, style=_TD),
+    ])
 
 
 def _detalle_ediciones(r: dict) -> str:
@@ -847,24 +915,6 @@ def _detalle_ediciones(r: dict) -> str:
     if r.get("n_quitados"):
         partes.append(f"{r['n_quitados']} quit.")
     return f" ({', '.join(partes)})" if partes else ""
-
-
-def aviso_calibracion_cruda(carpeta: str):
-    """Aviso si metadata.yaml guarda una calibración sin campo 'filtro' por canal:
-    se midió sobre señal cruda y no es coherente con la señal filtrada actual."""
-    bloque = (obtener_metadata(carpeta) or {}).get("calibracion_retardo") if carpeta else None
-    if not isinstance(bloque, dict):
-        return None
-    crudos = [ch.upper() for ch in ["ch2", "ch3", "ch4"]
-              if isinstance(bloque.get(ch), dict) and "filtro" not in bloque[ch]]
-    if not crudos:
-        return None
-    return html.Div(
-        f"La calibración guardada en metadata.yaml para {', '.join(crudos)} se hizo sobre señal "
-        "cruda: recalibrar con los filtros actuales.",
-        style={"color": tema.WARN, "backgroundColor": tema.WARN_BG, "padding": "6px 10px",
-               "borderRadius": "4px", "border": f"1px solid {tema.WARN}", "marginTop": "8px",
-               "fontSize": "12px"})
 
 
 @app.callback(

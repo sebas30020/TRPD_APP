@@ -125,3 +125,62 @@ def mediciones_con_calibracion(mediciones: list[str]) -> list[str]:
             except Exception:
                 pass
     return res
+
+
+SENSORES_DEFECTO = {"ch2": "HFCT", "ch3": "Antena 1", "ch4": "Antena 2"}
+
+
+def estado_calibracion(carpeta: str, ediciones: dict | None = None) -> dict:
+    """Estado de la calibración guardada en metadata.yaml de la medición.
+
+    Por canal sensor presente: 'calibrado', 'sin_calibrar' o 'revisar' (con motivos:
+    calibrado sobre señal cruda o con otro filtro, o arribos editados después de
+    guardar). `ediciones`: {canal: {'historial'}} vigente (por defecto, el del YAML).
+    Global: 'completa' (todos calibrados), 'revisar', 'incompleta' o 'sin_calibrar'."""
+    import filtros
+    from datos import canales_presentes, spec_filtro
+    from ediciones import ediciones_medicion, estado_ediciones
+
+    presentes = [ch for ch in CANALES_SENSOR if ch in canales_presentes(carpeta)] if carpeta else []
+    bloque = (obtener_metadata(carpeta) or {}).get("calibracion_retardo") if carpeta else None
+    bloque = bloque if isinstance(bloque, dict) else {}
+    if ediciones is None:
+        ediciones = ediciones_medicion(carpeta) if carpeta else {}
+
+    canales = {}
+    for ch in presentes:
+        b = bloque.get(ch)
+        if not isinstance(b, dict) or b.get("t_lag_ns") is None:
+            canales[ch] = {"estado": "sin_calibrar", "motivos": [], "bloque": None}
+            continue
+        motivos = []
+        filtro_actual = filtros.texto(spec_filtro(carpeta, ch))
+        if "filtro" not in b:
+            motivos.append("calibrado sobre señal cruda")
+        elif str(b["filtro"]) != filtro_actual:
+            motivos.append(f"calibrado con filtro {b['filtro']}, el actual es {filtro_actual}")
+        est = estado_ediciones((ediciones or {}).get(ch))
+        if (len(est["manuales"]) != int(b.get("n_arribos_manuales") or 0)
+                or len(est["quitados"]) != int(b.get("n_disparos_quitados") or 0)):
+            motivos.append("arribos editados después de guardar")
+        canales[ch] = {"estado": "revisar" if motivos else "calibrado", "motivos": motivos, "bloque": b}
+
+    n_cal = sum(1 for c in canales.values() if c["estado"] != "sin_calibrar")
+    if not presentes or n_cal == 0:
+        global_ = "sin_calibrar"
+    elif n_cal < len(presentes):
+        global_ = "incompleta"
+    elif any(c["estado"] == "revisar" for c in canales.values()):
+        global_ = "revisar"
+    else:
+        global_ = "completa"
+    return {
+        "estado": global_,
+        "n_calibrados": n_cal,
+        "n_canales": len(presentes),
+        "faltan": [ch for ch, c in canales.items() if c["estado"] == "sin_calibrar"],
+        "fecha": bloque.get("fecha"),
+        "referencia": bloque.get("referencia_impulso") or bloque.get("referencia"),
+        "fuente": bloque.get("fuente_calibracion"),
+        "canales": canales,
+    }
