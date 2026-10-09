@@ -20,6 +20,7 @@ import filtros
 import rutas
 import tema
 from datos import (
+    asegurar_metadata_medicion,
     spec_filtro,
     obtener_metadata,
     canales_presentes,
@@ -435,6 +436,16 @@ def _ed_canales(store_ed: dict | None, carpeta: str) -> dict:
     if not store_ed or store_ed.get("carpeta") != carpeta:
         return {}
     return dict(store_ed.get("canales") or {})
+
+
+@app.callback(
+    Output("metadata_asegurada", "data"),
+    Input("carpeta", "value"),
+)
+def asegurar_metadata_al_abrir(carpeta: str):
+    """Al abrir una medición se crea o completa su metadata.yaml (generate_metadata),
+    igual que en app.py: calibrar_app solo añade encima los retardos y arribos."""
+    return asegurar_metadata_medicion(carpeta) if carpeta else no_update
 
 
 @app.callback(

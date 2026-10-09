@@ -22,6 +22,7 @@ if RAIZ_REPO not in sys.path:
 import datos_h5  # noqa: E402  (lectura de .h5 y cachés, compartida con app.py)
 import filtros  # noqa: E402  (filtros digitales por canal, compartidos con app.py)
 import rutas  # noqa: E402  (resolución de rutas compartida con app.py)
+import generate_metadata  # noqa: E402  (mismo metadata.yaml que app.py)
 
 # No hay carpeta de datos fija: las mediciones se eligen con el explorador de
 # carpetas y se identifican por su ruta absoluta (ver rutas.py).
@@ -126,6 +127,20 @@ def _leer_metadata(meta_path: str) -> dict:
             return yaml.safe_load(f) or {}
     except Exception:
         return {}
+
+
+def asegurar_metadata_medicion(carpeta: str) -> dict | None:
+    """Corre la lógica de generate_metadata (la misma que app.py): crea metadata.yaml o
+    completa lo que falte, sin tocar lo escrito. Se llama al abrir la medición y antes
+    de guardar, para que lo que escribe calibrar_app vaya sobre el YAML completo."""
+    if not carpeta:
+        return None
+    try:
+        _, accion = generate_metadata.asegurar_metadata(carpeta)
+    except Exception as e:
+        print(f"Advertencia: no se pudo generar metadata.yaml de {carpeta} ({e})")
+        return {"carpeta": carpeta, "accion": "error", "error": str(e)}
+    return {"carpeta": carpeta, "accion": accion}
 
 
 def guardar_metadata_archivo(carpeta: str, contenido_yaml_str: str) -> tuple[bool, str]:

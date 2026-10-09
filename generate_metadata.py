@@ -36,11 +36,13 @@ import datetime
 import os
 import re
 import sys
+import threading
 
 import h5py
 import numpy as np
 import yaml
 
+import datos_h5
 import rutas
 from filtros import FILTROS_DEFECTO
 
@@ -328,6 +330,13 @@ RE_PRINCIPAL = re.compile(
 RE_DIAM_TOKEN = re.compile(r"(\d+(?:\.\d+)?)mm", re.IGNORECASE)
 
 
+def _diametros_codigo(raw_tokens, n_val):
+    """Diámetros (mm) de los tokens del código. Un solo diámetro con varias vacuolas
+    es la abreviatura de todas iguales: '3v_4mm' = 3 vacuolas de 4 mm."""
+    diams = [int(float(x)) if float(x).is_integer() else float(x) for x in raw_tokens]
+    return diams * n_val if len(diams) == 1 else diams
+
+
 def inferir_parametros(experimento):
     """Infiere código de probeta, geometría, vacuolas, diámetros, set y tensión
     del secundario a partir de la jerarquía: <principal>/<XkV>."""
@@ -368,6 +377,8 @@ def inferir_parametros(experimento):
             cand_principal = partes[-1]
 
     if cand_principal:
+        # El código de la probeta es el nombre de su carpeta, aunque no siga el patrón
+        codigo_probeta = cand_principal
         m_p = RE_PRINCIPAL.match(cand_principal)
         if m_p:
             n_val = int(m_p.group("n"))
@@ -376,14 +387,10 @@ def inferir_parametros(experimento):
             set_val = int(m_p.group("set"))
 
             raw_tokens = RE_DIAM_TOKEN.findall(diams_str)
-            parsed_diams = [
-                int(float(x)) if float(x).is_integer() else float(x)
-                for x in raw_tokens
-            ]
+            parsed_diams = _diametros_codigo(raw_tokens, n_val)
 
             tokens_rebuilt = "".join(f"{x}mm" for x in raw_tokens)
             if tokens_rebuilt.lower() == diams_str.lower() and len(parsed_diams) == n_val:
-                codigo_probeta = cand_principal
                 nro_vacuolas = n_val
                 asimetrica = h_val
                 diametros = parsed_diams
@@ -442,7 +449,7 @@ def inferir_diametros(probeta_data=None, codigo_probeta=None):
         if m:
             raw_tokens = RE_DIAM_TOKEN.findall(m.group("diams"))
             if raw_tokens:
-                return "-".join(f"{float(x):g}mm" for x in raw_tokens)
+                return "-".join(f"{float(x):g}mm" for x in _diametros_codigo(raw_tokens, int(m.group("n"))))
 
     return "N/D"
 
@@ -754,21 +761,76 @@ def generar(experimento, forzar=False, completar=False, analizar=True):
 
     nuevo = plantilla_metadata(carpeta, d, analizar=analizar)
     if existe and completar:
-        with open(destino, "r", encoding="utf-8") as f:
-            datos = yaml.safe_load(f) or {}
-        datos = completar_metadata(datos, nuevo)
-        _actualizar_desde_h5(datos, nuevo)
-        _actualizar_desde_ruta(datos, carpeta)
-        datos.setdefault("generado_automaticamente", {})
-        datos["generado_automaticamente"]["fecha"] = datetime.date.today().isoformat()
-        datos["generado_automaticamente"]["campos_pendientes"] = _campos_pendientes(
-            {k: v for k, v in datos.items() if k != "generado_automaticamente"})
-        _guardar_yaml(datos, destino)
+        _guardar_yaml(_completado(_leer_yaml(destino), nuevo, carpeta), destino)
         print("Metadata completada:", destino)
     else:
+        if existe:
+            # --forzar rehace lo automático, pero lo calculado en las apps no se pierde
+            previo = _leer_yaml(destino)
+            nuevo.update({k: previo[k] for k in SECCIONES_DE_APPS if k in previo})
         _guardar_yaml(nuevo, destino)
         print("Metadata generada:", destino)
     return destino
+
+
+# Secciones que escriben las apps (calibrar_app: retardos y arribos; app.py: peaks).
+# generate_metadata nunca las crea ni las modifica.
+SECCIONES_DE_APPS = ("calibracion_retardo", "ediciones_arribo", "ediciones_peaks")
+
+_LOCK_ASEGURAR = threading.Lock()
+
+
+def _leer_yaml(ruta):
+    with open(ruta, "r", encoding="utf-8") as f:
+        datos = yaml.safe_load(f)
+    return datos if isinstance(datos, dict) else {}
+
+
+def _completado(datos, nuevo, carpeta):
+    """`datos` (YAML existente) con lo que falte tomado de `nuevo` (plantilla): conserva
+    lo escrito, refresca fecha/trigger del .h5 y la tensión de la ruta."""
+    datos = completar_metadata(datos, nuevo)
+    _actualizar_desde_h5(datos, nuevo)
+    _actualizar_desde_ruta(datos, carpeta)
+    gen = datos.setdefault("generado_automaticamente", {})
+    gen["fecha"] = datetime.date.today().isoformat()
+    gen["campos_pendientes"] = _campos_pendientes(
+        {k: v for k, v in datos.items() if k != "generado_automaticamente"})
+    return datos
+
+
+def _sin_fecha_generacion(datos):
+    d = copy.deepcopy(datos)
+    if isinstance(d.get("generado_automaticamente"), dict):
+        d["generado_automaticamente"].pop("fecha", None)
+    return d
+
+
+def asegurar_metadata(experimento, analizar=True):
+    """Lógica de generate_metadata que corren app.py y calibrar_app al abrir una medición.
+
+    Crea metadata.yaml si no existe o completa los campos que le falten, sin tocar lo
+    escrito (a mano o por las apps). Solo escribe si el contenido cambia (abrir una
+    medición ya completa no reescribe el archivo). Devuelve (ruta, acción) con acción
+    'creado' | 'completado' | 'sin_cambios' | 'sin_medicion'."""
+    carpeta = os.path.abspath(experimento)
+    d = rutas.dir_medicion(carpeta)
+    if not d or not rutas.canales_presentes(carpeta):
+        return None, "sin_medicion"
+    destino = os.path.join(d, "metadata.yaml")
+    with _LOCK_ASEGURAR:
+        nuevo = plantilla_metadata(carpeta, d, analizar=analizar)
+        if not os.path.exists(destino):
+            datos, accion = nuevo, "creado"
+        else:
+            previo = _leer_yaml(destino)
+            datos = _completado(copy.deepcopy(previo), nuevo, carpeta)
+            if _sin_fecha_generacion(datos) == _sin_fecha_generacion(previo):
+                return destino, "sin_cambios"
+            accion = "completado"
+        _guardar_yaml(datos, destino)
+        datos_h5.invalidar_archivo(destino)  # las dos apps releen el YAML ya escrito
+        return destino, accion
 
 
 def buscar_mediciones(raiz):

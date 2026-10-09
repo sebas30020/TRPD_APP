@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import yaml
 
-from datos import obtener_metadata, guardar_metadata_archivo
+from datos import obtener_metadata, guardar_metadata_archivo, asegurar_metadata_medicion
 from arribo import filtrar_mad
 
 SECCION = "ediciones_arribo"
@@ -34,6 +34,7 @@ def ediciones_medicion(carpeta: str) -> dict:
 def guardar_ediciones_canal(carpeta: str, canal: str, ed: dict | None) -> tuple[bool, str]:
     """Guarda las ediciones de un canal sin tocar el resto de metadata.yaml.
     Un historial vacío borra la clave del canal (y la sección si queda vacía)."""
+    asegurar_metadata_medicion(carpeta)  # sin YAML previo se guarda sobre la plantilla completa
     meta = {k: v for k, v in (obtener_metadata(carpeta) or {}).items() if not str(k).startswith("_")}
     sec = dict(meta.get(SECCION) or {})
     if ed and ed.get("historial"):

@@ -16,6 +16,7 @@ if RAIZ not in sys.path:
 
 import generate_metadata
 from datos import (
+    asegurar_metadata_medicion,
     obtener_metadata,
     guardar_metadata_archivo,
     _dir_medicion,
@@ -97,6 +98,7 @@ def fusionar_con_bloque_previo(bloque: dict, previo: dict | None) -> tuple[dict,
 
 def guardar_calibracion_metadata(carpeta: str, bloque: dict) -> tuple[bool, str]:
     """Inserta/reemplaza 'calibracion_retardo' preservando el resto de metadata.yaml."""
+    asegurar_metadata_medicion(carpeta)  # sin YAML previo se guarda sobre la plantilla completa
     meta = obtener_metadata(carpeta)
     meta = {k: v for k, v in meta.items() if not k.startswith("_")}
     meta["calibracion_retardo"] = bloque

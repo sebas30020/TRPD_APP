@@ -63,7 +63,7 @@ def test_tension_desde_carpeta_kv():
     assert inferir_parametros("M/1v_2mm_0/10KV")["tension_sec_kv"] == 10.0
     # La tensión no depende de que el código de probeta sea válido
     res = inferir_parametros("M/carpeta_rara/30kV")
-    assert res["tension_sec_kv"] == 30.0 and res["codigo_probeta"] is None
+    assert res["tension_sec_kv"] == 30.0 and res["codigo_probeta"] == "carpeta_rara"
     assert inferir_parametros("Mediciones/3V224/30kV")["tension_sec_kv"] == 30.0
     assert inferir_parametros("3v_2mm3mm_0/10kV")["tension_sec_kv"] == 10.0
 
@@ -88,7 +88,21 @@ def test_inferir_parametros_nombres_invalidos():
         assert res["set_impulsos"] is None, ruta
         if ruta not in con_kv:
             assert res["tension_sec_kv"] is None, ruta
-        assert res["codigo_probeta"] is None, ruta
+            assert res["codigo_probeta"] is None, ruta
+        else:  # bajo una carpeta XkV el código es el nombre de la carpeta de la probeta
+            assert res["codigo_probeta"] == ruta.split("/")[-2], ruta
+
+
+def test_un_diametro_para_varias_vacuolas():
+    # '3v_4mm_1' = 3 vacuolas de 4 mm; el código es el nombre de la carpeta
+    res = inferir_parametros("med_proced/3v_4mm_1/11kV")
+    assert res["codigo_probeta"] == "3v_4mm_1"
+    assert res["nro_vacuolas"] == 3
+    assert res["diametros"] == [4, 4, 4]
+    assert res["tipo_geometria"] == "monodiametro"
+    assert res["set_impulsos"] == 1
+    assert res["tension_sec_kv"] == 11.0
+    assert inferir_diametros(codigo_probeta="3v_4mm_1") == "4mm-4mm-4mm"
 
 
 def test_inferir_diametros():

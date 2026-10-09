@@ -28,7 +28,7 @@ from scipy.signal import find_peaks, butter, sosfiltfilt
 from dash import Dash, dcc, html, Input, Output, State, no_update, ctx, ALL, Patch
 
 from generate_metadata import (plantilla_metadata, inferir_parametros, inferir_diametros,
-                               normalizar_diametros, nombre_corto_sensor)
+                               normalizar_diametros, nombre_corto_sensor, asegurar_metadata)
 
 import datos_h5
 import filtros
@@ -1035,22 +1035,66 @@ def _leer_metadata(carpeta):
         }
 
 
+# Secciones que solo escribe calibrar_app: app.py nunca calcula ni edita retardos (t_lag).
+SECCIONES_CALIBRAR = ("calibracion_retardo", "ediciones_arribo")
+
+
+def _con_calibracion_del_disco(contenido_yaml_str, meta_path):
+    """(yaml, cambiado): el YAML a guardar con las secciones de calibrar_app tal como
+    están en disco. Se leen del archivo, no de la caché, para no pisar una calibración
+    recién guardada desde calibrar_app. Sin cambios en ellas se conserva el texto."""
+    nuevo = yaml.safe_load(contenido_yaml_str)
+    if not isinstance(nuevo, dict):
+        return contenido_yaml_str, False
+    disco = {}
+    if os.path.isfile(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as f:
+            disco = yaml.safe_load(f) or {}
+    if all(nuevo.get(k) == disco.get(k) for k in SECCIONES_CALIBRAR):
+        return contenido_yaml_str, False
+    for k in SECCIONES_CALIBRAR:
+        nuevo.pop(k, None)
+        if k in disco:
+            nuevo[k] = disco[k]
+    return yaml.safe_dump(nuevo, sort_keys=False, allow_unicode=True), True
+
+
 def guardar_metadata_archivo(carpeta, contenido_yaml_str):
-    """Guarda una cadena YAML en metadata.yaml en la carpeta física de la medición."""
+    """Guarda una cadena YAML en metadata.yaml en la carpeta física de la medición.
+    calibracion_retardo y ediciones_arribo se conservan siempre como están en disco."""
     if not carpeta or not contenido_yaml_str:
         return False, "No hay contenido para guardar."
     d = _dir_medicion(carpeta)
     meta_path = os.path.join(d, "metadata.yaml")
     try:
         yaml.safe_load(contenido_yaml_str)  # validar sintaxis YAML
+        contenido_yaml_str, protegido = _con_calibracion_del_disco(contenido_yaml_str, meta_path)
         with open(meta_path, "w", encoding="utf-8") as f:
             f.write(contenido_yaml_str)
         datos_h5.invalidar_archivo(meta_path)
         for clave in [k for k in _SPEC_CACHE if k[0] == carpeta]:
             del _SPEC_CACHE[clave]   # el filtro de cada canal puede haber cambiado
-        return True, f"Guardado exitoso en {os.path.basename(meta_path)}"
+        aviso = (" (calibracion_retardo y ediciones_arribo solo se editan en calibrar_app:"
+                 " se conservaron los del archivo)") if protegido else ""
+        return True, f"Guardado exitoso en {os.path.basename(meta_path)}{aviso}"
     except Exception as e:
         return False, f"Error al guardar: {e}"
+
+
+def asegurar_metadata_medicion(carpeta):
+    """Al abrir una medición corre la lógica de generate_metadata (la misma que
+    calibrar_app): crea metadata.yaml o completa lo que falte, sin tocar lo escrito."""
+    if not carpeta:
+        return None
+    try:
+        _, accion = asegurar_metadata(carpeta)
+    except Exception as e:
+        print(f"Advertencia: no se pudo generar metadata.yaml de {carpeta} ({e})")
+        return {"carpeta": carpeta, "accion": "error", "error": str(e)}
+    if accion in ("creado", "completado"):
+        for clave in [k for k in _SPEC_CACHE if k[0] == carpeta]:
+            del _SPEC_CACHE[clave]
+    return {"carpeta": carpeta, "accion": accion}
 
 
 def guardar_diametros(carpeta, texto):
@@ -1704,6 +1748,7 @@ app.layout = html.Div(
         dcc.Store(id="densidad_store", data=[], storage_type="local"),
         dcc.Store(id="ultima_carpeta", storage_type="local"),
         dcc.Store(id="calibracion_store"),
+        dcc.Store(id="metadata_asegurada"),  # resultado de generate_metadata al abrir la medición
         dcc.Store(id="explorador_ruta_actual", data=rutas.ruta_inicial()),
         html.Div(
             className="header",
@@ -2764,6 +2809,15 @@ def toggle_panel_calibracion(n):
 
 
 @app.callback(
+    Output("metadata_asegurada", "data"),
+    Input("carpeta", "value"),
+)
+def asegurar_metadata_al_abrir(carpeta):
+    """Al abrir una medición se crea o completa su metadata.yaml (generate_metadata)."""
+    return asegurar_metadata_medicion(carpeta) if carpeta else no_update
+
+
+@app.callback(
     Output("calibracion_store", "data"),
     Input("carpeta", "value"),
     Input("btn_recargar_calibracion", "n_clicks"),
@@ -3018,12 +3072,13 @@ def exportar_densidad(n, data):
     State("meta_yaml_text", "value"),
     State("meta_input_diametros", "value"),
     Input("tabs_principal", "value"),
+    Input("metadata_asegurada", "data"),
     running=[(Output("btn_guardar_metadata", "disabled"), True, False),
              (Output("btn_guardar_yaml_texto", "disabled"), True, False),
              (Output("btn_guardar_diametros", "disabled"), True, False)],
 )
 def actualizar_panel_metadata(carpeta, n_guardar, n_guardar_txt, n_guardar_diam, cal_store,
-                              yaml_txt_state, diam_txt, tab="metadata"):
+                              yaml_txt_state, diam_txt, tab="metadata", _asegurada=None):
     if not carpeta:
         return "", "", {}, "", "", "", "", "", "", "", ""
     try:

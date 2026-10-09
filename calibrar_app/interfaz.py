@@ -33,6 +33,7 @@ def layout(mediciones: list[str], carpeta_inicial: str = "") -> html.Div:
             # y marca temporal de edición ({carpeta, canal, seg, t_us})
             dcc.Store(id="ediciones_arribo"),
             dcc.Store(id="marca_arribo"),
+            dcc.Store(id="metadata_asegurada"),  # resultado de generate_metadata al abrir la medición
             dcc.Store(id="explorador_ruta_actual", data=rutas.ruta_inicial()),
             # TRPD_APP la abre embebida con ?embebido=1&carpeta=<medición>
             dcc.Location(id="url", refresh=False),
