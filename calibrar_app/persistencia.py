@@ -63,6 +63,38 @@ def construir_info_ancla(carpeta: str) -> dict:
     }
 
 
+CANALES_SENSOR = ("ch2", "ch3", "ch4")
+
+
+def fusionar_con_bloque_previo(bloque: dict, previo: dict | None) -> tuple[dict, list[str], list[str]]:
+    """Conserva en `bloque` los canales de `previo` que no se recalcularon.
+
+    Guardar solo los canales calculados en la sesión borraba la calibración de los
+    demás (TRPD los leía con t_lag = 0). Un canal previo se conserva solo si su bloque
+    usa la misma referencia de impulso (t10 u O1): con otra referencia su t_lag no es
+    comparable y se descarta. Cada canal conservado lleva la fecha de su calibración.
+    Devuelve (bloque, conservados, descartados)."""
+    conservados, descartados = [], []
+    if not isinstance(previo, dict):
+        return bloque, conservados, descartados
+    ref_prev = previo.get("referencia_impulso")
+    if ref_prev is None:  # bloques legados sin referencia_impulso
+        ref_prev = "origen_virtual_IEC60060" if "origen_virtual" in str(previo.get("referencia") or "") else "t10"
+    misma_ref = ref_prev == bloque.get("referencia_impulso", "t10")
+    for ch in CANALES_SENSOR:
+        b_ch = previo.get(ch)
+        if ch in bloque or not isinstance(b_ch, dict) or b_ch.get("t_lag_ns") is None:
+            continue
+        if misma_ref:
+            b_ch = dict(b_ch)
+            b_ch.setdefault("fecha", previo.get("fecha"))
+            bloque[ch] = b_ch
+            conservados.append(ch)
+        else:
+            descartados.append(ch)
+    return bloque, conservados, descartados
+
+
 def guardar_calibracion_metadata(carpeta: str, bloque: dict) -> tuple[bool, str]:
     """Inserta/reemplaza 'calibracion_retardo' preservando el resto de metadata.yaml."""
     meta = obtener_metadata(carpeta)

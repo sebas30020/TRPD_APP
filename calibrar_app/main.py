@@ -45,6 +45,7 @@ from figuras import (
 from persistencia import (
     bloque_calibracion_retardo,
     construir_info_ancla,
+    fusionar_con_bloque_previo,
     guardar_calibracion_metadata,
 )
 from ediciones import (
@@ -933,10 +934,19 @@ def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente:
         if isinstance(bloque.get(ch), dict) and (r.get("n_manual") or r.get("n_quitados")):
             bloque[ch]["n_arribos_manuales"] = int(r.get("n_manual") or 0)
             bloque[ch]["n_disparos_quitados"] = int(r.get("n_quitados") or 0)
+    # Los canales no recalculados en esta sesión conservan su calibración guardada
+    bloque, conservados, descartados = fusionar_con_bloque_previo(
+        bloque, obtener_metadata(carpeta).get("calibracion_retardo"))
     ok, msg = guardar_calibracion_metadata(carpeta, bloque)
     if ok:
+        extra = ""
+        if conservados:
+            extra += f" Se conservan los retardos ya guardados de {', '.join(c.upper() for c in conservados)}."
+        if descartados:
+            extra += (f" Se descartan los de {', '.join(c.upper() for c in descartados)}"
+                      f" (calibrados con otra referencia de impulso): recalcúlelos.")
         return html.Div(
-            f"{msg} · Bloque calibracion_retardo actualizado exitosamente con referencia '{ref}'.",
+            f"{msg} · Bloque calibracion_retardo actualizado exitosamente con referencia '{ref}'.{extra}",
             style={"color": tema.OK, "backgroundColor": tema.OK_BG, "padding": "8px 12px", "borderRadius": "4px", "fontWeight": "600", "border": f"1px solid {tema.OK}"}
         )
     return html.Div(
