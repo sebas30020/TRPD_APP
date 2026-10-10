@@ -27,8 +27,10 @@ from datos import (
     umbral_defecto,
     n_segmentos,
     listar_subcarpetas,
+    cargar_segmento,
+    VENTANA_T10,
 )
-from arribo import calibrar_retardo
+from arribo import calibrar_retardo, pico_lobulo
 from referencia import (
     ancla_por_segmento,
     evaluar_segmento_iec,
@@ -544,10 +546,18 @@ def gestionar_ediciones_arribo(n_fijar, n_quitar, n_undo, n_rest, carpeta, seg, 
     if trig == "btn_fijar_arribo":
         if not hay_marca:
             return no_update, "Ponga primero la marca sobre la señal del canal (clic o t)."
-        t = round(float(marca["t_us"]), 6)
-        hist.append({"accion": "fijar", "seg": int(seg), "t_us": t,
+        # Mismo criterio que el arribo automático: el máximo de la oscilación marcada
+        t_marca = round(float(marca["t_us"]), 6)
+        try:
+            t_s, v_s = cargar_segmento(carpeta, canal, int(seg), ventana=VENTANA_T10)   # la de calibrar_retardo
+            t_pk = pico_lobulo(t_s, v_s, t_marca)
+        except Exception:
+            t_pk = None   # sin señal legible: se fija la marca tal cual
+        t = round(float(t_pk if t_pk is not None else t_marca), 6)
+        hist.append({"accion": "fijar", "seg": int(seg), "t_us": t, "t_us_marca": t_marca,
                      "desc": f"Arribo manual {canal.upper()} disparo {int(seg)}"})
-        ok_msg = f"✓ Arribo {canal.upper()} fijado: disparo {int(seg)}, t_ant = {t:.4f} µs"
+        ok_msg = (f"✓ Arribo {canal.upper()} fijado: disparo {int(seg)}, t_ant = {t:.4f} µs "
+                  f"(máximo de la oscilación marcada)")
     elif trig == "btn_quitar_arribo":
         hist.append({"accion": "quitar", "seg": int(seg),
                      "desc": f"Disparo {int(seg)} quitado de {canal.upper()}"})

@@ -48,7 +48,14 @@ def t_arribo(t: np.ndarray, v: np.ndarray, umbral: float, distancia: int | None,
     cruces = np.nonzero((seg[1:] >= umbral) & (seg[:-1] < umbral))[0]
     if cruces.size == 0:
         return None
-    k = ini + int(cruces[0]) + 1          # primera muestra sobre el umbral
+    return _pico_lobulo(t, v, ini + int(cruces[0]) + 1)   # primera muestra sobre el umbral
+
+
+def _pico_lobulo(t: np.ndarray, v: np.ndarray, k: int) -> float:
+    """Instante del máximo de |v| del lóbulo (tramo de mismo signo entre dos pasos
+    por cero) que contiene la muestra k, refinado con una parábola por las tres
+    muestras del máximo."""
+    a = np.abs(v)
     signo = np.sign(v[k])
     i0 = k
     while i0 > 0 and np.sign(v[i0 - 1]) == signo:
@@ -64,6 +71,14 @@ def t_arribo(t: np.ndarray, v: np.ndarray, umbral: float, distancia: int | None,
             delta = 0.5 * (y0 - y2) / den     # en muestras, |delta| <= 0.5
             return float(t[i] + delta * (t[i + 1] - t[i - 1]) / 2.0)
     return float(t[i])
+
+
+def pico_lobulo(t: np.ndarray, v: np.ndarray, t_us: float) -> float | None:
+    """Arribo manual con el mismo criterio que t_arribo: máximo de |v| de la
+    oscilación sobre la que cae la marca t_us (la muestra más cercana)."""
+    if t.size == 0:
+        return None
+    return _pico_lobulo(t, v, int(np.argmin(np.abs(t - t_us))))
 
 
 def t_arribo_por_segmento(carpeta: str, canal: str, umbral: float, dist_us: float, tmin: float,

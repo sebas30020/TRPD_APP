@@ -99,15 +99,21 @@ def test_persistencia_y_callback(tmp_path, monkeypatch):
     carpeta = str(tmp_path)
     monkeypatch.setattr(datos, "_dir_medicion", lambda c: carpeta)
     monkeypatch.setattr(main, "ctx", type("C", (), {"triggered": [1], "triggered_id": "btn_fijar_arribo"})())
+    # Oscilación negativa entre -0.32 y -0.30 µs con su máximo de |v| en -0.31 µs
+    t_sen = np.arange(-1.0, 1.0, 1e-4)
+    v_sen = np.where((t_sen > -0.32) & (t_sen < -0.30), -50.0 * np.sin(np.pi * (t_sen + 0.32) / 0.02), 0.0)
+    monkeypatch.setattr(main, "cargar_segmento", lambda *a, **k: (t_sen, v_sen))
 
-    marca = {"carpeta": carpeta, "canal": "ch3", "seg": 4, "t_us": -0.31234}
+    # La marca se pone en el flanco; el arribo queda en el máximo de esa oscilación
+    marca = {"carpeta": carpeta, "canal": "ch3", "seg": 4, "t_us": -0.31734}
     store, msg = main.gestionar_ediciones_arribo(1, 0, 0, 0, carpeta, 4, "ch2", marca, None)
     assert msg.startswith("✓") and "CH3" in msg
-    assert store["canales"]["ch3"]["historial"][-1] == {
-        "accion": "fijar", "seg": 4, "t_us": -0.31234, "desc": "Arribo manual CH3 disparo 4"}
+    paso = store["canales"]["ch3"]["historial"][-1]
+    assert paso == {"accion": "fijar", "seg": 4, "t_us": -0.31, "t_us_marca": -0.31734,
+                    "desc": "Arribo manual CH3 disparo 4"}
     disco = yaml.safe_load((tmp_path / "metadata.yaml").read_text(encoding="utf-8"))
     assert disco["probeta"] == {"codigo": "X"}
-    assert disco["ediciones_arribo"]["ch3"]["historial"][0]["t_us"] == -0.31234
+    assert disco["ediciones_arribo"]["ch3"]["historial"][0]["t_us"] == -0.31
     assert ediciones.ediciones_canal(carpeta, "ch3")["historial"][0]["seg"] == 4
 
     # Deshacer deja el canal sin historial y borra la sección
