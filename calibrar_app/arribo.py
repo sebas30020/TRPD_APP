@@ -20,38 +20,50 @@ MAD_K = 5.0  # Atípico si |t_lag - mediana| > MAD_K * 1.4826 * MAD
 _ARRIBO_CACHE: dict[tuple, dict] = {}
 
 
+CRITERIO_ARRIBO = "pico_primer_lobulo"
+
+
 def t_arribo(t: np.ndarray, v: np.ndarray, umbral: float, distancia: int | None, tmin: float | None,
              tmax: float | None = None) -> float | None:
-    """Instante t_ant (µs) del primer cruce ascendente de |v| sobre el umbral.
+    """Instante t_ant (µs) del máximo de |v| en la primera oscilación que cruza el umbral.
 
-    Aplica máscara tmin <= t <= tmax (tmax None: sin límite; acota la franja donde
-    puede llegar el estallido del spark gap) y busca la primera muestra i con |v[i]| >= umbral
-    precedida de |v[i-1]| < umbral (lóbulo positivo o negativo, lo que llegue
-    antes), e interpola linealmente el cruce sub-muestra. Devuelve None si no hay
-    cruce observable.
+    Busca, dentro de tmin <= t <= tmax (tmax None: sin límite; acota la franja donde
+    puede llegar el estallido del spark gap), la primera muestra con |v| >= umbral
+    precedida de una con |v| < umbral (lóbulo positivo o negativo, lo que llegue
+    antes). El lóbulo es el tramo de mismo signo que contiene ese cruce (entre dos
+    pasos por cero; puede terminar después de tmax) y el arribo es su máximo de |v|,
+    refinado con una parábola por las tres muestras del máximo. Devuelve None si no
+    hay cruce observable.
 
-    `distancia` se conserva por compatibilidad de firma y no se usa: el antiguo
-    filtrado con find_peaks(distance=...) descartaba el primer lóbulo cuando lo
-    seguía otro de mayor |v| y marcaba el arribo en un flanco posterior.
+    `distancia` se conserva por compatibilidad de firma y no se usa.
     """
-    if tmin is not None or tmax is not None:
-        mask = np.ones(t.size, dtype=bool)
-        if tmin is not None:
-            mask &= t >= tmin
-        if tmax is not None:
-            mask &= t <= tmax
-        t, v = t[mask], v[mask]
-    if v.size < 2:
+    if t.size < 2:
+        return None
+    ini = 0 if tmin is None else int(np.searchsorted(t, tmin, side="left"))
+    fin = t.size if tmax is None else int(np.searchsorted(t, tmax, side="right"))
+    if fin - ini < 2:
         return None
     a = np.abs(v)
-    cruces = np.nonzero((a[1:] >= umbral) & (a[:-1] < umbral))[0]
+    seg = a[ini:fin]
+    cruces = np.nonzero((seg[1:] >= umbral) & (seg[:-1] < umbral))[0]
     if cruces.size == 0:
         return None
-    j = int(cruces[0])  # última muestra bajo el umbral antes del cruce
-    da = a[j + 1] - a[j]
-    if da <= 0:
-        return float(t[j])
-    return float(t[j] + (umbral - a[j]) * (t[j + 1] - t[j]) / da)
+    k = ini + int(cruces[0]) + 1          # primera muestra sobre el umbral
+    signo = np.sign(v[k])
+    i0 = k
+    while i0 > 0 and np.sign(v[i0 - 1]) == signo:
+        i0 -= 1
+    i1 = k
+    while i1 + 1 < v.size and np.sign(v[i1 + 1]) == signo:
+        i1 += 1
+    i = i0 + int(np.argmax(a[i0:i1 + 1]))
+    if i0 < i < i1:
+        y0, y1, y2 = a[i - 1], a[i], a[i + 1]
+        den = y0 - 2.0 * y1 + y2
+        if den < 0:
+            delta = 0.5 * (y0 - y2) / den     # en muestras, |delta| <= 0.5
+            return float(t[i] + delta * (t[i + 1] - t[i - 1]) / 2.0)
+    return float(t[i])
 
 
 def t_arribo_por_segmento(carpeta: str, canal: str, umbral: float, dist_us: float, tmin: float,
@@ -121,7 +133,7 @@ def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0
             "sigma_us": None,
             "n_valid": 0,
             "n_total": 0,
-            "criterio": "primer_cruce_umbral",
+            "criterio": CRITERIO_ARRIBO,
             "referencia": referencia,
             "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin, "tmax_us": tmax},
         }
@@ -156,7 +168,7 @@ def calibrar_retardo(carpeta: str, canal: str, umbral: float, dist_us: float = 0
         "sigma_us": sigma_us,
         "n_valid": n_valid,
         "n_total": nsegs,
-        "criterio": "primer_cruce_umbral",
+        "criterio": CRITERIO_ARRIBO,
         "referencia": referencia,
         "ancla_us": ancla.tolist() if hasattr(ancla, "tolist") else list(ancla),
         "params": {"umbral_mv": umbral, "distancia_us": dist_us, "tmin_us": tmin, "tmax_us": tmax},

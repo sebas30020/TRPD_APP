@@ -1005,7 +1005,7 @@ def guardar_en_metadata(n_clicks: int, carpeta: str, store: dict | None, fuente:
             extra += f" Se conservan los retardos ya guardados de {', '.join(c.upper() for c in conservados)}."
         if descartados:
             extra += (f" Se descartan los de {', '.join(c.upper() for c in descartados)}"
-                      f" (calibrados con otra referencia de impulso): recalcúlelos.")
+                      f" (calibrados con otra referencia de impulso u otro criterio de arribo): recalcúlelos.")
         return html.Div(
             f"{msg} · Bloque calibracion_retardo actualizado exitosamente con referencia '{ref}'.{extra}",
             style={"color": tema.OK, "backgroundColor": tema.OK_BG, "padding": "8px 12px", "borderRadius": "4px", "fontWeight": "600", "border": f"1px solid {tema.OK}"}

@@ -72,8 +72,9 @@ def fusionar_con_bloque_previo(bloque: dict, previo: dict | None) -> tuple[dict,
 
     Guardar solo los canales calculados en la sesión borraba la calibración de los
     demás (TRPD los leía con t_lag = 0). Un canal previo se conserva solo si su bloque
-    usa la misma referencia de impulso (t10 u O1): con otra referencia su t_lag no es
-    comparable y se descarta. Cada canal conservado lleva la fecha de su calibración.
+    usa la misma referencia de impulso (t10 u O1) y el mismo criterio de arribo: si
+    no, su t_lag no es comparable y se descarta (bloques sin criterio = el antiguo
+    primer cruce del umbral). Cada canal conservado lleva la fecha de su calibración.
     Devuelve (bloque, conservados, descartados)."""
     conservados, descartados = [], []
     if not isinstance(previo, dict):
@@ -81,7 +82,8 @@ def fusionar_con_bloque_previo(bloque: dict, previo: dict | None) -> tuple[dict,
     ref_prev = previo.get("referencia_impulso")
     if ref_prev is None:  # bloques legados sin referencia_impulso
         ref_prev = "origen_virtual_IEC60060" if "origen_virtual" in str(previo.get("referencia") or "") else "t10"
-    misma_ref = ref_prev == bloque.get("referencia_impulso", "t10")
+    misma_ref = (ref_prev == bloque.get("referencia_impulso", "t10")
+                 and previo.get("criterio", "primer_cruce_umbral") == bloque.get("criterio"))
     for ch in CANALES_SENSOR:
         b_ch = previo.get(ch)
         if ch in bloque or not isinstance(b_ch, dict) or b_ch.get("t_lag_ns") is None:

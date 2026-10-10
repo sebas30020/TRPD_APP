@@ -675,7 +675,8 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
     bloque = {
         "fecha": str(fecha),
         "fuente_calibracion": fuente,
-        "criterio": "primer_cruce_umbral",
+        # Arribo = máximo de |v| de la primera oscilación que cruza el umbral (calibrar_app/arribo.py)
+        "criterio": "pico_primer_lobulo",
         "referencia": ref_legado,
         "referencia_impulso": referencia_impulso,
     }

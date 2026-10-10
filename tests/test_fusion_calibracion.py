@@ -1,5 +1,6 @@
 """Guardar la calibración de solo algunos canales no debe borrar la de los demás:
-calibrar_app conserva los canales no recalculados si usan la misma referencia."""
+calibrar_app conserva los canales no recalculados si usan la misma referencia y el
+mismo criterio de arribo."""
 
 from __future__ import annotations
 import os
@@ -15,9 +16,9 @@ import persistencia
 from persistencia import fusionar_con_bloque_previo
 
 
-def _previo(ref="t10"):
+def _previo(ref="t10", criterio="pico_primer_lobulo"):
     return {
-        "fecha": "2026-09-01", "fuente_calibracion": "antes", "criterio": "primer_cruce_umbral",
+        "fecha": "2026-09-01", "fuente_calibracion": "antes", "criterio": criterio,
         "referencia_impulso": ref,
         "ch2": {"sensor": "HFCT", "t_lag_ns": 12.4, "sigma_ns": 0.8, "n_valid": 40, "n_total": 50},
         "ch3": {"sensor": "Antena 1", "t_lag_ns": 8.1, "sigma_ns": 0.4, "n_valid": 49, "n_total": 50},
@@ -26,7 +27,8 @@ def _previo(ref="t10"):
 
 
 def _nuevo(ref="t10"):
-    return {"fecha": "2026-10-09", "fuente_calibracion": "ahora", "referencia_impulso": ref,
+    return {"fecha": "2026-10-09", "fuente_calibracion": "ahora", "criterio": "pico_primer_lobulo",
+            "referencia_impulso": ref,
             "ch4": {"sensor": "Antena 2", "t_lag_ns": 20.0, "sigma_ns": 0.5, "n_valid": 50, "n_total": 50}}
 
 
@@ -43,6 +45,15 @@ def test_descarta_si_cambia_la_referencia():
     bloque, cons, desc = fusionar_con_bloque_previo(_nuevo("origen_virtual_IEC60060"), _previo("t10"))
     assert cons == [] and desc == ["ch2", "ch3"]
     assert "ch2" not in bloque and "ch3" not in bloque
+
+
+def test_descarta_si_cambia_el_criterio_de_arribo():
+    # Calibración guardada con el antiguo primer cruce del umbral (o sin criterio)
+    for previo in (_previo(criterio="primer_cruce_umbral"),
+                   {k: v for k, v in _previo().items() if k != "criterio"}):
+        bloque, cons, desc = fusionar_con_bloque_previo(_nuevo(), previo)
+        assert cons == [] and desc == ["ch2", "ch3"]
+        assert "ch2" not in bloque and "ch3" not in bloque
 
 
 def test_referencia_legada_y_sin_previo():

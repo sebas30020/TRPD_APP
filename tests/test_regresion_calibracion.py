@@ -27,59 +27,41 @@ CARPETA_TEST = os.environ.get("TRPD_CARPETA_TEST", "")
 
 
 def test_1_sintetico_t_arribo():
-    """Test 1: Verificación sintética de interpolación sub-muestra en arribo.t_arribo."""
+    """Test 1: arribo = máximo de |v| de la primera oscilación que cruza el umbral."""
     dt = 2e-4
     t = np.arange(0, 1.0, dt)
 
-    # 1.1 Rampa lineal que cruza umbral=1 en t*=0.30013, seguida de pulso
-    t_star = 0.30013
-    umbral = 1.0
-    v = np.zeros_like(t)
-    idx_rampa = (t >= 0.2) & (t <= 0.4)
-    m = 2.0 / 0.2
-    v[idx_rampa] = 1.0 + m * (t[idx_rampa] - t_star)
-    v[t > 0.4] = 2.0
-    v[(t >= 0.48) & (t <= 0.52)] = 5.0
-
-    ta = arribo.t_arribo(t, v, umbral=umbral, distancia=10, tmin=0.0)
-    assert ta is not None, "ta no debería ser None"
-    assert abs(ta - t_star) < 1e-7, f"Error en interpolación: {abs(ta - t_star)}"
+    # 1.1 Pulso gaussiano: el arribo es su máximo (refinado sub-muestra), no el cruce
+    t_pico = 0.30013
+    v = 3.0 * np.exp(-0.5 * ((t - t_pico) / 0.005) ** 2)
+    ta = arribo.t_arribo(t, v, umbral=1.0, distancia=10, tmin=0.0)
+    assert ta is not None and abs(ta - t_pico) < 2e-6, ta
 
     # 1.2 Sin cruce -> None
-    v_bajo = np.ones_like(t) * 0.5
-    ta_bajo = arribo.t_arribo(t, v_bajo, umbral=1.0, distancia=10, tmin=0.0)
-    assert ta_bajo is None, f"Esperado None sin cruce, obtenido {ta_bajo}"
+    assert arribo.t_arribo(t, np.full_like(t, 0.5), umbral=1.0, distancia=10, tmin=0.0) is None
 
-    # 1.3 Precursor EMI absorbido por pico mayor
-    v_prec = np.zeros_like(t)
-    v_prec[int(0.298 / dt)] = 1.05
-    i_pico_mayor = int(0.302 / dt)
-    v_prec[i_pico_mayor - 5:i_pico_mayor + 5] = np.linspace(0.5, 5.0, 10)
-    v_prec[i_pico_mayor:i_pico_mayor + 10] = np.linspace(5.0, 0.2, 10)
-    distancia_muestras = int(0.02 / dt)
-    ta_prec = arribo.t_arribo(t, v_prec, umbral=1.0, distancia=distancia_muestras, tmin=0.0)
-    assert ta_prec is not None
+    # 1.3 Señal negativa (-v) -> usa |v|
+    ta_neg = arribo.t_arribo(t, -v, umbral=1.0, distancia=10, tmin=0.0)
+    assert ta_neg is not None and abs(ta_neg - ta) < 1e-9
 
-    # 1.4 Señal negativa (-v) -> usa |v|
-    ta_neg = arribo.t_arribo(t, -v, umbral=umbral, distancia=10, tmin=0.0)
-    assert ta_neg is not None and abs(ta_neg - ta) < 1e-7
-
-    # 1.5 Lóbulo positivo pequeño que cruza primero, seguido de un lóbulo negativo
-    #     mayor dentro de la distancia: el arribo es el primer cruce de |v|, no el
-    #     flanco del lóbulo negativo.
+    # 1.4 Lóbulo positivo pequeño que cruza primero, seguido de un lóbulo negativo
+    #     mayor: el arribo es el máximo del lóbulo positivo (t = 0.31), no el del negativo.
     v_osc = np.zeros_like(t)
-    lob_pos = (t >= 0.30) & (t <= 0.32)
+    lob_pos = (t > 0.30) & (t < 0.32)
     v_osc[lob_pos] = 2.0 * np.sin(np.pi * (t[lob_pos] - 0.30) / 0.02)
-    lob_neg = (t > 0.32) & (t <= 0.36)
+    lob_neg = (t > 0.32) & (t < 0.36)
     v_osc[lob_neg] = -6.0 * np.sin(np.pi * (t[lob_neg] - 0.32) / 0.04)
-    t_esperado = 0.30 + 0.02 * np.arcsin(0.5) / np.pi  # 2·sin(...) = 1
     ta_osc = arribo.t_arribo(t, v_osc, umbral=1.0, distancia=int(0.05 / dt), tmin=0.0)
-    assert ta_osc is not None and abs(ta_osc - t_esperado) < 2e-5, ta_osc
+    assert ta_osc is not None and abs(ta_osc - 0.31) < 2e-5, ta_osc
 
-    # 1.6 t_máx: una descarga posterior a la franja del estallido no se toma como arribo
+    # 1.5 t_máx acota dónde puede empezar el cruce; el lóbulo puede terminar después
     assert arribo.t_arribo(t, v_osc, umbral=1.0, distancia=None, tmin=0.0, tmax=0.29) is None
-    ta_tmax = arribo.t_arribo(t, v_osc, umbral=1.0, distancia=None, tmin=0.0, tmax=0.35)
-    assert ta_tmax is not None and abs(ta_tmax - t_esperado) < 2e-5
+    ta_tmax = arribo.t_arribo(t, v_osc, umbral=1.0, distancia=None, tmin=0.0, tmax=0.305)
+    assert ta_tmax is not None and abs(ta_tmax - 0.31) < 2e-5, ta_tmax
+
+    # 1.6 t_mín: el lóbulo que cruza antes de t_mín no cuenta
+    ta_tmin = arribo.t_arribo(t, v_osc, umbral=1.0, distancia=None, tmin=0.32)
+    assert ta_tmin is not None and abs(ta_tmin - 0.34) < 2e-5, ta_tmin
 
 
 def test_2_t10_por_segmento_app():
