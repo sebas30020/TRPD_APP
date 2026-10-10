@@ -136,3 +136,11 @@ def test_reproducir_desde_metadata_da_lo_mismo(medicion):
     assert r["fila"]["distribucion"] == "[1, 1, 1, 0, 0, 0]" and r["fila"]["n_coinc"] == "1"
     # Canal sin trigger guardado: no se inventa un resultado
     assert reproducir_trpd.resultado_canal(carpeta, "ch2") is None
+
+
+def test_valores_por_defecto_sin_trigger_guardado(medicion):
+    carpeta, _ = medicion
+    cfg = app.config_sensores_defecto(carpeta, filtrado=True)
+    assert cfg == {"ch2": {"umbral": 130.0, "dist": 0.03, "tmin": 0.3},
+                   "ch3": {"umbral": 50.0, "dist": 0.03, "tmin": 0.3},
+                   "ch4": {"umbral": 40.0, "dist": 0.03, "tmin": 0.3}}

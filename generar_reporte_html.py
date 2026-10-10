@@ -228,7 +228,7 @@ def generar(raices, salida, solo=None):
         "colores": {ch: tema.COLORES_CANALES.get(ch, "#555") for ch in CANALES_SENAL},
         "nombres": NOMBRES, "retardo": gi.RETARDO_US, "tol_coinc": gi.TOL_COINC_US,
         "frac_cand": gi.FRAC_CANDIDATO, "k_env": gi.RESONANCIA["ch2"]["k_env"],
-        "dist": {ch: gi.DIST_US.get(ch, app.DIST_DEFECTO_US) for ch in CANALES_MAPA},
+        "dist": {ch: gi.DIST_US.get(ch, gi.DIST_DEFECTO_US) for ch in CANALES_MAPA},
         "detalle_us": DETALLE_US, "x_lim": list(gi.X_LIM), "t_lim": [app.T_MIN, app.T_MAX],
     }
     with open(os.path.join(salida, "data", "indice.js"), "w", encoding="utf-8") as f:

@@ -124,7 +124,7 @@ def agrupar_eventos(rs, n_segs):
     tc = {c: _t_corr(rs[c]) for c in CANALES}
     sg = {c: np.asarray(rs[c]["cap"]["seg"], dtype=int) for c in CANALES}
     r2 = rs["ch2"]
-    dist2 = git3.DIST_US.get("ch2", app.DIST_DEFECTO_US)
+    dist2 = git3.DIST_US.get("ch2", git3.DIST_DEFECTO_US)
     for s in range(1, n_segs + 1):
         libres = {c: set(np.nonzero(sg[c] == s)[0].tolist()) for c in CANALES}
         while any(libres.values()):
@@ -584,7 +584,7 @@ def escribir_txt(ruta, descs, res, ms, ret):
          "3v_4mm_0: HFCT montado al revés en la medición; se usa med_proced_hfct_inv\\3v_4mm_0 (CH2 = −original,",
          "  copia hecha con TRPD_APP/invertir_canal.py). El original en med_proced no se modificó.",
          f"Detección desde t_abs = {git3.T_INI_US['ch3']:g} µs (CH3/CH4) y {git3.T_INI_US['ch2']:g} µs (CH2); "
-         f"Δt CH3/CH4 {app.DIST_DEFECTO_US * 1000:g} ns, CH2 {git3.DIST_US['ch2'] * 1000:g} ns.", "",
+         f"Δt CH3/CH4 {git3.DIST_DEFECTO_US * 1000:g} ns, CH2 {git3.DIST_US['ch2'] * 1000:g} ns.", "",
          "Categorías (todas salvo 'triple' son dudosas y no cuentan en N_PD):"]
     L += [f"  {k:<22} {ETIQUETA_CAT[k]}" for k in CATEGORIAS]
     L += ["  'antenas_resonancia': la envolvente de la resonancia de CH2 ajustada en ese disparo es ≥ el umbral",

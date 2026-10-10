@@ -77,7 +77,10 @@ UMBRAL_POR_MEDICION = {
     "ch2": {"med_proced\\1v_2mm_01": 65.0},
 }
 UMBRAL_DEFECTO = {"ch2": 40.0, "ch3": 250.0, "ch4": 250.0}   # mV
-DIST_US = {"ch2": 0.5}                 # Δt (µs) por canal; el resto usa app.DIST_DEFECTO_US
+DIST_US = {"ch2": 0.5}                 # Δt (µs) por canal; el resto usa DIST_DEFECTO_US
+# Valores por defecto con que se generaron estos informes (app.py cambió los suyos)
+DIST_DEFECTO_US = 0.05
+TMIN_DEFECTO_US = 0.15
 # t_abs (µs) desde el que se detecta (relativo al t10 de cada medición, no al osciloscopio).
 # CH3/CH4: el frente del impulso se acopla en t_abs ≈ −0.13 µs y oscila hasta ≈ 0; entre 0 y
 # 0.25 µs solo aparecen 2 pulsos > 250 mV (1v_2mm_0 17.5kV, disparos 3 y 6, t_abs ≈ 0.07 µs)
@@ -112,7 +115,7 @@ def tmin_osc(carpeta, canal):
     """t_mín (µs, tiempo del osciloscopio) equivalente a t_abs = T_INI_US del canal, con el
     t10 mediano de la medición (el t10 varía < 35 ns entre disparos)."""
     if canal not in T_INI_US:
-        return app.TMIN_DEFECTO_US
+        return TMIN_DEFECTO_US
     return float(np.median(app.t10_por_segmento(carpeta))) + T_INI_US[canal]
 
 
@@ -127,8 +130,8 @@ def fila_tabla1(carpeta, canal, cap, cuentas, t_lag, filtrado=True):
     """Fila Tabla 1 calculada sobre `cap` (misma regla que app.calcular_fila_densidad: V̄_pp y
     t̄_abs sobre las descargas de los disparos con N_PD = N_cav). Los campos descriptivos
     (Specimen, d, Voltage, Sensor) se toman de la app con un umbral infinito (sin peaks)."""
-    fila = app.calcular_fila_densidad(carpeta, canal, np.inf, app.DIST_DEFECTO_US,
-                                      app.TMIN_DEFECTO_US, filtrado=filtrado)
+    fila = app.calcular_fila_densidad(carpeta, canal, np.inf, DIST_DEFECTO_US,
+                                      TMIN_DEFECTO_US, filtrado=filtrado)
     c = np.asarray(cuentas)
     fila["distribucion"] = "[" + ", ".join(
         str(x) for x in [int(np.sum(c == k)) for k in range(5)] + [int(np.sum(c > 4))]) + "]"
@@ -158,7 +161,7 @@ def _sin_detectados(seg, t, v, cap):
 def analizar_estandar(carpeta, canal, umbral, filtrado=True):
     """Detección de la app (CH3/CH4): captura editada, fila Tabla 1, N_PD por disparo y
     candidatos bajo el umbral (máximos entre FRAC_CANDIDATO·umbral y el umbral)."""
-    dist, tmin = DIST_US.get(canal, app.DIST_DEFECTO_US), tmin_osc(carpeta, canal)
+    dist, tmin = DIST_US.get(canal, DIST_DEFECTO_US), tmin_osc(carpeta, canal)
     ed = app.ediciones_canal(carpeta, canal)
     cap = app.captura_editada(carpeta, canal, umbral, dist, tmin, filtrado=filtrado, ediciones=ed)
     t_lag = app.lag_canal(app.calibracion_desde_metadata(carpeta), carpeta, canal)
@@ -232,7 +235,7 @@ def analizar_resonancia(carpeta, canal, umbral, normalizadas, limpios, malla, fi
     Devuelve además `modelo` {seg: resonancia ajustada en `malla` (float32)} para poder
     reconstruir el residuo, y `candidatos` [(seg, t, v)] entre FRAC_CANDIDATO·umbral y el umbral."""
     cfg = RESONANCIA[canal]
-    dist = DIST_US.get(canal, app.DIST_DEFECTO_US)
+    dist = DIST_US.get(canal, DIST_DEFECTO_US)
     t_ini = T_INI_US.get(canal, 0.0)
     t10 = app.t10_por_segmento(carpeta)
     dt = app.meta_medicion(carpeta)[canal]["xinc"] * 1e6
@@ -431,7 +434,7 @@ def _texto_parametros(canal, res, umbral, t_lag_cero):
     txt = (f"{NOMBRE_CANAL.get(canal, canal)} ({canal.upper()}): umbral {umbral:g} mV"
            + (f" ({', '.join(f'{u:g}' for u in propios)} mV en "
               f"{sum(r['umbral'] != umbral for r in res)} mediciones)" if propios else "")
-           + f" · Δt {DIST_US.get(canal, app.DIST_DEFECTO_US) * 1000:g} ns · {filtro} · ventana 70 ns"
+           + f" · Δt {DIST_US.get(canal, DIST_DEFECTO_US) * 1000:g} ns · {filtro} · ventana 70 ns"
            + f" · detección desde t_abs = {T_INI_US.get(canal, 0):g} µs")
     if canal in RESONANCIA:
         cfg = RESONANCIA[canal]

@@ -73,12 +73,12 @@ SIN_DIEZMADO_US = 1.0
 
 URL_CALIBRAR = "http://127.0.0.1:8052"   # calibrar_app (pestaña Calibración)
 
-# Parámetros de detección por defecto cuando un campo queda vacío
-# Δt por defecto: 50 ns. El paper usaba 180 muestras a 5 GSa/s = 36 ns, pero las antenas
-# muestran un eco de la misma descarga 37–43 ns después del pico (~17 % de su amplitud,
-# también en la señal cruda) que con 35 ns se contaba como una segunda descarga.
-DIST_DEFECTO_US = 0.05
-TMIN_DEFECTO_US = 0.15
+# Parámetros de detección por defecto (si la medición no tiene trigger guardado en
+# metadata.yaml o un campo queda vacío). Umbral sobre el pico (Vp) de la señal filtrada,
+# por canal; Δt y t_mín comunes a los tres sensores.
+UMBRAL_DEFECTO_MV = {"ch2": 130.0, "ch3": 50.0, "ch4": 40.0}
+DIST_DEFECTO_US = 0.03
+TMIN_DEFECTO_US = 0.3
 
 # Edición manual de peaks (marca temporal):
 SNAP_MARCA_US = 0.010   # el clic se ajusta al máximo de la señal en ±10 ns
@@ -507,9 +507,12 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
 
 
 def umbral_defecto(carpeta, canal="ch4", seg=1, filtrado=True):
-    """Umbral por defecto: 50% del |pico| del canal trigger en el segmento dado."""
+    """Umbral por defecto: UMBRAL_DEFECTO_MV del canal con la señal filtrada; sin
+    filtro, 50% del |pico| del canal trigger en el segmento dado."""
     if canal not in canales_presentes(carpeta):
         return 0.0
+    if filtrado and canal in UMBRAL_DEFECTO_MV:
+        return UMBRAL_DEFECTO_MV[canal]
     _, v = cargar_segmento(carpeta, canal, seg, filtrado=filtrado)
     return 0.5 * float(np.max(np.abs(v))) if v.size else 0.0
 
