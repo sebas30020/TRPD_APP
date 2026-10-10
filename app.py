@@ -16,6 +16,7 @@ import copy
 import json
 import os
 import re
+import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -155,7 +156,8 @@ def config_sensores_defecto(carpeta, filtrado=True):
         cfg[ch] = dict(defaults[ch])
         meta_ch = canales_meta.get(ch, {})
         trig_meta = meta_ch.get("trigger", {}) if isinstance(meta_ch, dict) else {}
-        if isinstance(trig_meta, dict):
+        # Un trigger guardado con la otra señal (con/sin filtro) no aplica a esta
+        if isinstance(trig_meta, dict) and trig_meta.get("filtrado", filtrado) == filtrado:
             if trig_meta.get("umbral_mv") is not None:
                 cfg[ch]["umbral"] = float(trig_meta["umbral_mv"])
             if trig_meta.get("distancia_us") is not None:
@@ -219,12 +221,120 @@ def _canales_senal(carpeta):
     return [c for c in canales_presentes(carpeta) if c != "ch1"]
 
 
+def _badge_ediciones(fig, fila, canal, seg, n_peaks, n_man, n_quit, disparo_excluido):
+    """Recuadro arriba a la derecha del canal activo (como en calibrar_app) con el
+    estado del disparo: peaks activos y cuántos se añadieron o quitaron a mano."""
+    ch = canal.upper()
+    if disparo_excluido:
+        texto = f"<b>{ch}</b> · Disparo {seg} excluido (manual): sus peaks no entran al análisis"
+        bg, borde, color = tema.WARN_BG, tema.WARN, tema.WARN
+    elif n_man or n_quit:
+        partes = [f"{n_peaks} peak{'s' if n_peaks != 1 else ''}"]
+        if n_man:
+            partes.append(f"◆ {n_man} añadido{'s' if n_man != 1 else ''}")
+        if n_quit:
+            partes.append(f"○ {n_quit} quitado{'s' if n_quit != 1 else ''}")
+        texto = f"<b>{ch}</b> · " + " · ".join(partes) + " (manual)"
+        bg, borde, color = (tema.WARN_BG, tema.WARN, tema.INK) if n_quit else (tema.OK_BG, tema.OK, tema.INK)
+    else:
+        texto = f"<b>{ch}</b> · {n_peaks} peak{'s' if n_peaks != 1 else ''} detectado{'s' if n_peaks != 1 else ''}"
+        bg, borde, color = "rgba(255,255,255,0.9)", tema.BORDER, tema.INK
+    fig.add_annotation(
+        xref=f"x{fila} domain" if fila > 1 else "x domain",
+        yref=f"y{fila} domain" if fila > 1 else "y domain",
+        x=0.98, y=0.92, text=texto, showarrow=False, align="right",
+        font=dict(size=10, color=color), bgcolor=bg,
+        bordercolor=borde, borderwidth=1, borderpad=4, name="badge_ediciones",
+    )
+
+
+def _cruces_otro_sensor(fig, carpeta, ch, seg, fila, t, v, cfg, cap=None, ed=None, sel=None):
+    """Cruces de peaks de un trigger que no es el activo, en su color (calibración
+    simultánea de todos los sensores). Con `cap` (captura editada del mapa conjunto)
+    dibuja sus peaks, manuales, quitados, selección y recuadro de estado, y cada punto
+    lleva customdata [índice, nº de canal] para seleccionarlo con un clic. Sin `cap`,
+    detección en vivo con `cfg` (umbral, dist, tmin) sin los quitados / disparos
+    excluidos de su historial `ed`."""
+    num, color = int(ch[-1]), _COLORES_CANALES.get(ch, tema.MUTED)
+    est = estado_ediciones(ed)
+    excluido = int(seg) in est["disparos"]
+    quitados, manual, idx_det = [], None, None
+    if cap is not None:
+        mask = cap["seg"] == seg
+        origen = np.asarray(cap.get("origen", np.zeros(mask.size, dtype=int)))
+        m_man = mask & (origen == 1) if origen.size == mask.size else np.zeros_like(mask)
+        m_det = mask & ~m_man
+        tp, vp, idx_det = cap["t_peak"][m_det], cap["v_peak"][m_det], np.nonzero(m_det)[0]
+        manual = (cap["t_peak"][m_man], cap["v_peak"][m_man], np.nonzero(m_man)[0])
+        quitados = [(tq, vq) for s_, tq, vq in cap.get("quitados_vis", []) if s_ == seg]
+    else:
+        u = cfg.get("umbral")
+        if u is None:
+            u = 0.5 * float(np.max(np.abs(v))) if v.size else 0.0
+        tp, vp = _detectar_con_ventana(carpeta, ch, t, v, u, _muestras(carpeta, ch, cfg.get("dist", 1.0)),
+                                       cfg.get("tmin", 0.0))
+        tp, vp = np.asarray(tp, dtype=float), np.asarray(vp, dtype=float)
+        fuera = [tq for s_, tq in est["quitados"] if s_ == int(seg)]
+        keep = np.array([not excluido and not any(abs(x - q) <= TOL_PEAK_US for q in fuera) for x in tp],
+                        dtype=bool)
+        if tp.size:
+            tp, vp = tp[keep], vp[keep]
+
+    def cd(idx):
+        return None if idx is None else [[int(i), num] for i in idx]
+
+    if quitados:
+        fig.add_trace(go.Scatter(
+            x=[q[0] for q in quitados], y=[q[1] for q in quitados], mode="markers+text",
+            name=f"quitados {ch.upper()}", showlegend=False, uid=f"peaks-quitados-{ch}",
+            text=["quitado"] * len(quitados), textposition="top center",
+            textfont=dict(size=9, color=tema.WARN),
+            marker=dict(symbol="circle-open", color=tema.WARN, size=12, line=dict(width=1.5)),
+            hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak quitado " + ch.upper() + "</extra>",
+        ), row=fila, col=1)
+    fig.add_trace(go.Scatter(
+        x=tp, y=vp, mode="markers", name=f"peaks {ch.upper()}", customdata=cd(idx_det),
+        uid=f"peaks-{ch}", showlegend=False,
+        marker=dict(symbol="x", color=color, size=9, line=dict(width=1.5, color=tema.INK)),
+        hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak " + ch.upper() + "</extra>",
+    ), row=fila, col=1)
+    if manual is not None and len(manual[0]):
+        fig.add_trace(go.Scatter(
+            x=manual[0], y=manual[1], mode="markers+text", name=f"peaks manuales {ch.upper()}",
+            customdata=cd(manual[2]), showlegend=False, uid=f"peaks-manuales-{ch}",
+            text=["añadido"] * len(manual[0]), textposition="top center",
+            textfont=dict(size=9, color=COLOR_MANUAL),
+            marker=dict(symbol="diamond", color=COLOR_MANUAL, size=14, line=dict(color=tema.INK, width=1.5)),
+            hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak manual " + ch.upper() + "</extra>",
+        ), row=fila, col=1)
+    if cap is not None:
+        n_man = len(manual[0]) if manual is not None else 0
+        _badge_ediciones(fig, fila, ch, seg, len(tp) + n_man, n_man, len(quitados), excluido)
+        sel_seg = [i for i in (sel or []) if 0 <= i < cap["seg"].size and cap["seg"][i] == seg]
+        if sel_seg:
+            fig.add_trace(go.Scatter(
+                x=cap["t_peak"][sel_seg], y=cap["v_peak"][sel_seg], mode="markers",
+                name=f"seleccionado {ch.upper()}", customdata=cd(sel_seg), showlegend=False,
+                marker=dict(symbol="circle-open", color=COLOR_SELECCION, size=22,
+                            line=dict(color=COLOR_SELECCION, width=3)),
+                hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>seleccionado " + ch.upper() + "</extra>",
+            ), row=fila, col=1)
+            for i in sel_seg:
+                fig.add_vline(x=float(cap["t_peak"][i]), row="all", col=1, editable=False,
+                              line=dict(color=COLOR_SELECCION, width=1.5, dash="dot"))
+
+
 def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rango_x=None, marca=None,
-           vista_previa=False, seleccion=None, rev_zoom=0):
+           vista_previa=False, seleccion=None, rev_zoom=0, ediciones=None,
+           caps_otros=None, ediciones_otros=None, seleccion_otros=None):
     """Señales del segmento con umbrales, cruces de peaks del canal activo, peaks manuales y
     quitados de `cap` (captura editada), marca temporal y peaks seleccionados resaltados.
     `vista_previa`: los parámetros de la UI difieren de la captura; las cruces son la
-    detección con los parámetros nuevos, pero manuales y quitados siguen viniendo de `cap`."""
+    detección con los parámetros nuevos, sin los peaks quitados / disparos excluidos de
+    `ediciones` (historial del canal), y manuales y quitados siguen viniendo de `cap`.
+    Los demás triggers también muestran sus cruces (_cruces_otro_sensor): de
+    `caps_otros` {canal: captura editada} en el mapa conjunto vigente, si no en vivo
+    con su configuración de `cfg_sensores` y su historial de `ediciones_otros`."""
     canales = canales_presentes(carpeta)
     fig = make_subplots(
         rows=len(canales), cols=1,
@@ -235,11 +345,13 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
         cfg_sensores = config_sensores_defecto(carpeta, filtrado=filtrado)
 
     t_trig = v_trig = None
+    senales = {}
     for i, c in enumerate(canales, start=1):
         fig.update_yaxes(title_text="mV", row=i, col=1)
         if c == "ch1":
             continue  # CH1 muestra la señal promedio filtrada (se dibuja aparte)
         t, v = cargar_segmento(carpeta, c, seg, filtrado=filtrado)
+        senales[c] = (t, v)
         if c == canal:
             t_trig, v_trig = t, v
         color_traza = _COLORES_CANALES.get(c, tema.ACCENT)
@@ -269,6 +381,13 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
                 line=dict(color=color_linea, width=ancho_linea, dash=dash_linea),
             )
 
+    # Cruces de los demás triggers: se calibran todos los sensores a la vez.
+    for ch in TRIGGERS:
+        if ch != canal and ch in senales:
+            _cruces_otro_sensor(fig, carpeta, ch, seg, canales.index(ch) + 1, *senales[ch],
+                                cfg_sensores.get(ch, {}), (caps_otros or {}).get(ch),
+                                (ediciones_otros or {}).get(ch), (seleccion_otros or {}).get(ch))
+
     # Cruces de peaks sobre el canal activo inspeccionado
     if canal in canales and v_trig is not None:
         fila = canales.index(canal) + 1
@@ -280,6 +399,9 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
         tmin_act = cfg_act.get("tmin", 0.0)
 
         manual = None
+        quitados = []
+        est = estado_ediciones(ediciones)
+        disparo_excluido = int(seg) in est["disparos"]
         if cap is not None:
             # Captura editada: índice global en customdata (selección), manuales aparte.
             mask = cap["seg"] == seg
@@ -291,20 +413,33 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
             customdata = np.nonzero(m_det)[0].tolist()
             quitados = [(t, v) for s_, t, v in cap.get("quitados_vis", []) if s_ == seg]
             if quitados:
-                fig.add_trace(go.Scattergl(
-                    x=[q[0] for q in quitados], y=[q[1] for q in quitados], mode="markers",
-                    name="quitados", showlegend=False,
-                    marker=dict(symbol="x", color=tema.MUTED_LIGHT, size=8, line=dict(width=1)),
+                # Círculo hueco ocre con rótulo: no se confunde con la cruz de un peak activo.
+                fig.add_trace(go.Scatter(
+                    x=[q[0] for q in quitados], y=[q[1] for q in quitados], mode="markers+text",
+                    name="quitados", showlegend=False, uid="peaks-quitados",
+                    text=["quitado"] * len(quitados), textposition="top center",
+                    textfont=dict(size=9, color=tema.WARN),
+                    marker=dict(symbol="circle-open", color=tema.WARN, size=12, line=dict(width=1.5)),
                     hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak quitado</extra>",
                 ), row=fila, col=1)
         if cap is None or vista_previa:
             tp, vp = _detectar_con_ventana(carpeta, canal, t_trig, v_trig, u0,
                                            _muestras(carpeta, canal, dist_act), tmin_act)
             customdata = None
+            if cap is not None:
+                # La vista previa también respeta las ediciones: sin quitados, sin disparos
+                # excluidos y sin duplicar los manuales (se dibujan como rombo aparte).
+                tp, vp = np.asarray(tp, dtype=float), np.asarray(vp, dtype=float)
+                fuera = [t for s_, t in est["quitados"] if s_ == int(seg)] + list(manual[0])
+                keep = np.array([not disparo_excluido
+                                 and not any(abs(t - q) <= TOL_PEAK_US for q in fuera) for t in tp],
+                                dtype=bool)
+                tp, vp = tp[keep] if tp.size else tp, vp[keep] if vp.size else vp
 
         fig.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=tp, y=vp, mode="markers", name=f"peaks {canal.upper()}", customdata=customdata,
+                uid="peaks-activos",
                 marker=dict(symbol="x", color=tema.LINEA_ACTIVO, size=9, line=dict(width=1.5)),
                 hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak</extra>",
                 showlegend=False,
@@ -314,12 +449,17 @@ def figura(carpeta, seg, canal, cfg_sensores=None, cap=None, filtrado=True, rang
         if manual is not None and len(manual[0]):
             # Rombo grande con borde oscuro: visible sobre la señal y sobre la línea de la marca.
             fig.add_trace(go.Scatter(
-                x=manual[0], y=manual[1], mode="markers", name="peaks manuales",
-                customdata=manual[2], showlegend=False,
+                x=manual[0], y=manual[1], mode="markers+text", name="peaks manuales",
+                customdata=manual[2], showlegend=False, uid="peaks-manuales",
+                text=["añadido"] * len(manual[0]), textposition="top center",
+                textfont=dict(size=9, color=COLOR_MANUAL),
                 marker=dict(symbol="diamond", color=COLOR_MANUAL, size=14,
                             line=dict(color=tema.INK, width=1.5)),
                 hovertemplate="t=%{x:.4f} µs<br>%{y:.2f} mV<extra>peak manual</extra>",
             ), row=fila, col=1)
+        if cap is not None:
+            _badge_ediciones(fig, fila, canal, seg, len(tp) + (len(manual[0]) if manual else 0),
+                             len(manual[0]) if manual else 0, len(quitados), disparo_excluido)
         # Peaks seleccionados (clic en el TRPD o en una cruz) de este segmento: anillo + línea.
         if cap is not None and seleccion:
             sel_seg = [i for i in seleccion if 0 <= i < cap["seg"].size and cap["seg"][i] == seg]
@@ -747,6 +887,8 @@ def _idx_cruces(datos, n):
         if cd is None:
             continue
         if isinstance(cd, (list, tuple)):
+            if len(cd) > 1:
+                continue   # cruz de otro sensor ([índice, nº de canal]): la lleva seleccion_otros
             cd = cd[0]
         idx.append(int(cd))
     idx = [i for i in idx if 0 <= i < n]
@@ -1144,6 +1286,36 @@ def guardar_ediciones_canal(carpeta, canal, ed):
     return guardar_metadata_archivo(carpeta, yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
 
 
+def guardar_trigger_canales(carpeta, cfgs, filtrado=True):
+    """Guarda en metadata.yaml (canales.<ch>.trigger) los parámetros con que se
+    calcularon los peaks de cada canal: {ch: {umbral, dist, tmin}}. Junto con
+    ediciones_peaks permite reproducir el mapa TRPD y la tabla fuera de la app.
+    Los valores se guardan sin redondear (mismo resultado exacto). No reescribe el
+    archivo si no cambia nada."""
+    meta = {k: v for k, v in obtener_metadata(carpeta).items() if not k.startswith("_")}
+    canales = {ch: dict(v) if isinstance(v, dict) else v
+               for ch, v in (meta.get("canales") or {}).items()}
+    cambio = False
+    for ch, c in (cfgs or {}).items():
+        if not c or c.get("umbral") is None:
+            continue
+        nuevo = {
+            "umbral_mv": float(c["umbral"]),
+            "distancia_us": float(c["dist"] if c.get("dist") is not None else DIST_DEFECTO_US),
+            "tmin_us": float(c["tmin"] if c.get("tmin") is not None else TMIN_DEFECTO_US),
+            "filtrado": bool(filtrado),
+            "filtro": filtros.etiqueta(spec_filtro(carpeta, ch)) if filtrado else "sin filtro",
+        }
+        info = canales.get(ch) if isinstance(canales.get(ch), dict) else {}
+        if info.get("trigger") != nuevo:
+            canales[ch] = dict(info, trigger=nuevo)
+            cambio = True
+    if not cambio:
+        return True, "Trigger sin cambios"
+    meta["canales"] = canales
+    return guardar_metadata_archivo(carpeta, yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
+
+
 COLUMNAS_DENSIDAD = [
     {"name": "Specimen", "id": "specimen"},
     {"name": "d (mm)", "id": "diametro"},
@@ -1153,6 +1325,8 @@ COLUMNAS_DENSIDAD = [
     {"name": "N_PD = N_cav", "id": "n_coinc"},
     {"name": "V̄_pp (V)", "id": "vpp_media"},
     {"name": "t̄_abs (µs)", "id": "tabs_media"},
+    {"name": "V̄_pp | N_PD = N_cav (V)", "id": "vpp_media_cav"},
+    {"name": "t̄_abs | N_PD = N_cav (µs)", "id": "tabs_media_cav"},
 ]
 
 
@@ -1172,11 +1346,12 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
                            filtrado=True):
     """Fila de la tabla de estadística con el formato de la Tabla 1 del paper:
     Specimen (Nv), d (mm), Voltage (kV), Sensor, N_PD distribution [0, 1, 2, 3, 4, > 4],
-    N_PD = N_cav, V̄_pp (V) y t̄_abs (µs).
-
-    V̄_pp y t̄_abs se promedian solo sobre las descargas de los disparos con
-    N_PD == N_cav (si no se conoce N_cav, sobre todas las descargas activas).
-    `ediciones`: ediciones manuales del canal (peaks añadidos/quitados)."""
+    N_PD = N_cav, V̄_pp (V) y t̄_abs (µs), en dos versiones:
+      - vpp_media / tabs_media: sobre todas las descargas activas del canal (las
+        mismas que dibuja el mapa TRPD: detectadas no quitadas + añadidas a mano);
+      - vpp_media_cav / tabs_media_cav: solo sobre las descargas de los disparos
+        con N_PD == N_cav ("-" si no hay ninguno o no se conoce N_cav).
+    `ediciones`: ediciones manuales del canal."""
     meta = obtener_metadata(carpeta)
     prob = meta.get("probeta") or {}
     inf = inferir_parametros(carpeta)
@@ -1213,16 +1388,21 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
     if n_cav:
         n_coinc = str(int(np.sum(cuentas_arr == n_cav))) if cuentas_arr.size else "0"
         segs_ok = {s for s, k in zip(segs, cuentas) if k == n_cav}
-        idx = [i for i in activos if int(cap["seg"][i]) in segs_ok]
+        idx_cav = [i for i in activos if int(cap["seg"][i]) in segs_ok]
     else:
         n_coinc = "-"
-        idx = activos
+        idx_cav = []
 
-    if idx:
-        vpp_media = f"{float(np.mean(cap['vpp'][idx])) / 1000.0:.3f}"
-        tabs_media = f"{float(np.mean(t_abs_captura(cap, t_lag_us)[idx])):.3f}"
-    else:
-        vpp_media = tabs_media = "-"
+    t_abs = t_abs_captura(cap, t_lag_us)
+
+    def medias(idx):
+        if not idx:
+            return "-", "-"
+        return (f"{float(np.mean(cap['vpp'][idx])) / 1000.0:.3f}",
+                f"{float(np.mean(t_abs[idx])):.3f}")
+
+    vpp_media, tabs_media = medias(activos)
+    vpp_media_cav, tabs_media_cav = medias(idx_cav)
 
     return {
         "id": f"{carpeta}_{canal}",
@@ -1234,6 +1414,8 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
         "n_coinc": n_coinc,
         "vpp_media": vpp_media,
         "tabs_media": tabs_media,
+        "vpp_media_cav": vpp_media_cav,
+        "tabs_media_cav": tabs_media_cav,
         "_carpeta": carpeta,
         "_canal": canal,
         "_n_cav": n_cav,
@@ -1252,8 +1434,10 @@ def _cabecera_tabla_paper():
         html.Th("Sensor"),
         html.Th(["N", html.Sub("PD"), " distribution", html.Br(), "[0, 1, 2, 3, 4, > 4]"]),
         html.Th(["N", html.Sub("PD"), " = N", html.Sub("cav")]),
-        html.Th(["V̄", html.Sub("pp"), " (V)"]),
-        html.Th(["t̄", html.Sub("abs"), " (µs)"]),
+        html.Th(["V̄", html.Sub("pp"), " (V)", html.Br(), "todas"]),
+        html.Th(["t̄", html.Sub("abs"), " (µs)", html.Br(), "todas"]),
+        html.Th(["V̄", html.Sub("pp"), " (V)", html.Br(), "N", html.Sub("PD"), " = N", html.Sub("cav")]),
+        html.Th(["t̄", html.Sub("abs"), " (µs)", html.Br(), "N", html.Sub("PD"), " = N", html.Sub("cav")]),
     ])
 
 
@@ -1291,11 +1475,18 @@ def construir_tabla_paper(filas):
                 html.Td(f.get("n_coinc")),
                 html.Td(f.get("vpp_media")),
                 html.Td(f.get("tabs_media")),
+                html.Td(f.get("vpp_media_cav", "-")),
+                html.Td(f.get("tabs_media_cav", "-")),
             ]
             cuerpo.append(html.Tr(celdas, className="tp-inicio-grupo" if k == 0 else None))
     tabla = html.Table([html.Thead(_cabecera_tabla_paper()), html.Tbody(cuerpo)],
                        className="tabla-paper")
-    return html.Div([tabla, html.Div(nota_filtros_tabla(filas), className="tabla-paper-nota")])
+    nota_medias = ("V̄_pp y t̄_abs «todas»: media sobre todas las descargas activas de cada "
+                   "sensor (las del mapa TRPD: detectadas no quitadas + añadidas a mano). "
+                   "«N_PD = N_cav»: solo las descargas de los disparos con tantas descargas "
+                   "como vacuolas.")
+    return html.Div([tabla, html.Div(nota_filtros_tabla(filas), className="tabla-paper-nota"),
+                     html.Div(nota_medias, className="tabla-paper-nota")])
 
 
 def nota_filtros_tabla(filas):
@@ -1664,10 +1855,12 @@ def _dibujar_impulso_ch1(fig, carpeta, fila):
 
 
 def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="vmax",
-                   t_abs=None, t10_ref=None, t_lag_us=0.0, calibrado=False):
+                   t_abs=None, t10_ref=None, t_lag_us=0.0, calibrado=False, otros=None):
     # Peaks SIEMPRE como curva 0 (la selección mapea por pointNumber o customdata).
     # La referencia CH1 y el resaltado van como trazas extra. `cap` es la captura
     # editada: los peaks quitados ya no están y los manuales (origen 1) son rombos.
+    # `otros`: mapa conjunto, [{"canal", "cap", "t_abs", "sel"}] de los demás sensores;
+    # van como curvas 1..k (customdata[6] = nº de canal) con un color por sensor.
     n = cap["t_peak"].size
     activos = list(range(n))
 
@@ -1692,31 +1885,62 @@ def figura_scatter(cap, t_ref, v_ref, canal, highlight=None, uirev=None, modo="v
 
     origen = np.asarray(cap.get("origen", np.zeros(n, dtype=int)))
     manual = origen.size == n and bool(np.any(origen == 1))
+    otros = otros or []
+    if otros and cd_act is not None:
+        cd_act = np.column_stack([cd_act, np.full(len(cd_act), int(canal[-1]))])
     fig.add_trace(go.Scattergl(
         x=x_act, y=y_act, mode="markers", name=traza_nombre,
         customdata=cd_act,
-        marker=dict(color=tema.SCATTER_PUNTOS, size=6, opacity=0.6,
+        marker=dict(color=_COLORES_CANALES.get(canal, tema.SCATTER_PUNTOS) if otros else tema.SCATTER_PUNTOS,
+                    size=6, opacity=0.6,
                     symbol=np.where(origen == 1, "diamond", "circle").tolist() if manual else "circle"),
         hovertemplate="t_abs=%{x:.4f} µs (%{customdata[4]:.2f} ns)<br>t_osc=%{customdata[2]:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<br>Seg %{customdata[3]:.0f}<extra>" + canal.upper() + "</extra>",
     ))
+    sel_otros_xy = []   # (x, y) de los puntos seleccionados de los otros sensores
+    y_todos = [np.asarray(y_val, dtype=float)]   # magnitudes de todos los sensores dibujados
+    for o in otros:
+        c_o, ch_o = o["cap"], o["canal"]
+        n_o = c_o["t_peak"].size
+        y_o = c_o["vpp"] if es_vpp else c_o["v_peak"]
+        t_o = o.get("t_abs")
+        x_o = t_o if (t_o is not None and np.asarray(t_o).size == n_o) else c_o["t_peak"]
+        cd_o = (np.stack([c_o["v_peak"], c_o["vpp"], c_o["t_peak"], c_o["seg"], x_o * 1e3,
+                          np.arange(n_o), np.full(n_o, int(ch_o[-1]))], axis=1) if n_o else None)
+        org_o = np.asarray(c_o.get("origen", np.zeros(n_o, dtype=int)))
+        man_o = org_o.size == n_o and bool(np.any(org_o == 1))
+        fig.add_trace(go.Scattergl(
+            x=x_o, y=y_o, mode="markers", name=f"{'Vpp' if es_vpp else 'Vmax'} {ch_o.upper()}",
+            customdata=cd_o,
+            marker=dict(color=_COLORES_CANALES.get(ch_o, tema.MUTED), size=6, opacity=0.6,
+                        symbol=np.where(org_o == 1, "diamond", "circle").tolist() if man_o else "circle"),
+            hovertemplate="t_abs=%{x:.4f} µs (%{customdata[4]:.2f} ns)<br>t_osc=%{customdata[2]:.4f} µs<br>Vmax=%{customdata[0]:.2f} mV<br>Vpp=%{customdata[1]:.2f} mV<br>Seg %{customdata[3]:.0f}<extra>" + ch_o.upper() + "</extra>",
+        ))
+        sel_otros_xy += [(float(x_o[i]), float(y_o[i])) for i in (o.get("sel") or []) if 0 <= i < n_o]
+        y_todos.append(np.asarray(y_o, dtype=float))
     if t_ref is not None and v_ref is not None and v_ref.size:
         paso = max(1, t_ref.size // IMP_PUNTOS_PLOT)
         x_ref = t_ref[::paso] - (t10_ref or 0.0)
         v_r = v_ref[::paso]
         frac = v_r / (float(np.max(np.abs(v_r))) or 1.0)  # adimensional, -1..1
-        esc = float(np.percentile(y_val, 95)) if y_val.size >= 20 else (float(np.max(y_val)) if y_val.size else 1.0)
+        # La cresta del impulso se iguala al máximo entre todos los sensores dibujados
+        # (Vmax o Vpp según el modo): la curva cubre todo el rango de las descargas.
+        y_all = np.concatenate(y_todos) if y_todos else np.array([])
+        y_all = y_all[np.isfinite(y_all)]
+        esc = float(np.max(y_all)) if y_all.size else 1.0
         y_r, cd_ref = frac * esc, frac
         nombre = "CH1 promedio (forma normalizada)"
-        htmpl = "t_abs=%{x:.4f} µs<br>%{customdata:.1%} de la cresta CH1<extra>CH1</extra>"
+        # Sin hover: la línea pasa por encima de las descargas cercanas a t10 y, si no,
+        # se queda con el clic (Plotly elige la curva más cercana) en vez del peak.
         fig.add_trace(go.Scattergl(x=x_ref, y=y_r, customdata=cd_ref, mode="lines",
                                    name=nombre, line=dict(color=tema.MUTED_LIGHT, width=1),
-                                   opacity=0.6, hovertemplate=htmpl))
+                                   opacity=0.6, hoverinfo="skip"))
         fig.add_vline(x=0, line=dict(color=tema.LINEA_T10, width=1, dash="dot"),
                       annotation_text="t10", annotation_position="top")
     h = [i for i in (highlight or []) if 0 <= i < n]
-    if h and y_val.size > 0:
+    if (h and y_val.size > 0) or sel_otros_xy:
         fig.add_trace(go.Scattergl(
-            x=x[h], y=y_val[h], mode="markers", name="sel",
+            x=[float(v) for v in x[h]] + [q[0] for q in sel_otros_xy],
+            y=[float(v) for v in y_val[h]] + [q[1] for q in sel_otros_xy], mode="markers", name="sel",
             marker=dict(color=tema.SCATTER_SEL, size=10, line=dict(color="white", width=1.5)),
             hoverinfo="skip", showlegend=False,
         ))
@@ -1741,6 +1965,9 @@ app.layout = html.Div(
         dcc.Store(id="rango_x"),            # zoom vigente del gráfico de señales
         dcc.Store(id="captura_params"),
         dcc.Store(id="seleccion", data=[]),
+        # Selección en el mapa TRPD conjunto de los sensores que no son el trigger activo:
+        # {canal: [índices de su captura editada]}.
+        dcc.Store(id="seleccion_otros", data={}),
         # Ediciones manuales de peaks de la medición ({"carpeta", "canales": {ch: {"historial"}}});
         # se leen y escriben en metadata.yaml (ediciones_peaks).
         dcc.Store(id="ediciones_peaks"),
@@ -1781,6 +2008,10 @@ app.layout = html.Div(
                 ),
                 html.Button("Calcular peaks", id="btn", n_clicks=0,
                             style=tema.ESTILO_BOTON_PRIMARY),
+                html.Button("Calcular todos los sensores", id="btn_multi", n_clicks=0,
+                            style=tema.ESTILO_BOTON_SECONDARY,
+                            title=("Detecta los peaks de CH2, CH3 y CH4 con el umbral, Δt y t_mín de "
+                                   "cada uno y los superpone en el mismo mapa TRPD")),
                 html.Div(
                     dcc.Checklist(
                         id="switch_filtros",
@@ -2523,33 +2754,48 @@ def sincronizar_parametros_sensores(carpeta, relayout, sw_filtros=("on",)):
     Input("marca_peak", "data"),
     Input("seleccion", "data"),
     State("rango_x", "data"),
+    Input("seleccion_otros", "data"),
     prevent_initial_call="initial_duplicate",
 )
 def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_filtros=("on",),
-               store_ed=None, marca=None, sel=None, rango=None):
+               store_ed=None, marca=None, sel=None, rango=None, sel_otros=None):
     if not carpeta or not seg:
         return _fig_vacia("Seleccione una medición con el botón 📁 para ver sus señales.", altura=850), no_update
     filtrado = _filtrado(sw_filtros)
     cfg_sensores = _cfg_sensores(u2, d2, t2, u3, d3, t3, u4, d4, t4)
     rev = int((rango or {}).get("rev", 0))
     rango_out = no_update
-    cap, vista_previa = None, False
+    cap, vista_previa, ed = None, False, None
     if p and p["canal"] == canal and p["carpeta"] == carpeta and p.get("filtrado", True) == filtrado:
         # Con parámetros cambiados sin recalcular (vista previa) las cruces usan los nuevos,
         # pero los peaks manuales y quitados de la captura se siguen dibujando.
-        cap = _cap_p(p, _ed(store_ed, carpeta, canal))
+        ed = _ed(store_ed, carpeta, canal)
+        cap = _cap_p(p, ed)
         vista_previa = not _captura_vigente(p, cfg_sensores.get(canal, {}))
+    ed_otros = {ch: _ed(store_ed, carpeta, ch) for ch in TRIGGERS if ch != canal}
+    caps_otros = {}
+    if cap is not None:
+        for ch in _otros_sensores(p):
+            # Mapa conjunto vigente para ese sensor: sus peaks (seleccionables); si sus
+            # campos cambiaron, detección en vivo como la vista previa del activo.
+            if _captura_vigente(p["multi"][ch], cfg_sensores.get(ch, {})):
+                caps_otros[ch] = _cap_sensor(p, ch, store_ed)
     rango_x = _rango_vigente(rango, carpeta, canal)
-    if cap is not None and sel and rango_x and None not in rango_x:
-        # Peak seleccionado fuera de la vista guardada: vista completa para que se vea.
-        t_sel = [float(cap["t_peak"][i]) for i in sel if 0 <= i < cap["seg"].size and cap["seg"][i] == int(seg)]
+    sel_o = _sel_otros_vigente(sel_otros, p) if cap is not None else {}
+    if cap is not None and (sel or sel_o) and rango_x and None not in rango_x:
+        # Peak seleccionado (de cualquier sensor) fuera de la vista guardada: vista completa.
+        pares = [(cap, sel or [])] + [(caps_otros[ch], ix) for ch, ix in sel_o.items() if ch in caps_otros]
+        t_sel = [float(c["t_peak"][i]) for c, ix in pares for i in ix
+                 if 0 <= i < c["seg"].size and c["seg"][i] == int(seg)]
         if t_sel and not all(rango_x[0] <= t <= rango_x[1] for t in t_sel):
             rango_x, rev = None, rev + 1
             rango_out = {"rev": rev}
     try:
         return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap,
                       filtrado=filtrado, rango_x=rango_x, marca=marca,
-                      vista_previa=vista_previa, seleccion=sel, rev_zoom=rev), rango_out
+                      vista_previa=vista_previa, seleccion=sel, rev_zoom=rev, ediciones=ed,
+                      caps_otros=caps_otros, ediciones_otros=ed_otros,
+                      seleccion_otros=sel_o), rango_out
     except Exception as e:
         return _fig_error("No se pudo dibujar las señales", e, altura=850), no_update
 
@@ -2742,12 +2988,18 @@ def ir_a_pestana_calibracion(n_clicks):
     Input("switch_filtros", "value"),
     Input("carpeta", "value"),
     Input("canal", "value"),
-    running=[(Output("btn", "disabled"), True, False)],
+    Input("btn_multi", "n_clicks"),
+    State("captura_params", "data"),
+    running=[(Output("btn", "disabled"), True, False), (Output("btn_multi", "disabled"), True, False)],
 )
 def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_filtros=("on",),
-                  _carpeta_in=None, _canal_in=None):
+                  _carpeta_in=None, _canal_in=None, n_multi=None, previo=None):
     """Fija el snapshot de parámetros al pulsar el botón. Todos los análisis
     derivan de aquí, garantizando que scatter y ventanas usan el mismo conjunto.
+    «Calcular todos los sensores» guarda además en `multi` la configuración de cada
+    trigger presente ({canal: {umbral, dist, tmin}}): el mapa TRPD los superpone, y al
+    cambiar el trigger activo la captura se rehace con la configuración de `multi`
+    sin perder el mapa conjunto.
     Al cambiar el interruptor de filtros (con una captura ya hecha) se rehace la
     captura con los parámetros por defecto de la nueva señal, los mismos que
     sincronizar_parametros_sensores escribe en los campos."""
@@ -2755,21 +3007,36 @@ def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4, 
         trig = ctx.triggered_id
     except Exception:
         trig = None
+    multi_previo = (previo or {}).get("multi") if (previo or {}).get("carpeta") == carpeta else None
+    if trig == "canal" and multi_previo and canal in multi_previo:
+        cfg = multi_previo[canal]
+        return dict(previo, canal=canal, umbral=cfg["umbral"], dist=cfg["dist"], tmin=cfg["tmin"])
     if trig in ("carpeta", "canal"):
         # Otra medición u otro canal: los resultados anteriores ya no corresponden.
         return None
-    if not n_clicks or not carpeta:
+    if not (n_clicks or n_multi) or not carpeta:
         return no_update
     filtrado = _filtrado(sw_filtros)
     if trig == "switch_filtros":
+        if not previo:
+            return no_update
         cfg_sensores = config_sensores_defecto(carpeta, filtrado=filtrado)
-        cfg_act = cfg_sensores.get(canal, cfg_sensores["ch4"])
-        return {"carpeta": carpeta, "canal": canal, "umbral": cfg_act["umbral"],
-                "dist": cfg_act["dist"], "tmin": cfg_act["tmin"],
-                "cfg_sensores": cfg_sensores, "filtrado": filtrado}
+        # Mismo redondeo que sincronizar_parametros_sensores escribe en los campos: si no,
+        # _captura_vigente ve parámetros distintos y la figura queda en vista previa.
+        cfg_red = {ch: dict(c, umbral=round(c["umbral"], 4) if c["umbral"] is not None else None)
+                   for ch, c in cfg_sensores.items()}
+        cfg_act = cfg_red.get(canal, cfg_red["ch4"])
+        out = {"carpeta": carpeta, "canal": canal, "umbral": cfg_act["umbral"],
+               "dist": cfg_act["dist"], "tmin": cfg_act["tmin"],
+               "cfg_sensores": cfg_sensores, "filtrado": filtrado}
+        if multi_previo:
+            out["multi"] = {ch: cfg_red[ch] for ch in multi_previo
+                            if ch in cfg_red and cfg_red[ch]["umbral"] is not None}
+        _guardar_trigger_captura(out)
+        return out
     cfg_sensores = _cfg_sensores(u2, d2, t2, u3, d3, t3, u4, d4, t4, carpeta=carpeta, filtrado=filtrado)
     cfg_act = cfg_sensores.get(canal, cfg_sensores["ch4"])
-    return {
+    out = {
         "carpeta": carpeta,
         "canal": canal,
         "umbral": cfg_act["umbral"],
@@ -2778,6 +3045,22 @@ def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4, 
         "cfg_sensores": cfg_sensores,
         "filtrado": filtrado,
     }
+    if trig == "btn_multi":
+        presentes = canales_presentes(carpeta)
+        out["multi"] = {ch: dict(cfg_sensores[ch]) for ch in TRIGGERS
+                        if ch in presentes and cfg_sensores[ch]["umbral"] is not None}
+    _guardar_trigger_captura(out)
+    return out
+
+
+def _guardar_trigger_captura(p):
+    """Persiste en metadata.yaml el trigger de los canales de la captura (el activo
+    y, en el mapa conjunto, todos los de `multi`)."""
+    cfgs = dict(p.get("multi") or {})
+    cfgs[p["canal"]] = {"umbral": p["umbral"], "dist": p["dist"], "tmin": p["tmin"]}
+    ok, msg = guardar_trigger_canales(p["carpeta"], cfgs, filtrado=p.get("filtrado", True))
+    if not ok:
+        print(f"Advertencia: no se guardó el trigger en metadata.yaml ({msg})")
 
 
 @app.callback(
@@ -3216,6 +3499,29 @@ def _ed(store, carpeta, canal):
     return ediciones_canal(carpeta, canal) if carpeta else {"historial": []}
 
 
+def _otros_sensores(p):
+    """Sensores del mapa TRPD conjunto («Calcular todos los sensores») distintos del
+    trigger activo, en el orden de TRIGGERS. Vacío si la captura es de un solo canal."""
+    if not p:
+        return []
+    multi = p.get("multi") or {}
+    presentes = canales_presentes(p["carpeta"])
+    return [ch for ch in TRIGGERS if ch in multi and ch != p["canal"] and ch in presentes]
+
+
+def _cap_sensor(p, canal, store):
+    """Captura editada de `canal` con su configuración de `p["multi"]`."""
+    cfg = p["multi"][canal]
+    return captura_editada(p["carpeta"], canal, cfg["umbral"], cfg["dist"], cfg["tmin"],
+                           filtrado=p.get("filtrado", True), ediciones=_ed(store, p["carpeta"], canal))
+
+
+def _sel_otros_vigente(sel_otros, p):
+    """{canal: [índices]} de la selección en otros sensores, solo los del mapa actual."""
+    otros = _otros_sensores(p)
+    return {ch: list(v) for ch, v in (sel_otros or {}).items() if ch in otros and v}
+
+
 @app.callback(
     Output("ediciones_peaks", "data", allow_duplicate=True),
     Input("carpeta", "value"),
@@ -3312,6 +3618,11 @@ def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p, seg_actual=No
         idx = _idx_scatter(click_pk, n)
     else:
         idx = None
+    if idx is None and trg.startswith("grafico_scatter") and _otros_sensores(p) \
+            and _idx_otros(sel_pk if trg.endswith("selectedData") else click_pk, _otros_sensores(p)):
+        idx = []   # mapa conjunto: la caja/clic cayó solo en otros sensores
+    if idx is None and trg == "grafico.clickData" and _cruz_otro_sensor(click_g, _otros_sensores(p)):
+        idx = []   # clic en la cruz de otro sensor en el gráfico de señales
     # None = reset por redibujo o clic sin punto válido: no cambiar la selección.
     if idx is None:
         return no_update, no_update
@@ -3321,6 +3632,86 @@ def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p, seg_actual=No
         if s != seg_actual:
             seg = s
     return idx, seg
+
+
+_CANAL_POR_NUM = {2: "ch2", 3: "ch3", 4: "ch4"}
+
+
+def _idx_otros(datos, otros):
+    """{canal: [índices]} de los puntos de los otros sensores (curvas != 0) de un
+    selectedData/clickData del mapa TRPD conjunto: customdata[5] índice, [6] nº de canal.
+    El clic sobre trazas WebGL (Scattergl) no trae customdata: entonces la curva k
+    (1..len(otros)) es otros[k-1], en el orden de figura_scatter, y el índice es
+    pointNumber (cada traza lleva la captura completa del sensor, sin filtrar)."""
+    out = {}
+    for pt in (datos or {}).get("points") or []:
+        cd, curva = pt.get("customdata"), pt.get("curveNumber")
+        if curva == 0:
+            continue
+        try:
+            if cd is not None and len(cd) >= 7:
+                ch, i = _CANAL_POR_NUM.get(int(cd[6])), int(cd[5])
+            elif isinstance(curva, int) and 1 <= curva <= len(otros)                     and pt.get("pointNumber", pt.get("pointIndex")) is not None:
+                ch, i = otros[curva - 1], int(pt.get("pointNumber", pt.get("pointIndex")))
+            else:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if ch in otros:
+            out.setdefault(ch, [])
+            if i not in out[ch]:
+                out[ch].append(i)
+    return out
+
+
+def _cruz_otro_sensor(datos, otros):
+    """{canal: [índice]} si el clic del gráfico de señales cayó en una cruz de otro
+    sensor del mapa conjunto (customdata [índice, nº de canal]); si no, None."""
+    for pt in (datos or {}).get("points") or []:
+        cd = pt.get("customdata")
+        if isinstance(cd, (list, tuple)) and len(cd) == 2:
+            ch = _CANAL_POR_NUM.get(int(cd[1]))
+            if ch in otros:
+                return {ch: [int(cd[0])]}
+    return None
+
+
+@app.callback(
+    Output("seleccion_otros", "data"),
+    Output("segmento", "value", allow_duplicate=True),
+    Input("captura_params", "data"),
+    Input("grafico_scatter", "selectedData"),
+    Input("grafico_scatter", "clickData"),
+    Input("grafico", "clickData"),
+    Input("ediciones_peaks", "data"),
+    State("captura_params", "data"),
+    State("segmento", "value"),
+    prevent_initial_call="initial_duplicate",
+)
+def set_seleccion_otros(_cap_in, sel_pk, click_pk, click_g, store_ed, p, seg_actual=None):
+    """Selección en el mapa TRPD conjunto de los sensores que no son el trigger activo
+    (la del activo la lleva `seleccion`). Caja/lazo: reemplaza; clic en un punto: solo
+    ese punto y lleva a su segmento; clic en las cruces de señales, nueva captura o
+    edición: se limpia."""
+    trg = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+    otros = _otros_sensores(p)
+    if otros and trg == "grafico.clickData":
+        return (_cruz_otro_sensor(click_g, otros) or {}), no_update   # cruz de otro sensor: solo esa
+    if not otros or not trg.startswith("grafico_scatter"):
+        return {}, no_update
+    datos = sel_pk if trg == "grafico_scatter.selectedData" else click_pk
+    if not datos or not datos.get("points"):
+        return no_update, no_update            # reset por redibujo: no tocar la selección
+    sel = _idx_otros(datos, otros)
+    seg = no_update
+    if trg == "grafico_scatter.clickData" and len(sel) == 1:
+        (ch, idx), = sel.items()
+        cap = _cap_sensor(p, ch, store_ed)
+        if len(idx) == 1 and 0 <= idx[0] < cap["seg"].size:
+            s = int(cap["seg"][idx[0]])
+            if seg_actual is None or s != int(seg_actual):
+                seg = s
+    return sel, seg
 
 
 def _puntos(cap, indices):
@@ -3347,13 +3738,17 @@ def _puntos(cap, indices):
     State("ediciones_peaks", "data"),
     State("captura_params", "data"),
     State("marca_peak", "data"),
+    State("seleccion_otros", "data"),
     prevent_initial_call=True,
 )
 def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit, n_undo2, n_res2,
-                              sel, val_disparo, store, p, marca=None):
+                              sel, val_disparo, store, p, marca=None, sel_otros=None):
     """Añadir/quitar peaks, excluir disparos, deshacer y restaurar. Cada acción es un
     paso del historial del canal (en tiempo, no en índices) que se guarda en
-    metadata.yaml, así sobrevive a cambios de umbral, Δt, t_mín y filtros."""
+    metadata.yaml, así sobrevive a cambios de umbral, Δt, t_mín y filtros.
+    Mapa TRPD conjunto (p["multi"]): «Quitar selección» quita también los puntos
+    seleccionados de los otros sensores, cada uno en su historial; los pasos llevan
+    un `grupo` común y «Deshacer» revierte la última acción en todos los sensores."""
     trig = ctx.triggered_id if ctx.triggered else None
     if not p:
         return no_update, no_update, "Pulse «Calcular peaks» antes de editar."
@@ -3362,6 +3757,12 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
     hist = [dict(h) for h in ed.get("historial") or []]
     cap = _cap_p(p, ed)
     paso, limpiar_input, ok_msg = None, no_update, ""
+    otros = _otros_sensores(p)
+    otros_hist = {}   # canal -> historial nuevo de los otros sensores tocados
+    grupo = time.time_ns() if otros else None
+
+    def hist_de(ch):
+        return [dict(h) for h in _ed(store, carpeta, ch).get("historial") or []]
 
     if trig in ("btn_excluir_seleccion", "btn_quitar_peak"):
         idx = list(sel or [])
@@ -3372,12 +3773,28 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
             if cerca.size:
                 idx = [int(cerca[np.argmin(np.abs(cap["t_peak"][cerca] - float(marca["t_us"])))])]
         pts = _puntos(cap, idx)
-        if not pts:
+        pts_o = {}
+        for ch, idx_o in _sel_otros_vigente(sel_otros, p).items():   # mapa conjunto
+            pts_ch = _puntos(_cap_sensor(p, ch, store), idx_o)
+            if pts_ch:
+                pts_o[ch] = pts_ch
+        if not pts and not pts_o:
             return no_update, no_update, "Seleccione un peak (cruz o punto del TRPD) o ponga la marca sobre él."
-        paso = {"accion": "quitar", "puntos": pts,
-                "desc": f"{len(pts)} descarga{'s' if len(pts) != 1 else ''}"}
-        ok_msg = (f"✓ Peak quitado: seg {pts[0]['seg']}, t = {pts[0]['t_us']:.4f} µs" if len(pts) == 1
-                  else f"✓ {len(pts)} peaks quitados")
+        if pts:
+            paso = {"accion": "quitar", "puntos": pts,
+                    "desc": f"{len(pts)} descarga{'s' if len(pts) != 1 else ''}"}
+        for ch, pts_ch in pts_o.items():
+            otros_hist[ch] = hist_de(ch) + [{
+                "accion": "quitar", "puntos": pts_ch, "grupo": grupo,
+                "desc": f"{len(pts_ch)} descarga{'s' if len(pts_ch) != 1 else ''} {ch.upper()}"}]
+        if pts_o:
+            por_ch = [(canal, len(pts))] * bool(pts) + [(ch, len(v)) for ch, v in pts_o.items()]
+            total = sum(k for _, k in por_ch)
+            ok_msg = (f"✓ {total} peak{'s' if total != 1 else ''} quitado{'s' if total != 1 else ''} ("
+                      + ", ".join(f"{ch.upper()}: {k}" for ch, k in por_ch) + ")")
+        else:
+            ok_msg = (f"✓ Peak quitado: seg {pts[0]['seg']}, t = {pts[0]['t_us']:.4f} µs" if len(pts) == 1
+                      else f"✓ {len(pts)} peaks quitados")
 
     elif trig in ("btn_excluir_disparo", "input_excluir_disparo"):
         segs = parsear_lista_disparos(val_disparo, n_segmentos(carpeta))
@@ -3404,9 +3821,24 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
                   if ya else f"✓ Peak añadido: seg {int(marca['seg'])}, t = {r[0]:.4f} µs, Vmax = {r[1]:.1f} mV")
 
     elif trig in ("btn_deshacer_exclusion", "btn_deshacer_edicion"):
-        if not hist:
+        grupo = None   # deshacer no crea pasos
+        hists = {ch: hist_de(ch) for ch in otros}
+        ultimos = [h[-1].get("grupo") for h in [hist] + list(hists.values()) if h and h[-1].get("grupo")]
+        if ultimos:
+            # Mapa conjunto: la última acción (mayor grupo) se deshace en todos los sensores.
+            g = max(ultimos)
+            descs = []
+            if hist and hist[-1].get("grupo") == g:
+                descs.append(hist.pop().get("desc"))
+            for ch, h in hists.items():
+                if h and h[-1].get("grupo") == g:
+                    descs.append(h.pop().get("desc"))
+                    otros_hist[ch] = h
+            ok_msg = "✓ Deshecho: " + " · ".join(d for d in descs if d) if any(descs) else "✓ Deshecho"
+        elif hist:
+            ok_msg = f"✓ Deshecho: {hist.pop().get('desc') or 'último paso'}"
+        else:
             return no_update, no_update, ""
-        ok_msg = f"✓ Deshecho: {hist.pop().get('desc') or 'último paso'}"
 
     elif trig in ("btn_restaurar_descargas", "btn_restaurar_ediciones"):
         if not hist:
@@ -3417,15 +3849,23 @@ def gestionar_ediciones_peaks(n_exc, n_undo, n_res, n_disp, n_sub, n_add, n_quit
         return no_update, no_update, no_update
 
     if paso is not None:
+        if grupo is not None:
+            paso["grupo"] = grupo
         hist.append(paso)
-    ok, msg = guardar_ediciones_canal(carpeta, canal, {"historial": hist})
-    if not ok:
-        return no_update, limpiar_input, f"No se guardaron las ediciones: {msg}"
     if (store or {}).get("carpeta") == carpeta:
         canales = dict(store.get("canales") or {})
     else:
         canales = ediciones_medicion(carpeta)
-    canales[canal] = {"historial": hist}
+    if hist != list(ed.get("historial") or []):   # el canal activo cambió
+        ok, msg = guardar_ediciones_canal(carpeta, canal, {"historial": hist})
+        if not ok:
+            return no_update, limpiar_input, f"No se guardaron las ediciones: {msg}"
+        canales[canal] = {"historial": hist}
+    for ch, h in otros_hist.items():
+        ok, msg = guardar_ediciones_canal(carpeta, ch, {"historial": h})
+        if not ok:
+            return no_update, limpiar_input, f"No se guardaron las ediciones de {ch.upper()}: {msg}"
+        canales[ch] = {"historial": h}
     return {"carpeta": carpeta, "canales": canales}, limpiar_input, ok_msg
 
 
@@ -3455,8 +3895,9 @@ def estilo_aviso_ediciones(texto):
     Input("ediciones_peaks", "data"),
     Input("captura_params", "data"),
     Input("marca_peak", "data"),
+    Input("seleccion_otros", "data"),
 )
-def actualizar_badge_filtro(sel, store, p, marca=None):
+def actualizar_badge_filtro(sel, store, p, marca=None, sel_otros=None):
     if not p:
         return True, "Quitar selección", True, True, "", True, True, True, True, ""
     ed = _ed(store, p["carpeta"], p["canal"])
@@ -3466,9 +3907,11 @@ def actualizar_badge_filtro(sel, store, p, marca=None):
     n_quit = len(cap.get("quitados_vis") or [])
     n_man = int(np.sum(np.asarray(cap.get("origen", [])) == 1))
     n_disp = len(estado_ediciones(ed)["disparos"])
-    n_sel = len(sel) if sel else 0
+    n_sel = (len(sel) if sel else 0) + sum(len(v) for v in _sel_otros_vigente(sel_otros, p).values())
 
     btn_txt = f"Quitar {n_sel} seleccionada{'s' if n_sel != 1 else ''}" if n_sel > 0 else "Quitar selección"
+    # Mapa conjunto: «Deshacer» del TRPD también revierte acciones en los otros sensores.
+    sin_hist_otros = not any(_ed(store, p["carpeta"], ch).get("historial") for ch in _otros_sensores(p))
     sin_hist = len(hist) == 0
     hay_marca = bool(marca and marca.get("carpeta") == p["carpeta"] and marca.get("canal") == p["canal"]
                      and marca.get("t_us") is not None)
@@ -3477,12 +3920,21 @@ def actualizar_badge_filtro(sel, store, p, marca=None):
     if n_man:
         detalle.append(f"{n_man} manual{'es' if n_man != 1 else ''}")
     badge = f"{n_act} descargas activas" + (f" ({', '.join(detalle)})" if detalle else "")
+    otros = _otros_sensores(p)
+    if otros:
+        # Mapa conjunto: activas por sensor (el activo primero, con su detalle).
+        por_ch = []
+        for ch in otros:
+            c_o = _cap_sensor(p, ch, store)
+            q_o = len(c_o.get("quitados_vis") or [])
+            por_ch.append(f"{ch.upper()}: {c_o['t_peak'].size}" + (f" ({q_o} quit.)" if q_o else ""))
+        badge = f"{p['canal'].upper()}: {badge} · " + " · ".join(por_ch)
     partes = [f"{n_man} añadido{'s' if n_man != 1 else ''}", f"{n_quit} quitado{'s' if n_quit != 1 else ''}"]
     if n_disp:
         partes.append(f"{n_disp} disparo{'s' if n_disp != 1 else ''} excluido{'s' if n_disp != 1 else ''}")
     badge_ed = " · ".join(partes) if hist else "Sin ediciones manuales"
 
-    return (n_sel == 0, btn_txt, sin_hist, sin_hist, badge,
+    return (n_sel == 0, btn_txt, sin_hist and sin_hist_otros, sin_hist, badge,
             not hay_marca, not (n_sel or hay_marca), sin_hist, sin_hist, badge_ed)
 
 
@@ -3493,8 +3945,9 @@ def actualizar_badge_filtro(sel, store, p, marca=None):
     Input("modo_magnitud_trpd", "value"),
     Input("calibracion_store", "data"),
     Input("ediciones_peaks", "data"),
+    Input("seleccion_otros", "data"),
 )
-def actualizar_scatter(p, sel, modo_trpd, cal, store):
+def actualizar_scatter(p, sel, modo_trpd, cal, store, sel_otros=None):
     """Scatter de Patrón TRPD (captura editada), con los puntos seleccionados
     resaltados (venga la selección del scatter o de las cruces del trigger)."""
     if not p:
@@ -3510,10 +3963,22 @@ def actualizar_scatter(p, sel, modo_trpd, cal, store):
     calibrado = bool(cal and cal.get("carpeta") == p["carpeta"] and cal.get("canales", {}).get(p["canal"], {}).get("calibrado"))
     # uirevision estable dentro de una captura: al pintar el amarillo no se
     # pierde zoom ni la caja de selección; cambia con otra captura, modo o ediciones.
-    rev = f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}|{len(ed.get('historial') or [])}"
+    sel_o = _sel_otros_vigente(sel_otros, p)
+    otros, n_hist = [], len(ed.get("historial") or [])
+    try:
+        for ch in _otros_sensores(p):
+            c_o = _cap_sensor(p, ch, store)
+            otros.append({"canal": ch, "cap": c_o, "t_abs": t_abs_captura(c_o, lag_canal(cal, p["carpeta"], ch)),
+                          "sel": sel_o.get(ch, [])})
+            n_hist += len(_ed(store, p["carpeta"], ch).get("historial") or [])
+    except Exception as e:
+        return _fig_error("No se pudo calcular el mapa TRPD conjunto", e, altura=415)
+    rev = (f"{p['carpeta']}|{p['canal']}|{p['umbral']}|{p['dist']}|{p['tmin']}|{modo}|{n_hist}"
+           f"|{','.join(o['canal'] for o in otros)}")
     try:
         return figura_scatter(cap, t_ref, v_ref, p["canal"], sel, rev, modo=modo,
-                              t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado)
+                              t_abs=t_abs, t10_ref=t10_ref, t_lag_us=t_lag, calibrado=calibrado,
+                              otros=otros)
     except Exception as e:
         return _fig_error("No se pudo dibujar el patrón TRPD", e, altura=415)
 

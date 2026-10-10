@@ -274,7 +274,7 @@ def test_calcular_fila_densidad_con_y_sin_exclusiones():
 
     fila_base = calcular_fila_densidad(carpeta, canal, umbral, dist, tmin, t_lag_us=0.0, ediciones=None)
     assert fila_base["specimen"] != ""
-    # La tabla (formato Tabla 1) usa V̄_pp y promedios condicionados a N_PD = N_cav
+    # La tabla (formato Tabla 1): V̄_pp y t̄_abs sobre todas las descargas activas
     assert "vpp_media" in fila_base and "n_coinc" in fila_base
 
     # Quitar el primer peak (por tiempo): un peak menos en la distribución

@@ -27,7 +27,7 @@ META_VIEJA = {"probeta": {"codigo": "3v_2mm3mm4mm_1", "nro_vacuolas": 3},
               "canales": {"ch3": {"sensor": "Antena Vivaldi"}}}
 
 
-def test_fila_promedios_condicionados(monkeypatch):
+def test_fila_promedios_sobre_todas_las_descargas(monkeypatch):
     _parchear(monkeypatch, _cap_sintetica(), META_VIEJA)
     f = app.calcular_fila_densidad(CARPETA, "ch3", 1.0, 1.0, 0.0)
     assert f["specimen"] == "3v"
@@ -36,9 +36,13 @@ def test_fila_promedios_condicionados(monkeypatch):
     assert f["sensor"] == "Antena 1"
     assert f["distribucion"] == "[1, 0, 1, 2, 0, 0]"
     assert f["n_coinc"] == "2"
-    # Solo los segmentos 1 y 2 (3 peaks): media vpp = 350 mV, t_abs = 3.5 µs
-    assert f["vpp_media"] == "0.350"
-    assert f["tabs_media"] == "3.500"
+    # Todas las descargas activas (8), no solo los disparos con N_PD = N_cav:
+    # media vpp = 20100/8 = 2512.5 mV, t_abs = 201/8 = 25.125 µs
+    assert f["vpp_media"] == f"{20100 / 8 / 1000:.3f}"
+    assert f["tabs_media"] == "25.125"
+    # Solo los disparos con N_PD = N_cav (segs 1 y 2, 3 peaks): vpp = 350 mV, t_abs = 3.5 µs
+    assert f["vpp_media_cav"] == "0.350"
+    assert f["tabs_media_cav"] == "3.500"
 
 
 def test_fila_sin_coincidencias(monkeypatch):
@@ -47,7 +51,9 @@ def test_fila_sin_coincidencias(monkeypatch):
     _parchear(monkeypatch, cap, meta)
     f = app.calcular_fila_densidad(CARPETA, "ch2", 1.0, 1.0, 0.0)
     assert f["n_coinc"] == "0"
-    assert f["vpp_media"] == "-" and f["tabs_media"] == "-"
+    # Sin disparos con N_PD = N_cav los promedios igual se muestran
+    assert f["vpp_media"] == f"{20100 / 8 / 1000:.3f}" and f["tabs_media"] == "25.125"
+    assert f["vpp_media_cav"] == "-" and f["tabs_media_cav"] == "-"
     assert f["sensor"] == "HFCT"
 
 
@@ -58,7 +64,9 @@ def test_fila_respeta_excluidos(monkeypatch):
     ed = {"historial": [{"accion": "quitar", "puntos": [{"seg": 2, "t_us": 4.0}]}]}
     f = app.calcular_fila_densidad(CARPETA, "ch3", 1.0, 1.0, 0.0, ediciones=ed)
     assert f["n_coinc"] == "1"
-    assert f["vpp_media"] == "0.200"
+    assert f["vpp_media"] == f"{19700 / 7 / 1000:.3f}"   # 7 descargas activas
+    assert f["tabs_media"] == f"{197 / 7:.3f}"
+    assert f["vpp_media_cav"] == "0.200"     # solo queda el seg 1 con 3 peaks
 
 
 def _contar(comp, tipo):
@@ -91,7 +99,7 @@ def test_construir_tabla_paper_agrupa_por_medicion():
                           "_carpeta": carpeta, "_canal": ch, "_n_cav": n, "_voltage_kv": v})
     cont = app.construir_tabla_paper(filas)
     tabla = _buscar(cont, lambda c: isinstance(c, html.Table), [])[0]
-    assert _contar(tabla, html.Th) == 8
+    assert _contar(tabla, html.Th) == 10
     con_span = _buscar(tabla, lambda c: isinstance(c, html.Td) and getattr(c, "rowSpan", None) == 3, [])
     assert len(con_span) == 6                       # specimen, d, voltage × 2 grupos
     specimens = [c.children for c in _buscar(tabla, lambda c: getattr(c, "className", None) == "tp-specimen", [])]

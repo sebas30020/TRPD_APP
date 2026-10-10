@@ -116,3 +116,57 @@ def test_manuales_visibles_en_vista_previa(monkeypatch):
     fig = figura("mock", 2, "ch4", cfg_sensores=CFG, cap=_cap(), vista_previa=True)
     man = [d for d in fig.data if d.name == "peaks manuales"]
     assert len(man) == 1 and list(man[0].x) == [3.0]
+
+
+def _con_peaks(monkeypatch, t_peaks):
+    """Señal sintética con picos de 50 mV en `t_peaks` (detectables con umbral 10)."""
+    t = np.linspace(-5, 30, 3501)
+    v = np.zeros_like(t)
+    for tp in t_peaks:
+        v[int(np.argmin(np.abs(t - tp)))] = 50.0
+    monkeypatch.setattr(app, "canales_presentes", lambda carpeta: ["ch2", "ch3", "ch4"])
+    monkeypatch.setattr(app, "cargar_segmento", lambda carpeta, canal, seg, **k: (t, v))
+    monkeypatch.setattr(app, "meta_medicion",
+                        lambda carpeta: {ch: {"xinc": 1e-8} for ch in ("ch2", "ch3", "ch4")})
+    return [float(t[int(np.argmin(np.abs(t - tp)))]) for tp in t_peaks]
+
+
+def _cruces(fig):
+    return [float(x) for x in [d for d in fig.data if d.name == "peaks CH4"][0].x]
+
+
+def _badge(fig):
+    return [a for a in fig.layout.annotations if a.name == "badge_ediciones"]
+
+
+def test_vista_previa_no_redibuja_peak_quitado(monkeypatch):
+    """En vista previa (parámetros cambiados) un peak quitado no vuelve como cruz activa."""
+    t1, t2 = _con_peaks(monkeypatch, [2.0, 5.0])
+    cap = {"seg": np.array([2]), "t_peak": np.array([t1]), "v_peak": np.array([50.0]),
+           "origen": np.array([0]), "quitados_vis": [(2, t2, 50.0)]}
+    ed = {"historial": [{"accion": "quitar", "puntos": [{"seg": 2, "t_us": t2}]}]}
+    fig = figura("mock", 2, "ch4", cfg_sensores=CFG, cap=cap, vista_previa=True, ediciones=ed)
+    assert _cruces(fig) == [t1]
+    q = [d for d in fig.data if d.name == "quitados"]
+    assert len(q) == 1 and list(q[0].x) == [t2] and q[0].marker.symbol != "x"
+
+
+def test_vista_previa_disparo_excluido_sin_cruces(monkeypatch):
+    _con_peaks(monkeypatch, [2.0, 5.0])
+    cap = {"seg": np.array([], dtype=int), "t_peak": np.array([]), "v_peak": np.array([]),
+           "origen": np.array([], dtype=int), "quitados_vis": []}
+    ed = {"historial": [{"accion": "quitar_disparo", "segs": [2]}]}
+    fig = figura("mock", 2, "ch4", cfg_sensores=CFG, cap=cap, vista_previa=True, ediciones=ed)
+    assert _cruces(fig) == []
+    assert "excluido" in _badge(fig)[0].text
+
+
+def test_badge_muestra_anadidos_y_quitados(monkeypatch):
+    """Como en calibrar_app: recuadro en el canal activo con el resultado de la edición."""
+    _sinteticos(monkeypatch)
+    cap = dict(_cap(), quitados_vis=[(2, 2.5, 19.0)])
+    b = _badge(figura("mock", 2, "ch4", cfg_sensores=CFG, cap=cap))
+    assert len(b) == 1 and "1 añadido" in b[0].text and "1 quitado" in b[0].text and "2 peaks" in b[0].text
+    b = _badge(figura("mock", 1, "ch4", cfg_sensores=CFG, cap=cap))
+    assert "1 peak detectado" in b[0].text
+    assert not _badge(figura("mock", 2, "ch4", cfg_sensores=CFG))   # sin captura: sin recuadro
