@@ -81,10 +81,12 @@ DIST_DEFECTO_US = 0.03
 TMIN_DEFECTO_US = 0.3
 
 # Edición manual de peaks (marca temporal):
-SNAP_MARCA_US = 0.010   # el clic se ajusta al máximo de la señal en ±10 ns
+SNAP_MARCA_US = 0.010   # el clic se ajusta al máximo local más cercano en ±10 ns
+SNAP_PROMINENCIA = 0.25  # ...con prominencia >= 25 % del rango de la ventana (no ruido)
 COLOR_MANUAL = tema.OK      # rombo de los peaks añadidos a mano (verde, distinto de la marca azul)
 COLOR_SELECCION = "#e0a800"  # anillo del peak seleccionado (clic en el TRPD o en una cruz)
-TOL_PEAK_US = 0.005     # un peak detectado "es" una marca guardada si está a <= 5 ns
+TOL_PEAK_US = 0.002     # un peak detectado "es" una marca guardada si está a <= 2 ns
+SNAP_CLIC_PEAK_US = 0.030  # clic sobre la señal a <= 30 ns de un peak capturado lo selecciona
 RESNAP_US = 0.001       # al reaplicar un añadido (p. ej. sin filtros) se reajusta en ±1 ns
 
 
@@ -600,14 +602,16 @@ def parsear_lista_disparos(texto_o_num, n_max_segs=None):
 
 def contar_peaks(carpeta, canal, umbral, dist_us, tmin, ediciones=None, filtrado=True):
     """Nº de peaks válidos (con ventana completa de 70 ns) del canal trigger por segmento,
-    con las ediciones manuales del canal aplicadas (añadidos y quitados)."""
+    con las ediciones manuales del canal aplicadas (añadidos y quitados). Los segmentos
+    excluidos de la medición no aparecen (no cuentan en la distribución de N_PD)."""
     cap = captura_editada(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado, ediciones=ediciones)
     n_segs = n_segmentos(carpeta)
-    segs = list(range(1, n_segs + 1))
+    excluidos = segmentos_excluidos(carpeta)
     seg_arr = np.asarray(cap["seg"], dtype=int)
     seg_arr = seg_arr[(seg_arr >= 1) & (seg_arr <= n_segs)]
-    conteos = np.bincount(seg_arr, minlength=n_segs + 1)[1:n_segs + 1]
-    return segs, [int(c) for c in conteos]
+    conteos = np.bincount(seg_arr, minlength=n_segs + 1)
+    segs = [s for s in range(1, n_segs + 1) if s not in excluidos]
+    return segs, [int(conteos[s]) for s in segs]
 
 
 def figura_peaks(segs, cuentas, umbral, canal):
@@ -741,10 +745,21 @@ def _peak_en(carpeta, canal, seg, t_us, radio_us, filtrado=True):
 
 
 def ajustar_a_peak(carpeta, canal, seg, t_us, radio_us=None, filtrado=True):
-    """Instante (t, v) del máximo de la señal a <= radio_us de t_us (por defecto
-    SNAP_MARCA_US), o None si no hay muestras ahí."""
-    r = _peak_en(carpeta, canal, seg, t_us, SNAP_MARCA_US if radio_us is None else radio_us, filtrado)
-    return None if r is None else (r[1], r[2])
+    """Instante (t, v) del máximo local de la señal más cercano a t_us dentro de
+    ±radio_us (por defecto SNAP_MARCA_US); sin máximos locales en la ventana, el
+    máximo de la ventana. None si no hay muestras ahí. El más cercano (y no el más
+    alto) permite marcar un peak a < radio_us de otro mayor. Solo cuentan máximos
+    positivos con prominencia >= SNAP_PROMINENCIA del rango de la ventana: a 0.1 ns
+    por muestra el ruido y los valles de la oscilación también son máximos locales."""
+    radio_us = SNAP_MARCA_US if radio_us is None else radio_us
+    t, v = cargar_segmento(carpeta, canal, int(seg), filtrado=filtrado)
+    sel = np.nonzero((t >= t_us - radio_us) & (t <= t_us + radio_us))[0]
+    if not sel.size:
+        return None
+    vs = v[sel]
+    loc, _ = find_peaks(vs, height=0.0, prominence=SNAP_PROMINENCIA * float(np.ptp(vs)))
+    i = int(sel[loc[np.argmin(np.abs(t[sel[loc]] - t_us))]] if loc.size else sel[np.argmax(vs)])
+    return float(t[i]), float(v[i])
 
 
 def aplicar_ediciones(cap, carpeta, canal, ed_canal, filtrado=True):
@@ -829,16 +844,34 @@ def aplicar_ediciones(cap, carpeta, canal, ed_canal, filtrado=True):
 _CAPTURA_EDITADA_CACHE = OrderedDict()
 
 
+def _sin_segmentos(cap, excluidos):
+    """Captura sin las descargas de los segmentos excluidos de la medición."""
+    if not excluidos or "seg" not in cap:
+        return cap
+    seg = np.asarray(cap["seg"], dtype=int)
+    keep = ~np.isin(seg, sorted(excluidos))
+    if keep.all():
+        return cap
+    out = dict(cap)
+    for clave in ("seg", "t_peak", "v_peak", "vpp", "t10_seg", "W", "origen"):
+        if clave in out and np.asarray(out[clave]).shape[:1] == keep.shape:
+            out[clave] = np.asarray(out[clave])[keep]
+    out["quitados_vis"] = [q for q in cap.get("quitados_vis") or [] if int(q[0]) not in excluidos]
+    return out
+
+
 def captura_editada(carpeta, canal, umbral, dist_us, tmin, filtrado=True, ediciones=None):
-    """capturar() + aplicar_ediciones(). Es la captura que usan todos los análisis."""
+    """capturar() + aplicar_ediciones() sin los segmentos excluidos de la medición.
+    Es la captura que usan todos los análisis."""
     cap = capturar(carpeta, canal, umbral, dist_us, tmin, filtrado=filtrado)
+    excluidos = segmentos_excluidos(carpeta)
     if not _hay_ediciones(ediciones):
-        return aplicar_ediciones(cap, carpeta, canal, None)
+        return _sin_segmentos(aplicar_ediciones(cap, carpeta, canal, None), excluidos)
     key = (carpeta, canal, round(umbral, 6) if umbral is not None else None, dist_us, tmin,
            bool(filtrado), json.dumps(ediciones, sort_keys=True, default=str))
-    return datos_h5.calcular_una_vez(
+    return _sin_segmentos(datos_h5.calcular_una_vez(
         _CAPTURA_EDITADA_CACHE, key,
-        lambda: aplicar_ediciones(cap, carpeta, canal, ediciones, filtrado), maxsize=16)
+        lambda: aplicar_ediciones(cap, carpeta, canal, ediciones, filtrado), maxsize=16), excluidos)
 
 
 def _cap_p(p, ediciones=None):
@@ -1286,6 +1319,28 @@ def guardar_ediciones_canal(carpeta, canal, ed):
         meta["ediciones_peaks"] = sec
     else:
         meta.pop("ediciones_peaks", None)
+    return guardar_metadata_archivo(carpeta, yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
+
+
+def segmentos_excluidos(carpeta):
+    """Segmentos (disparos, 1-indexados) excluidos de toda la medición, en todos los
+    sensores (metadata.yaml: segmentos_excluidos). Se pueden reintegrar."""
+    if not carpeta:
+        return set()
+    try:
+        return {int(s) for s in obtener_metadata(carpeta).get("segmentos_excluidos") or []}
+    except (TypeError, ValueError):
+        return set()
+
+
+def guardar_segmentos_excluidos(carpeta, segs):
+    """Guarda la lista de segmentos excluidos; vacía borra la sección."""
+    meta = {k: v for k, v in obtener_metadata(carpeta).items() if not k.startswith("_")}
+    segs = sorted({int(s) for s in segs})
+    if segs:
+        meta["segmentos_excluidos"] = segs
+    else:
+        meta.pop("segmentos_excluidos", None)
     return guardar_metadata_archivo(carpeta, yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
 
 
@@ -2263,6 +2318,15 @@ app.layout = html.Div(
                                                   style={"fontSize": "12px", "color": tema.MUTED}),
                                         html.Button("▶", id="segmento_next", n_clicks=0, title="Segmento siguiente (tecla →)",
                                                     style=tema.ESTILO_BOTON_STEPPER),
+                                        html.Span("|", style={"color": tema.MUTED_LIGHT, "margin": "0 2px"}),
+                                        html.Button("Excluir segmento", id="btn_excluir_segmento", n_clicks=0,
+                                                    title="Excluye este disparo de toda la medición (todos los sensores). "
+                                                          "Queda guardado en metadata.yaml y se puede reintegrar.",
+                                                    style=tema.ESTILO_BOTON_DANGER),
+                                        html.Span(id="aviso_segmentos", style={"fontSize": "11px"}),
+                                        html.Span(id="badge_segmentos_excluidos",
+                                                  style={"fontSize": "11px", "color": tema.MUTED, "fontWeight": "600",
+                                                         "marginLeft": "auto"}),
                                     ],
                                 ),
                             html.Div(id="panel_senales", children=[
@@ -2794,11 +2858,18 @@ def actualizar(carpeta, seg, canal, p, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_fi
             rango_x, rev = None, rev + 1
             rango_out = {"rev": rev}
     try:
-        return figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap,
-                      filtrado=filtrado, rango_x=rango_x, marca=marca,
-                      vista_previa=vista_previa, seleccion=sel, rev_zoom=rev, ediciones=ed,
-                      caps_otros=caps_otros, ediciones_otros=ed_otros,
-                      seleccion_otros=sel_o), rango_out
+        fig = figura(carpeta, int(seg), canal, cfg_sensores=cfg_sensores, cap=cap,
+                     filtrado=filtrado, rango_x=rango_x, marca=marca,
+                     vista_previa=vista_previa, seleccion=sel, rev_zoom=rev, ediciones=ed,
+                     caps_otros=caps_otros, ediciones_otros=ed_otros,
+                     seleccion_otros=sel_o)
+        if int(seg) in segmentos_excluidos(carpeta):
+            fig.add_annotation(
+                xref="paper", yref="paper", x=0.5, y=1.0, yanchor="bottom", showarrow=False,
+                text=f"<b>Segmento {int(seg)} EXCLUIDO de la medición</b>: no entra al mapa TRPD ni a la tabla "
+                     "(«Reintegrar segmento» para volver a incluirlo)",
+                font=dict(size=12, color=tema.ERROR), bgcolor=tema.WARN_BG, bordercolor=tema.ERROR, borderwidth=1)
+        return fig, rango_out
     except Exception as e:
         return _fig_error("No se pudo dibujar las señales", e, altura=850), no_update
 
@@ -3538,6 +3609,53 @@ def cargar_ediciones(carpeta):
 
 
 @app.callback(
+    Output("ediciones_peaks", "data", allow_duplicate=True),
+    Output("aviso_segmentos", "children"),
+    Input("btn_excluir_segmento", "n_clicks"),
+    State("carpeta", "value"),
+    State("segmento", "value"),
+    State("ediciones_peaks", "data"),
+    prevent_initial_call=True,
+)
+def alternar_segmento_excluido(_n, carpeta, seg, store):
+    """Excluye el segmento actual de toda la medición o lo reintegra si ya lo estaba.
+    Se reescribe el store de ediciones para que se recalculen mapa, conteos y tabla."""
+    if not carpeta or not seg:
+        return no_update, ""
+    seg = int(seg)
+    excl = segmentos_excluidos(carpeta)
+    reintegrar = seg in excl
+    excl = excl - {seg} if reintegrar else excl | {seg}
+    ok, msg = guardar_segmentos_excluidos(carpeta, excl)
+    if not ok:
+        return no_update, html.Span(f"No se guardó: {msg}", style={"color": tema.ERROR})
+    canales = (store or {}).get("canales") if (store or {}).get("carpeta") == carpeta else None
+    texto = f"✓ Segmento {seg} reintegrado" if reintegrar else f"✓ Segmento {seg} excluido"
+    return ({"carpeta": carpeta, "canales": canales or ediciones_medicion(carpeta), "excluidos": sorted(excl)},
+            html.Span(texto, style={"color": tema.OK, "fontWeight": "600"}))
+
+
+@app.callback(
+    Output("btn_excluir_segmento", "children"),
+    Output("btn_excluir_segmento", "style"),
+    Output("btn_excluir_segmento", "disabled"),
+    Output("badge_segmentos_excluidos", "children"),
+    Input("carpeta", "value"),
+    Input("segmento", "value"),
+    Input("ediciones_peaks", "data"),
+)
+def estado_boton_segmento(carpeta, seg, _store):
+    if not carpeta or not seg:
+        return "Excluir segmento", tema.ESTILO_BOTON_DANGER, True, ""
+    excl = sorted(segmentos_excluidos(carpeta))
+    badge = (f"Segmentos excluidos: {', '.join(str(s) for s in excl)} "
+             f"({n_segmentos(carpeta) - len(excl)} de {n_segmentos(carpeta)} en el análisis)") if excl else ""
+    if int(seg) in excl:
+        return f"Reintegrar segmento {int(seg)}", tema.ESTILO_BOTON_SUCCESS, False, badge
+    return f"Excluir segmento {int(seg)}", tema.ESTILO_BOTON_DANGER, False, badge
+
+
+@app.callback(
     Output("marca_peak", "data"),
     Output("input_marca_t", "value"),
     Output("aviso_ediciones", "children", allow_duplicate=True),
@@ -3574,7 +3692,10 @@ def fijar_marca(click, t_txt, carpeta, canal, seg, _ed_in=None, sw_filtros=("on"
     sig = _canales_senal(carpeta)
     if canal not in sig or pt.get("x") is None:
         return no_update, no_update, no_update
-    if pt.get("curveNumber") != sig.index(canal):
+    n_curva = pt.get("curveNumber")
+    # Las trazas 0..len(sig)-1 son las señales; las siguientes son marcadores (cruces sin
+    # índice en vista previa, quitados, etc.): la marca va al canal activo en ese instante.
+    if isinstance(n_curva, int) and n_curva < len(sig) and n_curva != sig.index(canal):
         n = pt.get("curveNumber")
         otro = sig[n].upper() if isinstance(n, int) and 0 <= n < len(sig) else "otro canal"
         return no_update, no_update, (f"Clic sobre {otro}: la marca se pone sobre la señal del canal "
@@ -3615,6 +3736,8 @@ def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p, seg_actual=No
 
     if trg == "grafico.clickData":            # cruces del trigger (customdata)
         idx = _idx_cruces(click_g, n)
+        if idx is None:
+            idx = _idx_peak_bajo_clic(click_g, cap, p, seg_actual)
     elif trg == "grafico_scatter.selectedData":
         idx = _idx_scatter(sel_pk, n)
     elif trg == "grafico_scatter.clickData":
@@ -3635,6 +3758,24 @@ def set_seleccion(_cap_in, sel_pk, click_pk, click_g, store_ed, p, seg_actual=No
         if s != seg_actual:
             seg = s
     return idx, seg
+
+
+def _idx_peak_bajo_clic(datos, cap, p, seg):
+    """[índice] del peak capturado del canal activo a <= SNAP_CLIC_PEAK_US del clic cuando
+    el clic cae sobre su señal: la cruz está sobre la propia curva y Plotly suele
+    entregar el punto de la señal (Scattergl) en vez del de la cruz. None si no hay."""
+    pts = (datos or {}).get("points") or []
+    sig = _canales_senal(p["carpeta"])
+    if not pts or seg is None or p["canal"] not in sig:
+        return None
+    pt = pts[0]
+    if pt.get("curveNumber") != sig.index(p["canal"]) or pt.get("x") is None:
+        return None
+    cerca = np.nonzero((cap["seg"] == int(seg)) &
+                       (np.abs(cap["t_peak"] - float(pt["x"])) <= SNAP_CLIC_PEAK_US))[0]
+    if not cerca.size:
+        return None
+    return [int(cerca[np.argmin(np.abs(cap["t_peak"][cerca] - float(pt["x"])))])]
 
 
 _CANAL_POR_NUM = {2: "ch2", 3: "ch3", 4: "ch4"}
