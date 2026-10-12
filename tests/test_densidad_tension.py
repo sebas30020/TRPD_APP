@@ -83,3 +83,15 @@ def test_grafica_densidad_tension_con_ncav(tmp_path, monkeypatch):
     assert (tmp_path / "densidad_vs_tension_p1.csv").exists()
     assert (tmp_path / "densidad_vs_tension_p2.png").exists()
     assert (tmp_path / "densidad_vs_tension_p2.csv").exists()
+
+
+def test_grafica_npd_media(tmp_path):
+    descs = [{"probeta": "p", "kv": kv, "kv_txt": f"{kv:g}", "nsegs": 3, "excluidos": [], "carpeta": "<inexistente>"}
+             for kv in (11.0, 12.0)]
+    todos = [{"ch3": {"segs": [1, 2, 3], "cuentas": [0, 1, 2], "fila": {"sensor": "Antena 1"}}},
+             {"ch3": {"segs": [1, 2, 3], "cuentas": [3, 3, 3], "fila": {"sensor": "Antena 1"}}}]
+    generar_reporte4.grafica_npd_media(str(tmp_path), descs, todos)
+    assert (tmp_path / "npd_media_vs_tension.png").exists()
+    with open(tmp_path / "npd_media_vs_tension.csv", encoding="utf-8") as f:
+        filas = list(csv.reader(f))[1:]
+    assert [(r[1], r[4]) for r in filas] == [("11", "1.000"), ("12", "3.000")]

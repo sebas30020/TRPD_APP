@@ -20,6 +20,7 @@ Salidas en <salida> (por defecto reportes/reporte4):
   informe_trpd_ncav.pdf, informe_trpd_completo.pdf
   tabla_trpd.csv              tabla de todas las mediciones (todas las columnas + trigger)
   densidad_vs_tension.png/.csv  densidad de eventos (N_PD por disparo) por sensor vs tensión (fuera del informe)
+  npd_media_vs_tension.png/.csv N̄_PD ± σ por sensor vs tensión (fuera del informe)
   <probeta>/<X>kV/pagina_ncav.png, pagina_completo.png, tabla.csv
 
 Uso:
@@ -497,6 +498,61 @@ def grafica_densidad_tension(salida, descs, todos):
         print(f"Gráfica: {ruta}")
 
 
+def grafica_npd_media(salida, descs, todos):
+    """npd_media_vs_tension.png (+ .csv con los valores): N̄_PD (media de N_PD por disparo válido)
+    ± 1 σ de cada sensor por nivel de tensión; referencia punteada en N_cav. Una figura por
+    probeta (sufijo _<probeta> si hay más de una)."""
+    probetas = sorted({d["probeta"] for d in descs})
+    for prob in probetas:
+        pares = sorted([(d, res) for d, res in zip(descs, todos) if d["probeta"] == prob and d["kv"] is not None],
+                       key=lambda p: p[0]["kv"])
+        if not pares:
+            continue
+        canales = [c for c in app.TRIGGERS if any(c in res for _, res in pares)]
+        n_cav = n_cavidades(pares[0][0].get("carpeta", ""))
+        kvs = [d["kv"] for d, _ in pares]
+        filas_csv = [["Probeta", "Voltage (kV)", "Sensor", "Disparos", "N̄_PD", "σ N_PD"]]
+        fig, ax = plt.subplots(figsize=(11.69, 4.6))
+        if n_cav:
+            ax.axhline(n_cav, color="#9aa3ad", ls="--", lw=1.0, label=f"N_cav = {n_cav}")
+        for k, c in enumerate(canales):
+            kv, m, sd = [], [], []
+            for d, res in pares:
+                r = res.get(c)
+                if r is None or not len(r["cuentas"]):
+                    continue
+                x = np.asarray(r["cuentas"], dtype=float)
+                kv.append(d["kv"])
+                m.append(float(np.mean(x)))
+                sd.append(float(np.std(x)))
+                filas_csv.append([prob, f"{d['kv']:g}", r["fila"]["sensor"], str(x.size), f"{m[-1]:.3f}",
+                                  f"{sd[-1]:.3f}"])
+            if not kv:
+                continue
+            sensor = next(res[c]["fila"]["sensor"] for _, res in pares if c in res)
+            dx = (k - (len(canales) - 1) / 2) * 0.08   # separa las barras de error
+            ax.errorbar(np.array(kv) + dx, m, yerr=sd, color=tema.COLORES_CANALES[c], marker="o",
+                        ms=5, lw=1.4, capsize=3, elinewidth=0.8, label=f"{sensor} ({c.upper()})")
+        ax.set_xticks(kvs)
+        ax.set_xlabel("Tensión [kV]", fontsize=9)
+        ax.set_ylabel("N̄_PD (descargas por disparo)", fontsize=9)
+        ax.set_ylim(bottom=0)
+        ax.grid(True, color="#e5e7eb", lw=0.6)
+        ax.tick_params(labelsize=8)
+        for lado in ("top", "right"):
+            ax.spines[lado].set_visible(False)
+        ax.legend(fontsize=8, frameon=False, loc="upper left")
+        fig.suptitle(f"{prob} · N_PD medio por disparo vs tensión (barras: ± 1 σ)",
+                     fontsize=12, fontweight="bold", x=0.02, ha="left")
+        fig.tight_layout()
+        ruta = os.path.join(salida, f"npd_media_vs_tension{'_' + prob if len(probetas) > 1 else ''}.png")
+        fig.savefig(ruta, dpi=160)
+        with open(ruta[:-4] + ".csv", "w", encoding="utf-8", newline="") as f:
+            csv.writer(f).writerows(filas_csv)
+        plt.close(fig)
+        print(f"Gráfica: {ruta}")
+
+
 # ---------------- Principal ----------------
 
 def generar(salida):
@@ -540,6 +596,7 @@ def generar(salida):
     graficas_tension(salida, descs, todos)
     grafica_cociente_vp(salida, descs, todos)
     grafica_densidad_tension(salida, descs, todos)
+    grafica_npd_media(salida, descs, todos)
 
 
 def main():
