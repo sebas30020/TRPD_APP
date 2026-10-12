@@ -44,14 +44,15 @@ def lag_guardado_us(carpeta, canal):
     return app.lag_canal(app.calibracion_desde_metadata(carpeta), carpeta, canal)
 
 
-def resultado_canal(carpeta, canal):
+def resultado_canal(carpeta, canal, calibrado=True):
     """Captura editada, conteo por disparo y fila de la tabla del canal, o None si
-    el canal no tiene trigger guardado."""
+    el canal no tiene trigger guardado. calibrado=False ignora calibracion_retardo
+    (t_lag = 0)."""
     cfg = trigger_guardado(carpeta, canal)
     if cfg is None or canal not in app.canales_presentes(carpeta):
         return None
     ed = app.ediciones_canal(carpeta, canal)
-    t_lag = lag_guardado_us(carpeta, canal)
+    t_lag = lag_guardado_us(carpeta, canal) if calibrado else 0.0
     args = (carpeta, canal, cfg["umbral"], cfg["dist"], cfg["tmin"])
     cap = app.captura_editada(*args, filtrado=cfg["filtrado"], ediciones=ed)
     segs, cuentas = app.contar_peaks(*args, ediciones=ed, filtrado=cfg["filtrado"])
@@ -61,11 +62,11 @@ def resultado_canal(carpeta, canal):
             "fila": fila, "n_ediciones": len(ed["historial"])}
 
 
-def resultado_medicion(carpeta):
+def resultado_medicion(carpeta, calibrado=True):
     """{canal: resultado_canal} de los canales trigger con trigger guardado."""
     out = {}
     for ch in app.TRIGGERS:
-        r = resultado_canal(carpeta, ch)
+        r = resultado_canal(carpeta, ch, calibrado)
         if r is None:
             print(f"Aviso: {rutas.etiqueta(carpeta)} {ch.upper()} sin trigger guardado; se omite.")
         else:
