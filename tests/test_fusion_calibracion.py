@@ -16,7 +16,7 @@ import persistencia
 from persistencia import fusionar_con_bloque_previo
 
 
-def _previo(ref="t10", criterio="pico_primer_lobulo"):
+def _previo(ref="t10", criterio="franja_t10"):
     return {
         "fecha": "2026-09-01", "fuente_calibracion": "antes", "criterio": criterio,
         "referencia_impulso": ref,
@@ -27,7 +27,7 @@ def _previo(ref="t10", criterio="pico_primer_lobulo"):
 
 
 def _nuevo(ref="t10"):
-    return {"fecha": "2026-10-09", "fuente_calibracion": "ahora", "criterio": "pico_primer_lobulo",
+    return {"fecha": "2026-10-09", "fuente_calibracion": "ahora", "criterio": "franja_t10",
             "referencia_impulso": ref,
             "ch4": {"sensor": "Antena 2", "t_lag_ns": 20.0, "sigma_ns": 0.5, "n_valid": 50, "n_total": 50}}
 
@@ -48,8 +48,8 @@ def test_descarta_si_cambia_la_referencia():
 
 
 def test_descarta_si_cambia_el_criterio_de_arribo():
-    # Calibración guardada con el antiguo primer cruce del umbral (o sin criterio)
-    for previo in (_previo(criterio="primer_cruce_umbral"),
+    # Calibraciones guardadas con criterios anteriores (o sin criterio)
+    for previo in (_previo(criterio="primer_cruce_umbral"), _previo(criterio="pico_primer_lobulo"),
                    {k: v for k, v in _previo().items() if k != "criterio"}):
         bloque, cons, desc = fusionar_con_bloque_previo(_nuevo(), previo)
         assert cons == [] and desc == ["ch2", "ch3"]

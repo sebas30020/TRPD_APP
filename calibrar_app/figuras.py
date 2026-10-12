@@ -19,7 +19,7 @@ from datos import (
     umbral_defecto,
     _muestras,
 )
-from arribo import t_arribo
+from arribo import arribo_canal, snr_disparo, SNR_MIN, FRANJA_DEFECTO_US, t10_por_disparo, franja_disparo
 from ediciones import estado_ediciones
 
 _COLORES_CANALES = tema.COLORES_CANALES
@@ -174,16 +174,21 @@ def figura_canal(carpeta: str, canal: str, seg: int,
 
         # Canales sensores (CH2, CH3, CH4)
         cfg_c = cfg.get(c, {})
-        tmin_c = float(cfg_c.get("tmin", tmin if tmin is not None else 0.15))
+        tmin_c = float(cfg_c.get("tmin", tmin if tmin is not None else FRANJA_DEFECTO_US[0]))
         u_c = u_canales.get(c, float(umbral_defecto(carpeta, c, seg=seg)))
 
         tmax_c = cfg_c.get("tmax")
         tmax_c = float(tmax_c) if tmax_c is not None else None
 
-        # Líneas verticales de t_mín y t_máx (franja de búsqueda del arribo) por canal
-        fig.add_vline(x=tmin_c, row=i, col=1, line=dict(color=tema.MUTED_LIGHT, width=1, dash="dash"))
-        if tmax_c is not None:
-            fig.add_vline(x=tmax_c, row=i, col=1, line=dict(color=tema.MUTED_LIGHT, width=1, dash="dash"))
+        # Franja de búsqueda del arribo: [t_mín, t_máx] relativos al t10 de este disparo
+        try:
+            a0, a1 = franja_disparo(t10_por_disparo(carpeta), seg, tmin_c, tmax_c)
+        except Exception:
+            a0, a1 = None, None
+        if a0 is not None:
+            fig.add_vline(x=a0, row=i, col=1, line=dict(color=tema.MUTED_LIGHT, width=1, dash="dash"))
+            if np.isfinite(a1):
+                fig.add_vline(x=a1, row=i, col=1, line=dict(color=tema.MUTED_LIGHT, width=1, dash="dash"))
 
         # Marca temporal de edición (clic sobre la señal o valor escrito)
         if marca and marca.get("canal") == c and marca.get("seg") == seg and marca.get("t_us") is not None:
@@ -195,12 +200,20 @@ def figura_canal(carpeta: str, canal: str, seg: int,
         dist_m = _muestras(carpeta, c, dist_us) or 1
         manual = seg in est["manuales"]
         quitado = seg in est["quitados"]
+        snr = None
         if manual:
             ta = est["manuales"][seg]
         elif quitado:
             ta = None
         else:
-            ta = t_arribo(t, v, u_c, dist_m, tmin_c, tmax_c) if v.size > 0 else None
+            # Misma validez que calibrar_retardo: ráfaga >= SNR_MIN × ruido de fondo
+            try:
+                snr = snr_disparo(carpeta, c, seg, tmin_c, tmax_c)[0]
+            except Exception:
+                snr = None
+            debil = snr is not None and snr < SNR_MIN
+            ta = (arribo_canal(t, v, c, u_c, a0, a1)
+                  if v.size > 0 and not debil and a0 is not None else None)
 
         tlag_str = "—"
         if ta is not None and v.size > 0:
@@ -231,9 +244,15 @@ def figura_canal(carpeta: str, canal: str, seg: int,
             badge_bg = tema.WARN_BG
             badge_border = tema.WARN
             badge_color = tema.WARN
+        elif snr is not None and snr < SNR_MIN:
+            anotacion_texto = (f"<b>{c.upper()}</b> · Ráfaga bajo el ruido de fondo (SNR {snr:.1f} < {SNR_MIN:g})"
+                               f" (no entra al promedio)")
+            badge_bg = tema.ERROR_BG
+            badge_border = tema.ERROR
+            badge_color = tema.ERROR
         else:
-            franja = f" en [{tmin_c:g}, {tmax_c:g}] µs" if tmax_c is not None else ""
-            anotacion_texto = f"<b>{c.upper()}</b> · Sin cruce de umbral{franja} (no entra al promedio)"
+            franja = f" en t10 + [{tmin_c:g}, {tmax_c:g}] µs" if tmax_c is not None else ""
+            anotacion_texto = f"<b>{c.upper()}</b> · Sin arribo{franja} (no entra al promedio)"
             badge_bg = tema.ERROR_BG
             badge_border = tema.ERROR
             badge_color = tema.ERROR

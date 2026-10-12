@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import urllib.parse
+import numpy as np
 from dash import Dash, html, dcc, Input, Output, State, ctx, no_update, ALL
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +31,8 @@ from datos import (
     cargar_segmento,
     VENTANA_T10,
 )
-from arribo import calibrar_retardo, pico_lobulo
+from arribo import (calibrar_retardo, pico_lobulo, ajustar_umbral, FRACCION_UMBRAL, SNR_MIN,
+                    FRANJA_DEFECTO_US, CANALES_MAXIMO)
 from referencia import (
     ancla_por_segmento,
     evaluar_segmento_iec,
@@ -254,6 +256,58 @@ def sincronizar_umbral(relayout: dict | None, carpeta: str, canal: str, u_actual
 
 
 @app.callback(
+    Output("umbral_ch2", "value", allow_duplicate=True),
+    Output("umbral_ch3", "value", allow_duplicate=True),
+    Output("umbral_ch4", "value", allow_duplicate=True),
+    Output("msg_feedback", "children", allow_duplicate=True),
+    Input("btn_ajustar_umbrales", "n_clicks"),
+    State("carpeta", "value"),
+    State("tmin_ch2", "value"),
+    State("tmax_ch2", "value"),
+    State("tmin_ch3", "value"),
+    State("tmax_ch3", "value"),
+    State("tmin_ch4", "value"),
+    State("tmax_ch4", "value"),
+    State("tmincal", "value"),
+    prevent_initial_call=True,
+    running=[(Output("btn_ajustar_umbrales", "disabled"), True, False)],
+)
+def ajustar_umbrales(n_clicks, carpeta, tmin2, tmax2, tmin3, tmax3, tmin4, tmax4, tmincal=None):
+    """Umbral de cada canal a partir de todos los disparos de la medición:
+    FRACCION_UMBRAL × mediana de la ráfaga en [t_mín, t_máx] de los disparos cuya
+    ráfaga supera SNR_MIN veces el ruido de fondo (arribo.ajustar_umbral)."""
+    if not n_clicks or not carpeta:
+        return (no_update,) * 4
+    franjas = {"ch2": (tmin2, tmax2), "ch3": (tmin3, tmax3), "ch4": (tmin4, tmax4)}
+    valores, partes = [], []
+    for ch, (tmin, tmax) in franjas.items():
+        if ch not in canales_presentes(carpeta):
+            valores.append(no_update)
+            continue
+        if ch in CANALES_MAXIMO:
+            valores.append(no_update)
+            partes.append(f"{ch.upper()}: sin umbral (arribo = máximo de |v| en su franja)")
+            continue
+        tmin = tmin if tmin is not None else (tmincal if tmincal is not None else FRANJA_DEFECTO_US[0])
+        r = ajustar_umbral(carpeta, ch, tmin, tmax)
+        if r["umbral_mv"] is None:
+            valores.append(no_update)
+            partes.append(f"{ch.upper()}: ningún disparo supera {SNR_MIN:g}× el ruido (umbral sin cambios)")
+            continue
+        u = round(r["umbral_mv"], 2)
+        valores.append(u)
+        ruido = np.nanmedian([x for x in r["ruido_mv"] if x is not None])
+        partes.append(f"{ch.upper()}: {u:g} mV ({r['n_validos']}/{r['n_total']} disparos válidos, "
+                      f"ruido {ruido:.1f} mV)")
+    msg = html.Div(
+        f"✓ Umbrales ajustados ({FRACCION_UMBRAL:.0%} de la mediana de la ráfaga, disparos con "
+        f"ráfaga ≥ {SNR_MIN:g}× ruido de fondo) · " + " · ".join(partes) + ". Pulse «Calcular Retardo».",
+        style={"color": tema.OK, "backgroundColor": tema.OK_BG, "padding": "8px 12px",
+               "borderRadius": "4px", "border": f"1px solid {tema.OK}"})
+    return (*valores, msg)
+
+
+@app.callback(
     Output("umbral_ch2", "value"),
     Output("tmin_ch2", "value"),
     Output("umbral_ch3", "value"),
@@ -337,7 +391,8 @@ def sincronizar_triggers(
         val_u4 = round(float(umbral_defecto(carpeta, "ch4", seg=1)), 2) if "ch4" in disp else 50.0
         ch_act = "ch4" if canal == "todos" else canal
         val_ucal = val_u4 if ch_act == "ch4" else (val_u2 if ch_act == "ch2" else val_u3)
-        return (val_u2, 0.15, val_u3, 0.15, val_u4, 0.15, val_ucal)
+        f0 = FRANJA_DEFECTO_US[0]   # t_mín relativo al t10
+        return (val_u2, f0, val_u3, f0, val_u4, f0, val_ucal)
 
     return (no_update,) * 7
 
@@ -721,7 +776,7 @@ def calcular_retardo_canal(
     for c in canales_calc:
         u_cfg, tm_cfg = cfg_map.get(c, (None, None))
         u = float(u_cfg if u_cfg is not None else umbral_defecto(carpeta, c, seg=1))
-        tm = float(tm_cfg if tm_cfg is not None else (tmincal or 0.15))
+        tm = float(tm_cfg if tm_cfg is not None else (tmincal if tmincal is not None else FRANJA_DEFECTO_US[0]))
         res = calibrar_retardo(
             carpeta=carpeta,
             canal=c,

@@ -675,8 +675,9 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
     bloque = {
         "fecha": str(fecha),
         "fuente_calibracion": fuente,
-        # Arribo = máximo de |v| de la primera oscilación que cruza el umbral (calibrar_app/arribo.py)
-        "criterio": "pico_primer_lobulo",
+        # Franjas relativas al t10; HFCT: máximo de |v| en la franja; antenas: máximo de la
+        # primera oscilación que supera el umbral (calibrar_app/arribo.py)
+        "criterio": "franja_t10",
         "referencia": ref_legado,
         "referencia_impulso": referencia_impulso,
     }
@@ -705,6 +706,13 @@ def bloque_calibracion_retardo(resultados, fuente, sensores=None, fecha=None,
             if params.get("tmax_us") is not None:
                 # Fin de la ventana de búsqueda del arribo (solo calibración)
                 bloque[ch]["tmax_us"] = round(float(params["tmax_us"]), 4)
+            if r.get("arribo"):
+                bloque[ch]["arribo"] = r["arribo"]
+                bloque[ch]["franja_referencia"] = "t10"   # tmin_us/tmax_us relativos al t10
+            if params.get("snr_min") is not None:
+                # Validez: ráfaga >= snr_min × ruido de fondo (inicio del registro)
+                bloque[ch]["snr_min"] = float(params["snr_min"])
+                bloque[ch]["n_bajo_ruido"] = int(r.get("n_bajo_ruido") or 0)
             if filtros and ch in filtros:
                 # Filtro digital con que se midió el arribo (ver filtros.py)
                 bloque[ch]["filtro"] = filtros[ch]
