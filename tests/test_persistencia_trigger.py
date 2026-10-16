@@ -144,3 +144,64 @@ def test_valores_por_defecto_sin_trigger_guardado(medicion):
     assert cfg == {"ch2": {"umbral": 130.0, "dist": 0.03, "tmin": 0.3},
                    "ch3": {"umbral": 50.0, "dist": 0.03, "tmin": 0.3},
                    "ch4": {"umbral": 40.0, "dist": 0.03, "tmin": 0.3}}
+
+
+class _CtxCarga(_Ctx):
+    def __init__(self, *prop_ids):
+        super().__init__(prop_ids[0])
+        self.triggered_prop_ids = {p: p.split(".")[0] for p in prop_ids}
+
+
+def test_cargar_analisis_guardado(medicion):
+    """«Cargar análisis guardado» rehace la captura (mapa conjunto) con los triggers de
+    metadata.yaml de la señal vigente, sin tocar el archivo."""
+    carpeta, ruta = medicion
+    app.guardar_trigger_canales(carpeta, {"ch3": {"umbral": 20.0, "dist": 0.05, "tmin": -1.0},
+                                          "ch4": {"umbral": 60.0, "dist": 0.05, "tmin": -1.0}},
+                                filtrado=False)
+    app.guardar_trigger_canales(carpeta, {"ch2": {"umbral": 9.0, "dist": 0.05, "tmin": -1.0}},
+                                filtrado=True)
+    assert set(app.triggers_guardados(carpeta, filtrado=False)) == {"ch3", "ch4"}
+    assert set(app.triggers_guardados(carpeta, filtrado=True)) == {"ch2"}
+
+    mtime = os.path.getmtime(ruta)
+    import dash
+    app.ctx = _CtxCarga("btn_cargar_guardado.n_clicks")
+    try:
+        # Trigger activo sin trigger guardado (ch2 con señal sin filtro): toma el primero
+        p = app.fijar_captura(0, carpeta, "ch2", *[None] * 9, (), carpeta, "ch2", 0, None, 1)
+        assert p["canal"] == "ch3" and p["umbral"] == 20.0 and p["cargado"]
+        assert p["multi"] == {"ch3": {"umbral": 20.0, "dist": 0.05, "tmin": -1.0},
+                              "ch4": {"umbral": 60.0, "dist": 0.05, "tmin": -1.0}}
+        # El mismo clic cambia el selector a ch3: manda la carga, no se pierde la captura
+        app.ctx = _CtxCarga("canal.value", "btn_cargar_guardado.n_clicks")
+        assert app.fijar_captura(0, carpeta, "ch3", *[None] * 9, (), carpeta, "ch3", 0, None, 1) == p
+        # La vuelta del selector (canal ya fijado) no rehace nada
+        app.ctx = _CtxCarga("canal.value")
+        assert app.fijar_captura(0, carpeta, "ch3", *[None] * 9, (), carpeta, "ch3", 0, p, 1) is dash.no_update
+        # Cambiar a ch4 del mapa conjunto: ya no es una carga (la tabla no se rehace entera)
+        p4 = app.fijar_captura(0, carpeta, "ch4", *[None] * 9, (), carpeta, "ch4", 0, p, 1)
+        assert p4["canal"] == "ch4" and p4["umbral"] == 60.0 and "cargado" not in p4
+        # Sin triggers guardados para la señal: no cambia nada
+        app.ctx = _CtxCarga("btn_cargar_guardado.n_clicks")
+        assert app.captura_guardada(carpeta, "ch4", filtrado=True)["multi"].keys() == {"ch2"}
+    finally:
+        app.ctx = dash.ctx
+    assert os.path.getmtime(ruta) == mtime
+
+
+def test_cargar_rehace_filas_de_densidad(medicion, monkeypatch):
+    carpeta, _ = medicion
+    monkeypatch.setattr(app, "calcular_fila_densidad",
+                        lambda c, ch, u, d, t, **k: {"id": f"{c}_{ch}", "umbral": u})
+    monkeypatch.setattr(app, "lag_canal", lambda *a: 0.0)
+    monkeypatch.setattr(app, "ctx", _Ctx("captura_params.data"))
+    p = {"carpeta": carpeta, "canal": "ch4", "umbral": 60.0, "dist": 0.05, "tmin": -1.0,
+         "filtrado": False, "cargado": True,
+         "multi": {"ch3": {"umbral": 20.0, "dist": 0.05, "tmin": -1.0},
+                   "ch4": {"umbral": 60.0, "dist": 0.05, "tmin": -1.0}}}
+    previas = [{"id": "otra_ch4", "umbral": 1.0}, {"id": f"{carpeta}_ch4", "umbral": 99.0}]
+    # Aunque la pestaña Estadística no esté visible
+    filas = app.actualizar_densidad_store(p, 0, 0, None, previas, *[None] * 9, None, "senales")
+    assert filas == [{"id": "otra_ch4", "umbral": 1.0}, {"id": f"{carpeta}_ch3", "umbral": 20.0},
+                     {"id": f"{carpeta}_ch4", "umbral": 60.0}]

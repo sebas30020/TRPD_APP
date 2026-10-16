@@ -2137,6 +2137,11 @@ app.layout = html.Div(
                             style=tema.ESTILO_BOTON_SECONDARY,
                             title=("Detecta los peaks de CH2, CH3 y CH4 con el umbral, Δt y t_mín de "
                                    "cada uno y los superpone en el mismo mapa TRPD")),
+                html.Button("📂 Cargar análisis guardado", id="btn_cargar_guardado", n_clicks=0,
+                            style=tema.ESTILO_BOTON_SECONDARY,
+                            title=("Lee de metadata.yaml el trigger guardado de cada sensor y rehace "
+                                   "el mapa TRPD (con los peaks añadidos/quitados) y la tabla de densidad")),
+                html.Span(id="aviso_carga_guardado", style={"fontSize": "12px"}),
                 html.Div(
                     dcc.Checklist(
                         id="switch_filtros",
@@ -2835,9 +2840,10 @@ def mover_segmento(n_prev, n_next, valor, seg_max):
     Input("carpeta", "value"),
     Input("grafico", "relayoutData"),
     Input("switch_filtros", "value"),
+    Input("btn_cargar_guardado", "n_clicks"),
     prevent_initial_call=False,
 )
-def sincronizar_parametros_sensores(carpeta, relayout, sw_filtros=("on",)):
+def sincronizar_parametros_sensores(carpeta, relayout, sw_filtros=("on",), _n_cargar=None):
     try:
         trig = ctx.triggered_id
     except Exception:
@@ -3134,10 +3140,12 @@ def ir_a_pestana_calibracion(n_clicks):
     Input("canal", "value"),
     Input("btn_multi", "n_clicks"),
     State("captura_params", "data"),
-    running=[(Output("btn", "disabled"), True, False), (Output("btn_multi", "disabled"), True, False)],
+    Input("btn_cargar_guardado", "n_clicks"),
+    running=[(Output("btn", "disabled"), True, False), (Output("btn_multi", "disabled"), True, False),
+             (Output("btn_cargar_guardado", "disabled"), True, False)],
 )
 def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4, sw_filtros=("on",),
-                  _carpeta_in=None, _canal_in=None, n_multi=None, previo=None):
+                  _carpeta_in=None, _canal_in=None, n_multi=None, previo=None, _n_cargar=None):
     """Fija el snapshot de parámetros al pulsar el botón. Todos los análisis
     derivan de aquí, garantizando que scatter y ventanas usan el mismo conjunto.
     «Calcular todos los sensores» guarda además en `multi` la configuración de cada
@@ -3151,10 +3159,24 @@ def fijar_captura(n_clicks, carpeta, canal, u2, d2, t2, u3, d3, t3, u4, d4, t4, 
         trig = ctx.triggered_id
     except Exception:
         trig = None
+    try:
+        if "btn_cargar_guardado.n_clicks" in ctx.triggered_prop_ids:
+            # El mismo clic puede cambiar el selector de canal (avisar_carga_guardada):
+            # manda la carga.
+            trig = "btn_cargar_guardado"
+    except Exception:
+        pass
     multi_previo = (previo or {}).get("multi") if (previo or {}).get("carpeta") == carpeta else None
     if trig == "canal" and multi_previo and canal in multi_previo:
+        if previo.get("canal") == canal:
+            return no_update   # p. ej. «Cargar análisis guardado» ya fijó este trigger
         cfg = multi_previo[canal]
-        return dict(previo, canal=canal, umbral=cfg["umbral"], dist=cfg["dist"], tmin=cfg["tmin"])
+        out = dict(previo, canal=canal, umbral=cfg["umbral"], dist=cfg["dist"], tmin=cfg["tmin"])
+        out.pop("cargado", None)
+        return out
+    if trig == "btn_cargar_guardado":
+        p = captura_guardada(carpeta, canal, _filtrado(sw_filtros)) if carpeta else None
+        return p if p else no_update
     if trig in ("carpeta", "canal"):
         # Otra medición u otro canal: los resultados anteriores ya no corresponden.
         return None
@@ -3205,6 +3227,80 @@ def _guardar_trigger_captura(p):
     ok, msg = guardar_trigger_canales(p["carpeta"], cfgs, filtrado=p.get("filtrado", True))
     if not ok:
         print(f"Advertencia: no se guardó el trigger en metadata.yaml ({msg})")
+
+
+def triggers_guardados(carpeta, filtrado=True):
+    """{ch: {umbral, dist, tmin}} de los sensores presentes con trigger guardado en
+    metadata.yaml (canales.<ch>.trigger) para esta señal (con/sin filtro). El umbral
+    se redondea como en los campos para que la captura no quede en vista previa."""
+    if not carpeta:
+        return {}
+    canales_meta = obtener_metadata(carpeta).get("canales") or {}
+    presentes = canales_presentes(carpeta)
+    out = {}
+    for ch in TRIGGERS:
+        info = canales_meta.get(ch)
+        trig = info.get("trigger") if isinstance(info, dict) else None
+        if ch not in presentes or not isinstance(trig, dict) or trig.get("umbral_mv") is None:
+            continue
+        if trig.get("filtrado", filtrado) != filtrado:
+            continue
+        out[ch] = {
+            "umbral": round(float(trig["umbral_mv"]), 4),
+            "dist": float(trig["distancia_us"]) if trig.get("distancia_us") is not None else DIST_DEFECTO_US,
+            "tmin": float(trig["tmin_us"]) if trig.get("tmin_us") is not None else TMIN_DEFECTO_US,
+        }
+    return out
+
+
+def captura_guardada(carpeta, canal, filtrado=True):
+    """Captura (como la de «Calcular todos los sensores») rehecha con los triggers
+    guardados en metadata.yaml. Trigger activo: `canal` si tiene trigger guardado, si
+    no el primero que lo tenga. `cargado` marca que la tabla de densidad debe ponerse
+    al día con todos los sensores. None si no hay triggers guardados para esta señal."""
+    guard = triggers_guardados(carpeta, filtrado)
+    if not guard:
+        return None
+    activo = canal if canal in guard else next(iter(guard))
+    return {"carpeta": carpeta, "canal": activo, **guard[activo],
+            "cfg_sensores": config_sensores_defecto(carpeta, filtrado=filtrado),
+            "filtrado": filtrado, "multi": {ch: dict(c) for ch, c in guard.items()},
+            "cargado": True}
+
+
+@app.callback(
+    Output("aviso_carga_guardado", "children"),
+    Output("canal", "value", allow_duplicate=True),
+    Input("btn_cargar_guardado", "n_clicks"),
+    Input("carpeta", "value"),
+    State("canal", "value"),
+    State("switch_filtros", "value"),
+    prevent_initial_call=True,
+)
+def avisar_carga_guardada(n, carpeta, canal, sw_filtros=("on",)):
+    """Resume qué se cargó y, si el trigger activo no tenía trigger guardado, cambia
+    el selector al trigger que usó la captura cargada."""
+    try:
+        trig = ctx.triggered_id
+    except Exception:
+        trig = None
+    if trig != "btn_cargar_guardado":
+        return "", no_update
+    if not carpeta:
+        return "Seleccione una medición.", no_update
+    filtrado = _filtrado(sw_filtros)
+    guard = triggers_guardados(carpeta, filtrado)
+    if not guard:
+        otra = triggers_guardados(carpeta, not filtrado)
+        if otra:
+            return (f"⚠ Los triggers guardados ({', '.join(c.upper() for c in otra)}) son "
+                    f"{'sin' if filtrado else 'con'} filtros: cambie «Filtros del paper».", no_update)
+        return "⚠ Esta medición no tiene triggers guardados.", no_update
+    n_ed = sum(len(ediciones_canal(carpeta, ch)["historial"]) for ch in guard)
+    activo = canal if canal in guard else next(iter(guard))
+    txt = (f"✓ Cargado: {', '.join(c.upper() for c in guard)}"
+           + (f" · {n_ed} ediciones" if n_ed else ""))
+    return txt, (activo if activo != canal else no_update)
 
 
 @app.callback(
@@ -3413,6 +3509,17 @@ def actualizar_densidad_store(p, n_todos, n_limpiar, store_ed, data_actual,
         trig = None
     if trig == "btn_limpiar_densidad":
         return []
+    if trig == "captura_params" and p and p.get("cargado"):
+        # «Cargar análisis guardado»: filas de todos los sensores cargados, aunque la
+        # pestaña Estadística no esté visible.
+        filas = [r for r in (data_actual or [])
+                 if r.get("id") not in {f"{p['carpeta']}_{ch}" for ch in p["multi"]}]
+        for ch, c in p["multi"].items():
+            filas.append(calcular_fila_densidad(
+                p["carpeta"], ch, c["umbral"], c["dist"], c["tmin"],
+                t_lag_us=lag_canal(cal_store, p["carpeta"], ch),
+                ediciones=_ed(store_ed, p["carpeta"], ch), filtrado=p.get("filtrado", True)))
+        return filas
     if tab != "estadistica" and trig in ("captura_params", "ediciones_peaks", "tabs_principal"):
         return no_update
 
