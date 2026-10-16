@@ -36,6 +36,7 @@ def test_fila_promedios_sobre_todas_las_descargas(monkeypatch):
     assert f["sensor"] == "Antena 1"
     assert f["distribucion"] == "[1, 0, 1, 2, 0, 0]"
     assert f["n_coinc"] == "2"
+    assert f["npd_media"] == "2.00"                 # cuentas [3, 3, 2, 0] -> 8/4
     # Todas las descargas activas (8), no solo los disparos con N_PD = N_cav:
     # media vpp = 20100/8 = 2512.5 mV, t_abs = 201/8 = 25.125 µs
     assert f["vpp_media"] == f"{20100 / 8 / 1000:.3f}"
@@ -64,6 +65,7 @@ def test_fila_respeta_excluidos(monkeypatch):
     ed = {"historial": [{"accion": "quitar", "puntos": [{"seg": 2, "t_us": 4.0}]}]}
     f = app.calcular_fila_densidad(CARPETA, "ch3", 1.0, 1.0, 0.0, ediciones=ed)
     assert f["n_coinc"] == "1"
+    assert f["npd_media"] == "1.75"                 # 7 descargas en 4 disparos
     assert f["vpp_media"] == f"{19700 / 7 / 1000:.3f}"   # 7 descargas activas
     assert f["tabs_media"] == f"{197 / 7:.3f}"
     assert f["vpp_media_cav"] == "0.200"     # solo queda el seg 1 con 3 peaks
@@ -99,7 +101,7 @@ def test_construir_tabla_paper_agrupa_por_medicion():
                           "_carpeta": carpeta, "_canal": ch, "_n_cav": n, "_voltage_kv": v})
     cont = app.construir_tabla_paper(filas)
     tabla = _buscar(cont, lambda c: isinstance(c, html.Table), [])[0]
-    assert _contar(tabla, html.Th) == 10
+    assert _contar(tabla, html.Th) == 9
     con_span = _buscar(tabla, lambda c: isinstance(c, html.Td) and getattr(c, "rowSpan", None) == 3, [])
     assert len(con_span) == 6                       # specimen, d, voltage × 2 grupos
     specimens = [c.children for c in _buscar(tabla, lambda c: getattr(c, "className", None) == "tp-specimen", [])]
@@ -113,6 +115,19 @@ def test_tabla_vacia_y_csv():
     cab = csv.splitlines()[0]
     assert cab.startswith("Specimen,d (mm),Voltage (kV),Sensor")
     assert "_carpeta" not in csv
+    assert cab.split(",")[-4:] == ["N_PD = N_cav", "N̄_PD", "V̄_pp | N_PD = N_cav (V)",
+                                  "t̄_abs | N_PD = N_cav (µs)"]
+
+
+def test_png_tabla_densidad():
+    filas = [{"specimen": "1v", "diametro": "4", "voltage": "10", "sensor": s,
+              "distribucion": "[0, 6, 4, 0, 0, 0]", "n_coinc": "6", "npd_media": "1.40",
+              "vpp_media_cav": "0.187", "tabs_media_cav": "0.570",
+              "_carpeta": "x/10kV", "_canal": ch, "_n_cav": 1, "_voltage_kv": 10.0}
+             for ch, s in [("ch3", "Antena 1"), ("ch2", "HFCT")]]
+    png = app.png_tabla_densidad(filas)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 1000
+    assert [f["_canal"] for g in app._grupos_tabla(filas) for f in g] == ["ch2", "ch3"]
 
 
 def test_nota_filtros():

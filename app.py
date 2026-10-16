@@ -1381,8 +1381,7 @@ COLUMNAS_DENSIDAD = [
     {"name": "Sensor", "id": "sensor"},
     {"name": "N_PD distribution [0, 1, 2, 3, 4, > 4]", "id": "distribucion"},
     {"name": "N_PD = N_cav", "id": "n_coinc"},
-    {"name": "V̄_pp (V)", "id": "vpp_media"},
-    {"name": "t̄_abs (µs)", "id": "tabs_media"},
+    {"name": "N̄_PD", "id": "npd_media"},
     {"name": "V̄_pp | N_PD = N_cav (V)", "id": "vpp_media_cav"},
     {"name": "t̄_abs | N_PD = N_cav (µs)", "id": "tabs_media_cav"},
 ]
@@ -1404,11 +1403,12 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
                            filtrado=True):
     """Fila de la tabla de estadística con el formato de la Tabla 1 del paper:
     Specimen (Nv), d (mm), Voltage (kV), Sensor, N_PD distribution [0, 1, 2, 3, 4, > 4],
-    N_PD = N_cav, V̄_pp (V) y t̄_abs (µs), en dos versiones:
-      - vpp_media / tabs_media: sobre todas las descargas activas del canal (las
-        mismas que dibuja el mapa TRPD: detectadas no quitadas + añadidas a mano);
-      - vpp_media_cav / tabs_media_cav: solo sobre las descargas de los disparos
-        con N_PD == N_cav ("-" si no hay ninguno o no se conoce N_cav).
+    N_PD = N_cav, N̄_PD (media de N_PD por disparo, de la distribución), V̄_pp (V) y
+    t̄_abs (µs):
+      - vpp_media_cav / tabs_media_cav (mostradas): solo sobre las descargas de los
+        disparos con N_PD == N_cav ("-" si no hay ninguno o no se conoce N_cav);
+      - vpp_media / tabs_media (no mostradas, las usan los generadores de informes):
+        sobre todas las descargas activas del canal (detectadas no quitadas + añadidas).
     `ediciones`: ediciones manuales del canal."""
     meta = obtener_metadata(carpeta)
     prob = meta.get("probeta") or {}
@@ -1442,6 +1442,7 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
         distribucion = "[" + ", ".join(str(x) for x in c) + "]"
     else:
         distribucion = "[0, 0, 0, 0, 0, 0]"
+    npd_media = f"{float(np.mean(cuentas_arr)):.2f}" if cuentas_arr.size else "-"
 
     if n_cav:
         n_coinc = str(int(np.sum(cuentas_arr == n_cav))) if cuentas_arr.size else "0"
@@ -1470,6 +1471,7 @@ def calcular_fila_densidad(carpeta, canal, umbral, dist_us, tmin, t_lag_us=0.0, 
         "sensor": sensor,
         "distribucion": distribucion,
         "n_coinc": n_coinc,
+        "npd_media": npd_media,
         "vpp_media": vpp_media,
         "tabs_media": tabs_media,
         "vpp_media_cav": vpp_media_cav,
@@ -1492,19 +1494,20 @@ def _cabecera_tabla_paper():
         html.Th("Sensor"),
         html.Th(["N", html.Sub("PD"), " distribution", html.Br(), "[0, 1, 2, 3, 4, > 4]"]),
         html.Th(["N", html.Sub("PD"), " = N", html.Sub("cav")]),
-        html.Th(["V̄", html.Sub("pp"), " (V)", html.Br(), "todas"]),
-        html.Th(["t̄", html.Sub("abs"), " (µs)", html.Br(), "todas"]),
+        html.Th(["N̄", html.Sub("PD")]),
         html.Th(["V̄", html.Sub("pp"), " (V)", html.Br(), "N", html.Sub("PD"), " = N", html.Sub("cav")]),
         html.Th(["t̄", html.Sub("abs"), " (µs)", html.Br(), "N", html.Sub("PD"), " = N", html.Sub("cav")]),
     ])
 
 
-def construir_tabla_paper(filas):
-    """Tabla HTML con el formato de la Tabla 1 del paper: Specimen, d (mm) y
-    Voltage combinados (rowSpan) por medición; una fila por sensor."""
-    if not filas:
-        return html.Div("Sin datos: pulse 'Calcular todos los sensores'.",
-                        className="tabla-paper-vacia")
+NOTA_MEDIAS_TABLA = ("N̄_PD: media de descargas por disparo (de la distribución). "
+                     "V̄_pp y t̄_abs: solo las descargas de los disparos con tantas descargas "
+                     "como vacuolas (N_PD = N_cav).")
+
+
+def _grupos_tabla(filas):
+    """Filas agrupadas por medición (ordenadas por nº de cavidades y tensión) y, dentro
+    de cada grupo, por canal (CH2, CH3, CH4)."""
     orden_ch = {"ch2": 0, "ch3": 1, "ch4": 2}
     grupos = {}
     for f in filas:
@@ -1515,9 +1518,18 @@ def construir_tabla_paper(filas):
         n, v = f0.get("_n_cav"), f0.get("_voltage_kv")
         return (n is None, n or 0, v is None, v or 0.0, str(item[0]))
 
+    return [sorted(g, key=lambda f: orden_ch.get(f.get("_canal"), 9))
+            for _, g in sorted(grupos.items(), key=clave_grupo)]
+
+
+def construir_tabla_paper(filas):
+    """Tabla HTML con el formato de la Tabla 1 del paper: Specimen, d (mm) y
+    Voltage combinados (rowSpan) por medición; una fila por sensor."""
+    if not filas:
+        return html.Div("Sin datos: pulse 'Calcular todos los sensores'.",
+                        className="tabla-paper-vacia")
     cuerpo = []
-    for _, grupo in sorted(grupos.items(), key=clave_grupo):
-        grupo = sorted(grupo, key=lambda f: orden_ch.get(f.get("_canal"), 9))
+    for grupo in _grupos_tabla(filas):
         span = len(grupo)
         for k, f in enumerate(grupo):
             celdas = []
@@ -1531,20 +1543,15 @@ def construir_tabla_paper(filas):
                 html.Td(f.get("sensor")),
                 html.Td(f.get("distribucion"), className="tp-distribucion"),
                 html.Td(f.get("n_coinc")),
-                html.Td(f.get("vpp_media")),
-                html.Td(f.get("tabs_media")),
+                html.Td(f.get("npd_media", "-")),
                 html.Td(f.get("vpp_media_cav", "-")),
                 html.Td(f.get("tabs_media_cav", "-")),
             ]
             cuerpo.append(html.Tr(celdas, className="tp-inicio-grupo" if k == 0 else None))
     tabla = html.Table([html.Thead(_cabecera_tabla_paper()), html.Tbody(cuerpo)],
                        className="tabla-paper")
-    nota_medias = ("V̄_pp y t̄_abs «todas»: media sobre todas las descargas activas de cada "
-                   "sensor (las del mapa TRPD: detectadas no quitadas + añadidas a mano). "
-                   "«N_PD = N_cav»: solo las descargas de los disparos con tantas descargas "
-                   "como vacuolas.")
     return html.Div([tabla, html.Div(nota_filtros_tabla(filas), className="tabla-paper-nota"),
-                     html.Div(nota_medias, className="tabla-paper-nota")])
+                     html.Div(NOTA_MEDIAS_TABLA, className="tabla-paper-nota")])
 
 
 def nota_filtros_tabla(filas):
@@ -1569,6 +1576,66 @@ def csv_tabla_densidad(filas):
     w.writerow([c["name"] for c in COLUMNAS_DENSIDAD])
     for f in filas or []:
         w.writerow([f.get(c["id"], "") for c in COLUMNAS_DENSIDAD])
+    return buf.getvalue()
+
+
+# Cabeceras de la imagen de la tabla (mathtext de matplotlib), en el orden de COLUMNAS_DENSIDAD.
+_CABECERAS_PNG = [
+    "Specimen", "d (mm)", "Voltage (kV)", "Sensor",
+    "$N_{PD}$ distribution\n[0, 1, 2, 3, 4, > 4]",
+    "$N_{PD} = N_{cav}$",
+    r"$\bar{N}_{PD}$",
+    "$\\bar{V}_{pp}$ (V)\n$N_{PD} = N_{cav}$",
+    "$\\bar{t}_{abs}$ (µs)\n$N_{PD} = N_{cav}$",
+]
+_ANCHOS_PNG = [0.08, 0.07, 0.09, 0.09, 0.19, 0.09, 0.07, 0.11, 0.11]
+
+
+def png_tabla_densidad(filas, dpi=200):
+    """PNG (bytes) de la tabla de estadística con el formato de la Tabla 1 del paper:
+    mismas columnas y orden que construir_tabla_paper, Specimen/d/Voltage escritos solo
+    en la primera fila de cada medición (celda combinada) y las notas al pie."""
+    import io
+    from matplotlib.figure import Figure   # sin pyplot: no toca el backend ni el arranque
+
+    texto, bloques = [], []          # bloques: (fila inicial, nº de filas) de cada medición
+    for grupo in _grupos_tabla(filas):
+        bloques.append((len(texto), len(grupo)))
+        for k, f in enumerate(grupo):
+            fila = [str(f.get(c["id"], "-")) for c in COLUMNAS_DENSIDAD]
+            if k != (len(grupo) - 1) // 2:   # texto de la celda combinada en la fila central
+                fila[:3] = ["", "", ""]
+            texto.append(fila)
+
+    alto_tabla = 0.42 * (len(texto) + 1.6)
+    fig = Figure(figsize=(11.0, alto_tabla + 0.7))
+    ax = fig.add_axes((0.01, 0.7 / (alto_tabla + 0.7), 0.98, alto_tabla / (alto_tabla + 0.7)))
+    ax.axis("off")
+    t = ax.table(cellText=texto, colLabels=_CABECERAS_PNG, colWidths=_ANCHOS_PNG,
+                 cellLoc="center", bbox=(0, 0, 1, 1))
+    t.auto_set_font_size(False)
+    t.set_fontsize(9)
+    alto_cab = 1.6 / (len(texto) + 1.6)
+    for (i, j), celda in t.get_celld().items():
+        celda.set_edgecolor("#9aa3ad")
+        celda.set_linewidth(0.6)
+        if i == 0:
+            celda.set_height(alto_cab)
+            celda.set_facecolor("#eef1f5")
+            celda.set_text_props(fontweight="bold")
+        else:
+            celda.set_height((1 - alto_cab) / len(texto))
+    for ini, n in bloques:           # celdas combinadas: sin bordes internos en Specimen/d/Voltage
+        if n == 1:
+            continue
+        for k in range(n):
+            bordes = "LRT" if k == 0 else ("LRB" if k == n - 1 else "LR")
+            for j in range(3):
+                t[ini + k + 1, j].visible_edges = bordes
+    notas = nota_filtros_tabla(filas) + "\n" + NOTA_MEDIAS_TABLA
+    fig.text(0.01, 0.08 / (alto_tabla + 0.7), notas, fontsize=7.5, color="#555555", va="bottom")
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, facecolor="white")
     return buf.getvalue()
 
 
@@ -2453,6 +2520,8 @@ app.layout = html.Div(
                                                     style=tema.ESTILO_BOTON_SECONDARY),
                                         html.Button("Exportar CSV", id="btn_exportar_densidad",
                                                     style=tema.ESTILO_BOTON_SECONDARY),
+                                        html.Button("Exportar PNG", id="btn_exportar_densidad_png",
+                                                    style=tema.ESTILO_BOTON_SECONDARY),
                                     ],
                                 ),
                             ],
@@ -2461,6 +2530,7 @@ app.layout = html.Div(
                             id="tabla_densidad", className="tabla-paper-contenedor",
                             children=construir_tabla_paper([]))),
                         dcc.Download(id="descarga_densidad"),
+                        dcc.Download(id="descarga_densidad_png"),
                     ],
                 ),
             ],
@@ -3407,6 +3477,18 @@ def exportar_densidad(n, data):
     if not n or not data:
         return no_update
     return dcc.send_string(csv_tabla_densidad(data), "tabla_densidad.csv")
+
+
+@app.callback(
+    Output("descarga_densidad_png", "data"),
+    Input("btn_exportar_densidad_png", "n_clicks"),
+    State("densidad_store", "data"),
+    prevent_initial_call=True,
+)
+def exportar_densidad_png(n, data):
+    if not n or not data:
+        return no_update
+    return dcc.send_bytes(png_tabla_densidad(data), "tabla_densidad.png")
 
 
 @app.callback(
