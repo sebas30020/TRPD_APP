@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'G:\\Mi unidad\\yo\\usm\\investigacion\\proyectos\\inv_pd_vac\\TRPD_APP\\.codex\\hooks\\session-start-load-memory.sh'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'G:\\Mi unidad\\yo\\usm\\investigacion\\proyectos\\inv_pd_vac\\TRPD_APP\\.codex\\hooks\\stop-require-ledger.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}
